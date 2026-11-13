@@ -7,7 +7,7 @@
  * ----------
  *   Inspector.init({ root } = {})          root = #inspector-root (default: that element; created on <body> when
  *                                          missing). Optional: every open call initialises on demand. Idempotent.
- *   Inspector.open(cardId, { sourceEl, back, cards, hideSource } = {}) -> Promise<void>
+ *   Inspector.open(cardId, { sourceEl, back, cards, hideSource, elementFor } = {}) -> Promise<void>
  *       Opens the card inspector on card 0..51. The promise resolves when the inspector has closed again (or was
  *       replaced by another open call). Never rejects; an invalid card id resolves at once.
  *       sourceEl    element whose on-screen rectangle the card flies out of, and back into on close (its
@@ -19,6 +19,9 @@
  *                   put first when it is not in the list.
  *       hideSource  hide sourceEl (visibility) while its card is "in the hand". Default: true when sourceEl is a
  *                   .card element, false otherwise. Always restored on close.
+ *       elementFor  (cardId) -> Element | null. Where a card lives on the table, for the flight home when the
+ *                   player has stepped to another card with previous / next. Default: SOL.Board.cardEl when
+ *                   SOL.Board exists (and a sourceEl was given), otherwise such a card just fades.
  *   Inspector.openGallery({ startCard, tab = 'cards', filter = 'all' } = {}) -> Promise<void>
  *       Opens the deck gallery. tab: 'cards' (carousel) | 'backs' (card back picker).
  *       filter: 'all' | 'spades' | 'hearts' | 'clubs' | 'diamonds' (or 0..3). Resolves when closed.
@@ -266,6 +269,8 @@
     index: 0,
     back: 'royal',
     sourceEl: null,
+    sourceId: -1, // the card sourceEl belongs to
+    elementFor: null, // optional resolver: card id -> its element on the table
     hideSource: false,
     hidden: null, // the element currently hidden with .insp-src-hidden
     fromGallery: false,
@@ -806,8 +811,8 @@
     haptic('tick');
     const A = SOL.Anim;
     const first = C.live
-      ? // back into the source (the game's card), or a plain fade when there is none / it came from the gallery
-        flyOut(C.active, s.view === 'card' && !C.fromGallery ? C.sourceEl : null)
+      ? // back to its place on the table, or a plain fade when it has none / it came from the gallery
+        flyOut(C.active, s.view === 'card' && !C.fromGallery && C.active ? homeOf(C.active.id) : null)
       : A.wait(190);
     if (G.live) galleryStop();
     Promise.resolve(first)
@@ -1946,6 +1951,8 @@
     C.index = Math.max(0, p.list.indexOf(p.id));
     C.back = p.back;
     C.sourceEl = p.sourceEl || null;
+    C.sourceId = p.id;
+    C.elementFor = typeof p.elementFor === 'function' ? p.elementFor : null;
     C.fromGallery = !!p.fromGallery;
     C.hideSource =
       p.hideSource !== undefined && p.hideSource !== null
@@ -1984,10 +1991,26 @@
     ui.root.focus({ preventScroll: true });
   }
 
+  /**
+   * The element on the table a card flies home to: the source it came out of, or — after previous / next —
+   * that card's own element when someone can tell us where it is. null: it just fades.
+   */
+  function homeOf(id) {
+    if (id === C.sourceId && C.sourceEl) return C.sourceEl;
+    try {
+      if (C.elementFor) return C.elementFor(id) || null;
+      if (C.sourceEl && SOL.Board && typeof SOL.Board.cardEl === 'function') return SOL.Board.cardEl(id) || null;
+    } catch (err) {
+      /* no home: fade */
+    }
+    return null;
+  }
+
   function destroyCardView() {
     if (!C.live) return;
     C.live = false;
     C.returning = false;
+    C.elementFor = null;
     for (const o of C.objs.slice()) destroyObj(o);
     C.objs.length = 0;
     C.active = null;
@@ -3306,6 +3329,7 @@
       sourceEl: o.sourceEl || null,
       back: resolveBack(o.back),
       hideSource: o.hideSource,
+      elementFor: o.elementFor,
       fromGallery: false,
     });
     emit('inspector:open', { card: cardId, mode: 'card' });

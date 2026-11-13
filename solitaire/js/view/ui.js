@@ -766,83 +766,183 @@
   }
 
   function setDim(layer, v) {
-    layer.dim = v;
     layer.backdrop.style.opacity = String(clamp(v, 0, 1));
   }
 
-  /** Dialog pose for progress t (0 = away, 1 = in place; a spring may overshoot 1 a little). */
-  function setDialogT(layer, t, closing) {
-    layer.t = t;
-    const k = 1 - t;
+  // Where a dialog comes from and where it leaves to (3D: the layer has perspective).
+  const DIALOG_FROM = 'translate3d(0,30px,-80px) rotateX(-16deg) scale(0.91)';
+  const DIALOG_TO = 'translate3d(0,18px,-60px) rotateX(12deg) scale(0.94)';
+  // A touch of overshoot on the way in: the sheet rises a few pixels past its place and settles (the strip
+  // under it, .ui-sheet::after, covers the gap); a dialog tips slightly past flat.
+  const EASE_SHEET_IN = 'cubic-bezier(0.22, 1.12, 0.36, 1)';
+  const EASE_DIALOG_IN = 'cubic-bezier(0.2, 1.25, 0.4, 1)';
+  const EASE_OUT = 'cubic-bezier(0.4, 0, 1, 1)';
+
+  /** Duration for a CSS transition: follows the speed setting like SOL.Anim does; 0 under reduced motion. */
+  function transitionMs(ms) {
+    if (reducedMotion()) return 0;
+    const speed = SOL.Anim && SOL.Anim.speed > 0 ? SOL.Anim.speed : 1;
+    return Math.max(1, Math.round(ms / speed));
+  }
+
+  /**
+   * Calls fn once when the element's transform transition has ended — or after `ms` plus a margin, because a
+   * transition whose start and end are the same never runs and never reports. Returns cancel().
+   *
+   * Only 'transitionend' counts, never 'transitioncancel': when a sheet that is still sliding in is frozen
+   * (closed or grabbed mid-way), the cancel event of THAT transition arrives a frame later, when the next
+   * transition's waiter is already listening — it would take it for its own end.
+   */
+  function afterTransform(el, ms, fn) {
+    let done = false;
+    let timer = 0;
+    const finish = (e) => {
+      if (done || (e && (e.target !== el || e.propertyName !== 'transform'))) return;
+      done = true;
+      root.clearTimeout(timer);
+      el.removeEventListener('transitionend', finish);
+      fn();
+    };
+    el.addEventListener('transitionend', finish);
+    timer = root.setTimeout(() => finish(null), ms + 120);
+    return function cancel() {
+      if (done) return;
+      done = true;
+      root.clearTimeout(timer);
+      el.removeEventListener('transitionend', finish);
+    };
+  }
+
+  /** Stops whatever is moving the layer and leaves it exactly where it is on screen (inline, no transition). */
+  function freezeLayer(layer) {
     const sheet = layer.sheet;
-    sheet.style.opacity = String(clamp(t * 1.7, 0, 1));
-    sheet.style.transform = closing
-      ? 'translate3d(0,' + (k * 18).toFixed(1) + 'px,' + (k * -60).toFixed(1) + 'px) rotateX(' + (k * 12).toFixed(2) + 'deg) scale(' + (1 - k * 0.06).toFixed(4) + ')'
-      : 'translate3d(0,' + (k * 30).toFixed(1) + 'px,' + (k * -80).toFixed(1) + 'px) rotateX(' + (k * -16).toFixed(2) + 'deg) scale(' + (1 - k * 0.09).toFixed(4) + ')';
-  }
-
-  function stopLayerMotion(layer) {
-    if (layer.anim) layer.anim.cancel();
-    if (layer.fade) layer.fade.cancel();
+    if (layer.anim) layer.anim.cancel(); // a drag-release spring (SOL.Anim)
     layer.anim = null;
-    layer.fade = null;
+    if (layer.afterMotion) layer.afterMotion();
+    layer.afterMotion = null;
+    if (sheet.style.transition && sheet.style.transition !== 'none') {
+      // a CSS transition is in flight: pin the pose it has reached
+      const cs = root.getComputedStyle(sheet);
+      const pose = cs.transform;
+      const opacity = cs.opacity;
+      sheet.style.transition = 'none';
+      sheet.style.transform = pose === 'none' ? 'translate3d(0,0,0)' : pose;
+      sheet.style.opacity = opacity;
+      if (layer.mode === 'sheet') {
+        try {
+          layer.y = pose === 'none' ? 0 : new root.DOMMatrixReadOnly(pose).m42;
+        } catch (err) {
+          layer.y = 0;
+        }
+      }
+    }
+    const backdrop = layer.backdrop;
+    if (backdrop.style.transition && backdrop.style.transition !== 'none') {
+      const o = root.getComputedStyle(backdrop).opacity;
+      backdrop.style.transition = 'none';
+      backdrop.style.opacity = o;
+    }
   }
 
+  function settleLayer(layer) {
+    const sheet = layer.sheet;
+    layer.afterMotion = null;
+    layer.y = 0;
+    sheet.style.transition = '';
+    sheet.style.transform = '';
+    sheet.style.opacity = '';
+    layer.backdrop.style.transition = '';
+    layer.backdrop.style.opacity = '1';
+  }
+
+  /**
+   * Opens with CSS transitions on transform / opacity: they run on the compositor, so the panel keeps gliding
+   * even when the main thread is busy (the build of its own content, effects on the table, a slow phone).
+   */
   function animateIn(layer) {
     const sheet = layer.sheet;
+    const backdrop = layer.backdrop;
     layer.mode = isSheetMode() ? 'sheet' : 'dialog';
-    setDim(layer, 0);
-    if (layer.mode === 'sheet') {
-      const height = (sheet.offsetHeight || 420) + 24;
-      setSheetY(layer, height);
-      layer.anim = spring({
-        from: height, to: 0, stiffness: 320, damping: 30, precision: 0.4,
-        update: (v) => setSheetY(layer, v),
-        done: () => {
-          layer.y = 0;
-          sheet.style.transform = '';
-        },
-      });
-    } else {
-      setDialogT(layer, 0, false);
-      layer.anim = spring({
-        from: 0, to: 1, stiffness: 250, damping: 21, precision: 0.002,
-        update: (v) => setDialogT(layer, v, false),
-        done: () => {
-          sheet.style.transform = '';
-          sheet.style.opacity = '';
-        },
-      });
+    const ms = transitionMs(layer.mode === 'sheet' ? 420 : 400);
+    if (!ms) {
+      settleLayer(layer);
+      return;
     }
-    layer.fade = tween({ from: 0, to: 1, duration: 260, ease: 'outCubic', update: (v) => setDim(layer, v) });
+    // 1. the starting pose, without a transition
+    sheet.style.transition = 'none';
+    backdrop.style.transition = 'none';
+    backdrop.style.opacity = '0';
+    if (layer.mode === 'sheet') {
+      layer.y = (sheet.offsetHeight || 420) + 24;
+      sheet.style.transform = 'translate3d(0,' + layer.y + 'px,0)';
+    } else {
+      sheet.style.transform = DIALOG_FROM;
+      sheet.style.opacity = '0';
+    }
+    // 2. make the browser take note of it (one style flush at open time: the layout is already clean)
+    void root.getComputedStyle(sheet).transform;
+    void root.getComputedStyle(backdrop).opacity;
+    // 3. the resting pose, with a transition
+    backdrop.style.transition = 'opacity ' + transitionMs(260) + 'ms ease-out';
+    backdrop.style.opacity = '1';
+    if (layer.mode === 'sheet') {
+      sheet.style.transition = 'transform ' + ms + 'ms ' + EASE_SHEET_IN;
+      sheet.style.transform = 'translate3d(0,0,0)';
+    } else {
+      sheet.style.transition = 'transform ' + ms + 'ms ' + EASE_DIALOG_IN + ', opacity ' + Math.round(ms * 0.55) + 'ms linear';
+      sheet.style.transform = 'translate3d(0,0,0)';
+      sheet.style.opacity = '1';
+    }
+    layer.y = 0;
+    layer.afterMotion = afterTransform(sheet, ms, () => settleLayer(layer));
   }
 
+  /**
+   * Closes. A flick (velocity in px/s, from a drag) keeps its speed on a SOL.Anim spring; everything else is a
+   * CSS transition from wherever the panel is right now — also when it is still on its way in.
+   */
   function animateOut(layer, velocity) {
     const sheet = layer.sheet;
-    stopLayerMotion(layer);
-    let motion;
-    // The pose may have been left by the other mode if the window was resized while open: start clean.
-    if (isSheetMode()) {
-      const height = (sheet.offsetHeight || 420) + 24;
-      const from = layer.mode === 'sheet' ? layer.y || 0 : 0;
-      sheet.style.opacity = '';
-      if (velocity > 300) {
-        motion = spring({
-          from: from, to: height, velocity: velocity, stiffness: 190, damping: 28, precision: 1,
-          update: (v) => setSheetY(layer, v),
-        });
-      } else {
-        motion = tween({
-          from: from, to: height, duration: 150 + 110 * clamp((height - from) / height, 0, 1), ease: 'inCubic',
-          update: (v) => setSheetY(layer, v),
-        });
+    const backdrop = layer.backdrop;
+    freezeLayer(layer);
+    return new Promise((resolve) => {
+      const sheetMode = isSheetMode();
+      const ms = transitionMs(sheetMode ? 240 : 200);
+      if (!ms) {
+        resolve();
+        return;
       }
-    } else {
-      const from = layer.mode === 'dialog' ? clamp(layer.t, 0, 1) : 1;
-      motion = tween({ from: from, to: 0, duration: 190, ease: 'inQuad', update: (v) => setDialogT(layer, v, true) });
-    }
-    const fade = tween({ from: layer.dim, to: 0, duration: 220, ease: 'linear', update: (v) => setDim(layer, v) });
-    return Promise.all([motion.finished, fade.finished]);
+      void root.getComputedStyle(backdrop).opacity;
+      backdrop.style.transition = 'opacity ' + transitionMs(220) + 'ms linear';
+      backdrop.style.opacity = '0';
+      if (sheetMode) {
+        const height = (sheet.offsetHeight || 420) + 24;
+        const from = layer.mode === 'sheet' ? layer.y || 0 : 0;
+        sheet.style.opacity = '';
+        if (velocity > 300) {
+          layer.anim = spring({
+            from: from, to: height, velocity: velocity, stiffness: 190, damping: 28, precision: 1,
+            update: (v) => setSheetY(layer, v),
+            done: resolve,
+          });
+          // the spring ends by itself; if it is cancelled (it is not, once closing) the timer still resolves
+          root.setTimeout(resolve, 1500);
+          return;
+        }
+        void root.getComputedStyle(sheet).transform;
+        const part = clamp((height - from) / height, 0.35, 1);
+        const t = Math.max(1, Math.round(ms * part));
+        sheet.style.transition = 'transform ' + t + 'ms ' + EASE_OUT;
+        sheet.style.transform = 'translate3d(0,' + height + 'px,0)';
+        layer.afterMotion = afterTransform(sheet, t, resolve);
+      } else {
+        void root.getComputedStyle(sheet).transform;
+        sheet.style.transition = 'transform ' + ms + 'ms ' + EASE_OUT + ', opacity ' + ms + 'ms linear';
+        sheet.style.transform = DIALOG_TO;
+        sheet.style.opacity = '0';
+        layer.afterMotion = afterTransform(sheet, ms, resolve);
+      }
+    });
   }
 
   /** Classes the body needs so the browser and the sheet agree on who owns a vertical drag. */
@@ -896,9 +996,8 @@
             setDim(layer, 1 - clamp(val / height, 0, 1) * 0.75);
           },
           done: () => {
-            layer.y = 0;
-            sheet.style.transform = '';
-            setDim(layer, 1);
+            layer.anim = null;
+            settleLayer(layer);
           },
         });
       }
@@ -925,10 +1024,10 @@
         }
         if (dy < 8 || Math.abs(dx) > dy) return;
         drag.active = true;
-        drag.offset = dy;
+        // Take the sheet over wherever it is (it may still be sliding in): no jump under the finger.
         layer.mode = 'sheet';
-        stopLayerMotion(layer);
-        setDim(layer, 1);
+        freezeLayer(layer);
+        drag.offset = dy - (layer.y || 0);
         sheet.classList.add('is-dragging');
         layer.dragHeight = sheet.offsetHeight || 1;
         try {
@@ -977,7 +1076,7 @@
 
     const layer = {
       spec: spec, kind: spec.kind, el: el, sheet: sheet, backdrop: backdrop, body: body, content: content,
-      titleId: titleId, closing: false, mode: 'sheet', y: 0, t: 0, dim: 0, anim: null, fade: null,
+      titleId: titleId, closing: false, mode: 'sheet', y: 0, anim: null, afterMotion: null,
       scrollable: false, paused: false, cleanup: [], openedAt: root.performance ? root.performance.now() : 0,
       returnFocus: spec.returnFocus !== undefined ? spec.returnFocus : doc.activeElement,
       removeBack: null, resolveClosed: null, closed: null,

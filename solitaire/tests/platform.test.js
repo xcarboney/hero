@@ -434,6 +434,69 @@ test('exclusion: a burst of resize events is answered once, with the final layou
   ]);
 });
 
+test('exclusion: each trigger on its own leads to a new measurement', async () => {
+  const bridge = fakeBridge();
+  const dom = fakeDom({ table: { left: 0, top: 96, right: 390, bottom: 708 } });
+  load({ bridge, dom });
+  await settle();
+  let bottom = 708;
+  for (const type of ['resize', 'orientationchange', 'load']) {
+    const before = bridge.args('setGestureExclusion').length;
+    bottom -= 10;
+    dom.table = { left: 0, top: 96, right: 390, bottom };
+    dom.fire(type);
+    await settle();
+    const sent = bridge.args('setGestureExclusion');
+    assert.strictEqual(sent.length, before + 1, type);
+    assert.strictEqual(strips(sent[sent.length - 1])[0].h, bottom - 96, type);
+  }
+});
+
+test('exclusion: events that keep coming postpone the measurement until they stop', (t) => {
+  // Deterministic clock: the debounce must be restarted by every event, not just started once.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const bridge = fakeBridge();
+  const dom = fakeDom({ table: { left: 0, top: 96, right: 390, bottom: 708 } });
+  load({ bridge, dom });
+  t.mock.timers.tick(80);
+  assert.strictEqual(bridge.args('setGestureExclusion').length, 1);
+
+  // A rotation animates for longer than the debounce: an event every 50 ms for 250 ms.
+  for (let step = 1; step <= 5; step++) {
+    dom.table = { left: 0, top: 96, right: 390 + step * 90, bottom: 708 - step * 60 };
+    dom.fire('resize');
+    t.mock.timers.tick(50);
+  }
+  assert.strictEqual(bridge.args('setGestureExclusion').length, 1, 'nothing while the layout is still moving');
+  t.mock.timers.tick(29);
+  assert.strictEqual(bridge.args('setGestureExclusion').length, 1, '79 ms after the last event: not yet');
+  t.mock.timers.tick(1);
+  assert.deepStrictEqual(bridge.args('setGestureExclusion').slice(1).map(strips), [
+    [{ x: 0, y: 96, w: 40, h: 312 }, { x: 800, y: 96, w: 40, h: 312 }],
+  ]);
+  t.mock.timers.tick(1000);
+  assert.strictEqual(bridge.args('setGestureExclusion').length, 2, 'and no timer is left behind');
+  t.mock.timers.reset();
+});
+
+test('exclusion: a list the shell failed to take is sent again at the next opportunity', async () => {
+  const bridge = fakeBridge();
+  let failures = 1;
+  const record = bridge.setGestureExclusion;
+  bridge.setGestureExclusion = (json) => {
+    if (failures-- > 0) throw new Error('Java exception was raised during method invocation');
+    record(json);
+  };
+  const dom = fakeDom({ table: { left: 0, top: 96, right: 390, bottom: 708 } });
+  const SOL = load({ bridge, dom });
+  await settle(); // the first attempt fails
+  assert.deepStrictEqual(bridge.args('setGestureExclusion'), []);
+  dom.fire('resize'); // same layout, but the shell never got it
+  await settle();
+  assert.strictEqual(bridge.args('setGestureExclusion').length, 1);
+  assert.strictEqual(SOL.App.setGestureExclusion([]), true);
+});
+
 test('exclusion: an unchanged layout is not sent again', async () => {
   const bridge = fakeBridge();
   const dom = fakeDom();

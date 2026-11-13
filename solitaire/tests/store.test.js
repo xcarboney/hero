@@ -393,7 +393,26 @@ test('in the app: refused by the shell and no localStorage means "not persisted"
   const bridge = fakeBridge({}, { maxLength: 10 });
   const { Store } = load({ bridge });
   assert.strictEqual(Store.set('thing', 'x'.repeat(50)), false);
+  bridge.calls.length = 0;
   assert.strictEqual(Store.get('thing', null), 'x'.repeat(50), 'still served from memory this session');
+  // Only a value found in localStorage is copied to the shell on a read: the in-memory copy
+  // was already offered to it (and refused) when it was written.
+  assert.deepStrictEqual(bridge.calls, [['get', 'sol.thing']]);
+});
+
+test('in the app: a shell whose storageSet answers nothing is taken at its word', () => {
+  // Only an explicit false means "refused": a shell that returns nothing must not have its
+  // value removed again right after it stored it.
+  const bridge = fakeBridge();
+  const set = bridge.storageSet;
+  bridge.storageSet = (k, v) => {
+    set(k, v);
+  };
+  const { Store } = load({ bridge });
+  assert.strictEqual(Store.set('thing', { n: 1 }), true);
+  assert.strictEqual(bridge.map.get('sol.thing'), '{"n":1}');
+  assert.deepStrictEqual(bridge.calls.filter((c) => c[0] === 'remove'), []);
+  assert.deepStrictEqual(load({ bridge }).Store.get('thing', null), { n: 1 });
 });
 
 test('in the app: a value JSON cannot express is not handed to the shell', () => {

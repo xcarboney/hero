@@ -48,7 +48,8 @@
  *                                            the win until the show is over or skipped. When the last 'modal'
  *                                            pause ends on a won table (the win screen's "Watch the cards"),
  *                                            the celebration plays an encore (at most twice per win).
- *   'game:stuck'   {}                        once per stuck episode, a moment after the move that caused it
+ *   'game:stuck'   {}                        once per stuck episode (Engine.isStuck, or no hint left), a
+ *                                            moment after the move that caused it
  *   'game:busy'    { busy }
  *
  * RULES OF THE HOUSE
@@ -281,7 +282,9 @@
       return;
     }
     try {
-      stuck = E().isStuck(state);
+      // Proven stuck — or the engine simply has nothing useful left to suggest (a few positions are too big
+      // to prove; the player still deserves the "no more moves" prompt, which offers to keep looking).
+      stuck = E().isStuck(state) || hints().length === 0;
     } catch (err) {
       log('isStuck failed', err);
       stuck = false;
