@@ -187,7 +187,8 @@
   -webkit-backface-visibility: hidden;
   backface-visibility: hidden;
   background-color: var(--card-paper);
-  background-image: linear-gradient(152deg, #ffffff 0%, var(--card-paper) 34%, var(--card-paper) 66%, var(--card-paper-shade) 100%);
+  /* a whisper of top-left light: the far corner only reaches about half of the shade colour */
+  background-image: linear-gradient(152deg, #ffffff 0%, var(--card-paper) 32%, var(--card-paper) 64%, var(--card-paper-shade) 132%);
   box-shadow:
     inset 0 0 0 max(1px, calc(var(--card-w) * 0.006)) var(--card-border, rgba(20, 24, 36, 0.18)),
     0 calc(var(--card-w) * 0.006) calc(var(--card-w) * 0.016) rgba(3, 8, 6, 0.42);
@@ -281,7 +282,7 @@
 
 .card__flip::before,
 .card__flip::after {
-  background: #05080e;
+  background: #1a130c;                             /* warm, so a turning card dims like paper instead of greying */
 }
 .card__flip::before {
   transform: translateZ(calc(var(--card-t) / 2 + 0.3px));
@@ -293,13 +294,24 @@
 .card__glare::before,
 .card__glare::after {
   opacity: var(--glare-o, 0);
+  /*
+   * Three layers, top to bottom: the specular hot spot; its counterpart, a soft shade that pools on the side
+   * of the card turned away from the light (white paper cannot get any whiter, so without the shade a highlight
+   * would only be visible where it crosses ink); and the optional iridescent sheen.
+   */
   background-image:
     radial-gradient(
       circle calc(var(--card-w) * 1.05) at var(--glare-x, 50%) var(--glare-y, 0%),
-      rgba(255, 255, 255, 0.72) 0%,
-      rgba(255, 255, 255, 0.34) 11%,
-      rgba(255, 255, 255, 0.1) 32%,
-      rgba(255, 255, 255, 0) 68%
+      rgba(255, 255, 255, 0.78) 0%,
+      rgba(255, 255, 255, 0.4) 10%,
+      rgba(255, 255, 255, 0.12) 30%,
+      rgba(255, 255, 255, 0) 66%
+    ),
+    radial-gradient(
+      circle calc(var(--card-w) * 1.55) at calc(100% - var(--glare-x, 50%)) calc(100% - var(--glare-y, 0%)),
+      rgba(24, 18, 44, 0.3) 0%,
+      rgba(24, 18, 44, 0.14) 36%,
+      rgba(24, 18, 44, 0) 78%
     ),
     linear-gradient(
       115deg,
@@ -311,8 +323,8 @@
       rgba(190, 110, 255, calc(0.2 * var(--sheen-o, 0))) 75%,
       rgba(190, 110, 255, 0) 90%
     );
-  background-size: 100% 100%, 220% 220%;
-  background-position: 0 0, var(--glare-x, 50%) var(--glare-y, 0%);
+  background-size: 100% 100%, 100% 100%, 220% 220%;
+  background-position: 0 0, 0 0, var(--glare-x, 50%) var(--glare-y, 0%);
   background-repeat: no-repeat;
 }
 .card__glare::before {
@@ -332,7 +344,7 @@
 @supports (opacity: calc(sin(30deg))) {
   .card__flip::before,
   .card__flip::after {
-    opacity: max(0, 0.42 * sin(var(--flip, 0deg)) * sin(var(--flip, 0deg)) - 0.002);
+    opacity: max(0, 0.3 * sin(var(--flip, 0deg)) * sin(var(--flip, 0deg)) - 0.002);
   }
 
   .card__shadow::before,
@@ -342,15 +354,36 @@
 }
 
 /* ------------------------------------------------------------------ thickness (only .card--thick has edges) */
-/* core slab: fills the hairline seams between faces and walls with paper instead of the backdrop */
-.card__edges::before {
+/*
+ * Two paper slabs just inside the faces. Whatever slips through an anti-aliasing seam between two walls, or
+ * between a wall and a face, lands on one of them (or on the inside of the far wall) instead of leaving through
+ * the culled far face, so a seam can only ever show paper, never the backdrop.
+ */
+.card__edges::before,
+.card__edges::after {
   content: "";
   position: absolute;
   inset: 0.5px;
   border-radius: var(--card-radius);
-  background: #d6cfbd;
+  background: #e4ddcb;
+}
+.card__edges::before {
+  transform: translateZ(calc(var(--card-t) / 2 - 0.35px));
+}
+.card__edges::after {
+  transform: translateZ(calc(var(--card-t) / -2 + 0.35px));
 }
 
+/*
+ * One wall strip. cards.js gives each its place (--x, --y: centre, --l: length, as fractions of --card-w),
+ * its outward direction (--a) and the paper shade at its two ends (--c0, --c1: a corner strip blends from one
+ * to the other, so the lighting turns the corner smoothly). Across its width every strip gets the same
+ * profile: slightly darker where it meets the faces and a faint seam down the middle, like laminated stock.
+ *
+ * Walls are deliberately double-sided. The solid is convex, so the inside of a far wall can only ever be
+ * seen through an anti-aliasing seam between two near surfaces — where it shows paper instead of whatever is
+ * behind the card.
+ */
 .card__edge {
   position: absolute;
   left: 0;
@@ -359,8 +392,18 @@
   height: calc(var(--card-w) * var(--l));
   margin: calc(var(--card-w) * var(--l) / -2) 0 0 calc(var(--card-t) / -2);
   transform: translate3d(calc(var(--card-w) * var(--x)), calc(var(--card-w) * var(--y)), 0) rotateZ(var(--a)) rotateY(90deg);
-  -webkit-backface-visibility: hidden;
-  backface-visibility: hidden;
+  background-image:
+    linear-gradient(
+      90deg,
+      rgba(70, 58, 36, 0.2) 0%,
+      rgba(70, 58, 36, 0) 26%,
+      rgba(70, 58, 36, 0) 43%,
+      rgba(70, 58, 36, 0.13) 50%,
+      rgba(70, 58, 36, 0) 57%,
+      rgba(70, 58, 36, 0) 74%,
+      rgba(70, 58, 36, 0.2) 100%
+    ),
+    linear-gradient(180deg, var(--c0), var(--c1));
 }
 
 /* ------------------------------------------------------------------ states */

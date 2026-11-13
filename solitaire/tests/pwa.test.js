@@ -196,7 +196,7 @@ test('manifest: identity, display and colours', () => {
   assert.strictEqual(manifest.background_color, '#05241b');
   assert.strictEqual(manifest.theme_color, '#0b3d2e');
   assert.match(read('css/base.css'), /--felt-lo:\s*#05241b/);
-  assert.match(read('index.html'), /<meta name="theme-color" content="#0b3d2e">/);
+  assert.match(read('index.html'), /<meta\s+name="theme-color"\s+content="#0b3d2e"/i);
 });
 
 test('manifest: every URL is relative, so the app works under a sub-path', () => {
@@ -513,7 +513,6 @@ function loadPwa(href, options = {}) {
     Bus: sandbox.SOL.Bus,
     did: did,
     listeners: listeners,
-    document: sandbox.document,
     fire(type, event = {}) {
       for (const fn of listeners[type] || []) fn(event);
     },
@@ -598,7 +597,7 @@ test('pwa: registers sw.js for the app folder only after load, when the browser 
 test('pwa: a worker that waited for this launch is told to take over; the page is not reloaded', async () => {
   const page = loadPwa(PAGE, { waiting: true });
   await page.idle();
-  assert.deepStrictEqual(page.did.posted, [{ type: 'SKIP_WAITING' }]);
+  assert.strictEqual(JSON.stringify(page.did.posted), JSON.stringify([{ type: 'SKIP_WAITING' }]));
   assert.strictEqual(page.listeners.controllerchange, undefined, 'no reload-on-takeover hook');
   assert.doesNotMatch(read('js/pwa.js'), /location\.reload|\.skipWaiting\(/);
   assert.doesNotMatch(read('sw.js').replace(/self\.addEventListener\('message'[\s\S]*$/, ''), /skipWaiting/, 'sw.js must only skip waiting when asked');
@@ -686,10 +685,11 @@ test('pwa: installed reflects the display mode of an app window', () => {
 
   // A tab that goes full screen through the Fullscreen API is not an installed app.
   const tab = loadPwa(PAGE);
-  tab.PWA.onChange((state) => seen.push(state.installed));
+  const announced = [];
+  tab.PWA.onChange((state) => announced.push(state));
   tab.setMode('fullscreen', true);
   assert.strictEqual(tab.PWA.installed, false);
-  assert.deepStrictEqual(seen, [true], 'and nothing is announced');
+  assert.deepStrictEqual(announced, []);
 
   // A desktop browser already in full-screen mode at load looks like the app until it offers to install.
   const kiosk = loadPwa(PAGE, { modes: ['fullscreen'] });

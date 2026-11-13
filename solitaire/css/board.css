@@ -1,0 +1,236 @@
+/*
+ * board.css — the table: pile slots (#piles), the card layer (#cards) and the small DOM overlays the board
+ * needs (score popups under reduced motion, the hint ghost).
+ *
+ * The board (js/view/board.js) computes every position in JS and writes
+ *   --card-w / --card-h / --card-radius   on #table            (card size for everything inside the table)
+ *   transform: translate3d(x, y, 0) …     on each .pile and .card
+ * Nothing in here positions a card or a slot, and nothing in here transitions `transform` on a .card:
+ * all card motion is SOL.Anim driven. Only opacity / transform of decoration is animated in CSS.
+ */
+
+/* ------------------------------------------------------------------ table */
+.table {
+  /* No browser gestures on the table: the board handles every pointer itself (base.css sets touch-action). */
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+  cursor: default;
+  outline: none;
+  contain: layout style;
+}
+
+.piles,
+.cards,
+.table__overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;            /* hit-testing is done from the layout model on #table itself */
+}
+
+/*
+ * Perspective, so lifted, tilting and flipping cards read as 3D. NOT preserve-3d: every card is flattened into
+ * the table plane on its own and stacking stays plain z-index.
+ */
+.cards {
+  perspective: clamp(800px, calc(var(--card-w) * 12), 1800px);
+  perspective-origin: 50% 42%;
+}
+
+/* A restored game fades in while the cards settle. */
+.cards.is-entering {
+  animation: board-enter 320ms var(--ease-out) both;
+}
+@keyframes board-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* ------------------------------------------------------------------ pile slots */
+.pile {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--card-w);
+  height: var(--card-h);
+  border-radius: var(--card-radius);
+  background: var(--slot);
+  box-shadow: inset 0 0 0 max(1px, calc(var(--card-w) * 0.014)) var(--slot-border);
+  color: var(--ink-faint);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pile--tableau {
+  background: transparent;
+  box-shadow: inset 0 0 0 max(1px, calc(var(--card-w) * 0.012)) rgba(255, 255, 255, 0.07);
+}
+
+.pile--waste {
+  background: transparent;
+  box-shadow: inset 0 0 0 max(1px, calc(var(--card-w) * 0.012)) rgba(255, 255, 255, 0.06);
+}
+
+.pile__mark {
+  width: 46%;
+  height: auto;
+  display: block;
+  opacity: 0.55;
+}
+
+.pile--foundation .pile__mark {
+  width: 50%;
+  opacity: 0.5;
+}
+
+.pile--stock .pile__mark {
+  width: 52%;
+  opacity: 0.7;
+  transition: transform var(--dur-3) var(--ease-back), opacity var(--dur-2) ease-out;
+}
+
+/* nothing left to draw and nothing to recycle: the symbol fades back */
+.pile--stock.is-spent .pile__mark {
+  opacity: 0.22;
+}
+
+/* legal drop target (empty pile) while dragging */
+.pile.is-target {
+  box-shadow:
+    inset 0 0 0 max(2px, calc(var(--card-w) * 0.028)) var(--ok),
+    0 0 calc(var(--card-w) * 0.16) calc(var(--card-w) * 0.03) rgba(110, 231, 168, 0.4);
+  background: rgba(110, 231, 168, 0.1);
+}
+
+/* the pile the dragged card would land on if released now */
+.pile.is-drop {
+  box-shadow:
+    inset 0 0 0 max(2px, calc(var(--card-w) * 0.04)) var(--gold),
+    0 0 calc(var(--card-w) * 0.2) calc(var(--card-w) * 0.05) rgba(243, 201, 105, 0.5);
+  background: rgba(243, 201, 105, 0.14);
+}
+
+.pile.is-hint {
+  box-shadow:
+    inset 0 0 0 max(2px, calc(var(--card-w) * 0.028)) var(--gold),
+    0 0 calc(var(--card-w) * 0.2) calc(var(--card-w) * 0.06) rgba(243, 201, 105, 0.5);
+  animation: board-slot-hint 900ms ease-in-out infinite alternate;
+}
+.pile.is-hint .pile__mark {
+  opacity: 1;
+  color: var(--gold);
+}
+@keyframes board-slot-hint {
+  from { opacity: 0.6; }
+  to { opacity: 1; }
+}
+
+/*
+ * Arrival pulse (a card reached this pile): one ring that swells past the card and fades. Opacity and
+ * transform only; the ring is static paint.
+ */
+.pile::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow:
+    0 0 0 max(2px, calc(var(--card-w) * 0.035)) var(--pulse-color, var(--gold)),
+    0 0 calc(var(--card-w) * 0.22) calc(var(--card-w) * 0.08) var(--pulse-glow, rgba(243, 201, 105, 0.45));
+  opacity: 0;
+  pointer-events: none;
+}
+.pile.is-pulse::after {
+  animation: board-pulse 620ms var(--ease-out) both;
+}
+/* the same animation under a second name: swapping the class restarts it without a forced reflow */
+.pile.is-pulse-b::after {
+  animation: board-pulse-b 620ms var(--ease-out) both;
+}
+@keyframes board-pulse {
+  0% { opacity: 0.95; transform: scale(0.96); }
+  100% { opacity: 0; transform: scale(1.32); }
+}
+@keyframes board-pulse-b {
+  0% { opacity: 0.95; transform: scale(0.96); }
+  100% { opacity: 0; transform: scale(1.32); }
+}
+
+/* the stock asks for a tap (nothing else can move) */
+.pile--stock.is-inviting .pile__mark {
+  animation: board-invite 1400ms ease-in-out infinite;
+}
+@keyframes board-invite {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.14); }
+}
+
+/* ------------------------------------------------------------------ cards on the table */
+/*
+ * The pile a drag would land on: the generic .is-target ring (cards.css) turns gold and stops pulsing, so the
+ * player can tell "legal" from "this one" under a thumb.
+ */
+.card.is-target.is-drop .card__face::before {
+  animation: none;
+  opacity: 1;
+  box-shadow:
+    0 0 0 calc(var(--card-w) * 0.04) var(--gold, #f3c969),
+    0 0 calc(var(--card-w) * 0.22) calc(var(--card-w) * 0.07) rgba(243, 201, 105, 0.6);
+}
+
+/* ------------------------------------------------------------------ overlay: popups + ghost */
+.table__overlay {
+  z-index: 5;
+  overflow: visible;
+}
+
+/* DOM score popup — only used when the canvas effects are off (reduced motion / no FX). */
+.score-pop {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 0.1em 0.45em;
+  border-radius: 999px;
+  font: 800 clamp(13px, calc(var(--card-w) * 0.3), 26px) / 1.2 var(--font-ui);
+  color: var(--gold);
+  background: rgba(6, 14, 12, 0.72);
+  white-space: nowrap;
+  pointer-events: none;
+  animation: board-score-pop 900ms var(--ease-out) both;
+}
+.score-pop--minus {
+  color: #ff9a9a;
+}
+@keyframes board-score-pop {
+  0% { opacity: 0; margin-top: 0; }
+  15% { opacity: 1; }
+  70% { opacity: 1; }
+  100% { opacity: 0; margin-top: -1.6em; }
+}
+/* Reduced motion: no travel, the label simply shows and goes (JS removes it). */
+:root[data-reduced-motion="true"] .score-pop {
+  animation: none;
+  opacity: 1;
+}
+
+/* hint ghost: a translucent copy of the card that glides to the suggested pile and back */
+.board-ghost {
+  opacity: 0.55;
+  pointer-events: none;
+  z-index: 4;
+}
+.board-ghost .card__shadow {
+  display: none;
+}
+
+/* ------------------------------------------------------------------ low effects quality */
+:root[data-effects="low"] .pile::after,
+:root[data-effects="low"] .pile.is-target,
+:root[data-effects="low"] .pile.is-drop,
+:root[data-effects="low"] .pile.is-hint {
+  box-shadow: inset 0 0 0 max(2px, calc(var(--card-w) * 0.035)) var(--pulse-color, var(--gold));
+}
+:root[data-effects="low"] .pile.is-target {
+  box-shadow: inset 0 0 0 max(2px, calc(var(--card-w) * 0.035)) var(--ok);
+}

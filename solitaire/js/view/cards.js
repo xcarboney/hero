@@ -142,10 +142,10 @@
     // heart
     'M50 92C47 88 8 62 8 34C8 18.5 19.5 8 31 8C40 8 47 13.5 50 21C53 13.5 60 8 69 8C80.5 8 92 18.5 92 34' +
       'C92 62 53 88 50 92Z',
-    // club (three lobes + a filler + the stem; every subpath runs clockwise so nonzero filling never punches holes)
-    'M50 6.5A20.5 20.5 0 1 1 50 47.5A20.5 20.5 0 1 1 50 6.5ZM28 37A20.5 20.5 0 1 1 28 78A20.5 20.5 0 1 1 28 37Z' +
-      'M72 37A20.5 20.5 0 1 1 72 78A20.5 20.5 0 1 1 72 37ZM50 39A13 13 0 1 1 50 65A13 13 0 1 1 50 39Z' +
-      'M53 60C52.5 80 56 90 65 96L35 96C44 90 47.5 80 47 60Z',
+    // club: the outline of three lobes and a stem as ONE closed path (no overlapping subpaths), so it can be
+    // stroked and clipped like the other suits (the ace inline needs that)
+    'M32.37 37.47A20.5 20.5 0 1 1 67.63 37.47A20.5 20.5 0 1 1 52.85 64.7C52.9 81 56.5 90.5 65 96L35 96' +
+      'C43.5 90.5 47.1 81 47.15 64.7A20.5 20.5 0 1 1 32.37 37.47Z',
     // diamond
     'M50 3C58 20 73 38 87 50C73 62 58 80 50 97C42 80 27 62 13 50C27 38 42 20 50 3Z',
   ];
@@ -209,10 +209,11 @@
 
   /** Corner index: rank over suit, top-left. The caller rotates a copy for the opposite corner. */
   function indexMarkup(rank, suit) {
-    return use('sol-rank-' + rank, 8, 13, 46, 48) + use('sol-suit-' + suit, 16.5, 66, 29, 29);
+    return use('sol-rank-' + rank, 8, 13, 44, 46) + use('sol-suit-' + suit, 16.5, 63.5, 27, 27);
   }
 
-  const PIP_X = [80, 125, 170];
+  // Pip columns sit a little inside the traditional 30% / 70% so the big corner indices get clear air around them.
+  const PIP_X = [84, 125, 166];
   const PIP_TOP = 70;
   const PIP_BOTTOM = 280;
   const PIP_MID = 175;
@@ -245,11 +246,15 @@
   }
 
   function pipsMarkup(rank, suit) {
-    const size = rank <= 3 ? 50 : rank <= 8 ? 46 : 42;
+    const size = rank <= 3 ? 50 : rank <= 8 ? 44 : 39;
     return pipLayout(rank).map((p) => pip(suit, PIP_X[p[0]], p[1], size, p[2])).join('');
   }
 
-  /** The ornamental ace: a large double-outlined suit inside a fine sunburst. */
+  /**
+   * The ornamental ace: a large suit with an engraved inline inside a fine sunburst. The inline is a true inset
+   * (two strokes clipped to the suit's own outline), so its width is the same all the way round and the outer
+   * tips stay sharp — a scaled copy of the shape would pinch at the tips and gape at the lobes.
+   */
   function aceMarkup(suit) {
     const cx = 125;
     const cy = 175;
@@ -257,24 +262,36 @@
     let dots = '';
     for (let i = 0; i < 48; i++) {
       const long = i % 2 === 0;
-      const a = polar(cx, cy, 77, i * 7.5);
-      const b = polar(cx, cy, long ? 96 : 86, i * 7.5);
+      const a = polar(cx, cy, 78, i * 7.5);
+      const b = polar(cx, cy, long ? 97 : 87, i * 7.5);
       rays += 'M' + n(a[0]) + ' ' + n(a[1]) + 'L' + n(b[0]) + ' ' + n(b[1]);
       if (!long) {
-        const d = polar(cx, cy, 92.5, i * 7.5);
+        const d = polar(cx, cy, 93.5, i * 7.5);
         dots += '<circle cx="' + n(d[0]) + '" cy="' + n(d[1]) + '" r="1.6"/>';
       }
     }
-    const size = suit === 0 ? 122 : suit === 3 ? 120 : 114;
-    const lift = suit === 0 ? 1.8 : 0;
+    // four small jewels where the ring meets the card's axes
+    let gems = '';
+    for (let i = 0; i < 4; i++) {
+      const g = polar(cx, cy, 70.5, i * 90);
+      gems += '<path d="M' + n(g[0]) + ' ' + n(g[1] - 5.2) + 'l3.6 5.2l-3.6 5.2l-3.6-5.2z" fill="' + GOLD + '" stroke="' +
+        PAPER + '" stroke-width="2.2" paint-order="stroke"/>';
+    }
+    const size = [118, 110, 112, 118][suit];
+    const dy = [-2.5, 1.5, -2, 0][suit]; // optical centring: stems pull spades and clubs down, the heart's cleft pulls it up
+    const d = SUIT_PATHS[suit];
     return (
       '<path d="' + rays + '" fill="none" stroke="' + GOLD + '" stroke-width="1.7" stroke-linecap="round"/>' +
       '<g fill="' + GOLD + '">' + dots + '</g>' +
-      '<circle cx="125" cy="175" r="72.5" fill="none" stroke="currentColor" stroke-width="1.4" opacity=".5"/>' +
-      '<circle cx="125" cy="175" r="68.5" fill="none" stroke="' + GOLD + '" stroke-width=".9"/>' +
-      pip(suit, cx, cy, size, 0) +
-      pip(suit, cx, cy + lift, size * 0.83, 0, ' fill="' + PAPER + '"') +
-      pip(suit, cx, cy + lift, size * 0.74, 0)
+      '<circle cx="125" cy="175" r="72.5" fill="none" stroke="' + GOLD + '" stroke-width="1.5"/>' +
+      '<circle cx="125" cy="175" r="68.5" fill="none" stroke="currentColor" stroke-width=".9" opacity=".45"/>' +
+      gems +
+      '<g transform="translate(' + n(cx - size / 2) + ' ' + n(cy - size / 2 + dy) + ') scale(' + n(size / 100) +
+      ')" clip-path="url(#sol-suit-clip-' + suit + ')">' +
+      '<path d="' + d + '"/>' +
+      '<path d="' + d + '" fill="none" stroke="' + PAPER + '" stroke-width="11.6" stroke-linejoin="round"/>' +
+      '<path d="' + d + '" fill="none" stroke="currentColor" stroke-width="6.4" stroke-linejoin="round"/>' +
+      '</g>'
     );
   }
 
@@ -341,8 +358,9 @@
     s += C(111, 61.5, 2.2, INK) + C(139, 61.5, 2.2, INK) + P('M125 57.5l3.6 4l-3.6 4l-3.6-4z', pal.tint);
     // sword (black suits) or sceptre (red suits), held upright beside the head
     if (suit % 2 === 0) {
-      s += P('M176 38L181 49V139H171V49Z', STEEL, ' stroke="' + pal.tint + '" stroke-width=".9"');
-      s += L('M176 50V135', pal.tint, 1.4);
+      s += P('M176 38L181 49V139H171V49Z', STEEL);
+      s += P('M176 38L181 49V139H176Z', pal.tint, ' opacity=".4"');
+      s += L('M176 38L181 49V139H171V49Z', pal.hair2, 1, ' stroke-linejoin="round"');
       s += R(163.5, 138, 25, 5.5, 2.5, GOLD);
       s += R(173, 143, 6, 17, 0, pal.hair) + C(176, 162, 3.6, GOLD);
     } else {
@@ -407,7 +425,7 @@
     s += P('M106 127L125 134L114 152L94 139Z', PAPER) + P('M144 127L125 134L136 152L156 139Z', PAPER);
     s += L('M106 127L125 134L144 127', GOLD_D, 1.1);
     // head: bobbed hair that flicks out at the jaw, straight fringe
-    s += P('M98 72Q98 56 114 56H136Q152 56 152 72V104Q152 112 160 115Q152 122 143 117V72H107V117Q98 122 90 115Q98 112 98 104Z',
+    s += P('M98 72Q98 56 114 56H136Q152 56 152 72V103Q152 111 157 113.5Q151 120.5 143 117V72H107V117Q99 120.5 93 113.5Q98 111 98 103Z',
       pal.hair);
     s += R(119, 104, 12, 26, 0, SKIN_D);
     s += P('M108 66H142V98Q142 114 125 118Q108 114 108 98Z', SKIN);
@@ -424,7 +442,9 @@
     s += C(107.5, 61, 2.6, GOLD_L);
     // pike with a pennant
     s += R(174.5, 52, 3, 124, 0, GOLD_D);
-    s += P('M176 31L181.5 45L176 56L170.5 45Z', STEEL, ' stroke="' + pal.tint + '" stroke-width=".9"');
+    s += P('M176 31L181.5 45L176 56L170.5 45Z', STEEL);
+    s += P('M176 31L181.5 45L176 56Z', pal.tint, ' opacity=".4"');
+    s += L('M176 31L181.5 45L176 56L170.5 45Z', pal.hair2, 1, ' stroke-linejoin="round"');
     s += P('M174.5 61L158 67.5L174.5 74Z', GOLD);
     s += R(168.5, 144, 15, 12, 5.5, SKIN) + L('M172.2 148H179.8M172.2 151.8H179.8', SKIN_D, 1.1);
     s += pip(suit, 76, 54, 22, 0, ' fill="' + INK + '"');
@@ -490,7 +510,8 @@
   function spriteMarkup() {
     let s = '';
     for (let i = 0; i < 4; i++) {
-      s += '<symbol id="sol-suit-' + i + '" viewBox="0 0 100 100"><path d="' + SUIT_PATHS[i] + '"/></symbol>';
+      s += '<symbol id="sol-suit-' + i + '" viewBox="0 0 100 100"><path d="' + SUIT_PATHS[i] + '"/></symbol>' +
+        '<clipPath id="sol-suit-clip-' + i + '"><path d="' + SUIT_PATHS[i] + '"/></clipPath>';
     }
     for (let r = 1; r <= 13; r++) {
       const g = GLYPHS[r];
@@ -828,42 +849,46 @@
 
   /**
    * Markup for the side walls of a thick card: four straight strips and CORNER_SEGMENTS short strips per rounded
-   * corner, each standing perpendicular to the faces with its normal pointing outwards (so backface culling hides
-   * the far side) and shaded for a light coming from the top-left. Positions are fractions of --card-w.
+   * corner, each standing perpendicular to the faces. They are shaded for a light coming from the top-left; a
+   * corner strip carries a gradient from the shade of its first edge to the shade of its last, so the lighting
+   * runs smoothly round the corner instead of stepping from facet to facet. Positions are fractions of --card-w.
    */
   function edgesMarkup() {
     if (edgesCache) return edgesCache;
     const strips = [];
     const r = RADIUS;
-    // straight walls: [centre x, centre y, length, outward normal angle]; a hair longer than the straight run
-    // so no backdrop shows through where they meet the corner strips
-    const lap = 0.006;
-    strips.push([1, RATIO / 2, RATIO - 2 * r + lap, 0]);
-    strips.push([0.5, RATIO, 1 - 2 * r + lap, 90]);
-    strips.push([0, RATIO / 2, RATIO - 2 * r + lap, 180]);
-    strips.push([0.5, 0, 1 - 2 * r + lap, 270]);
+    // straight walls: [centre x, centre y, length, outward normal angle, half the angle the strip spans];
+    // a hair longer than the straight run so no backdrop shows through where they meet the corner strips
+    const lap = 0;
+    strips.push([1, RATIO / 2, RATIO - 2 * r + lap, 0, 0]);
+    strips.push([0.5, RATIO, 1 - 2 * r + lap, 90, 0]);
+    strips.push([0, RATIO / 2, RATIO - 2 * r + lap, 180, 0]);
+    strips.push([0.5, 0, 1 - 2 * r + lap, 270, 0]);
     // corners: inscribed polygon, so the walls never poke outside the rounded faces
     const corners = [[1 - r, RATIO - r, 0], [r, RATIO - r, 90], [r, r, 180], [1 - r, r, 270]];
-    const half = Math.PI / (4 * CORNER_SEGMENTS);
+    const halfDeg = 90 / (2 * CORNER_SEGMENTS);
+    const half = (halfDeg * Math.PI) / 180;
     corners.forEach((c) => {
       for (let k = 0; k < CORNER_SEGMENTS; k++) {
-        const deg = c[2] + ((k + 0.5) * 90) / CORNER_SEGMENTS;
+        const deg = c[2] + (2 * k + 1) * halfDeg;
         const a = (deg * Math.PI) / 180;
         const rm = r * Math.cos(half);
-        strips.push([c[0] + rm * Math.cos(a), c[1] + rm * Math.sin(a), 2 * r * Math.sin(half) * 1.12, deg]);
+        strips.push([c[0] + rm * Math.cos(a), c[1] + rm * Math.sin(a), 2 * r * Math.sin(half) * 1.12, deg, halfDeg]);
       }
     });
-    const dark = [120, 112, 96];
-    const light = [252, 248, 236];
+    const dark = [134, 125, 108];
+    const light = [253, 250, 240];
+    // light direction (-0.45, -0.89): top walls are brightest, bottom walls darkest
+    const shade = function (deg) {
+      const a = (deg * Math.PI) / 180;
+      const lit = 0.5 + 0.5 * (Math.cos(a) * -0.45 + Math.sin(a) * -0.89);
+      return mix(dark, light, 0.22 + 0.78 * lit);
+    };
     let html = '';
     strips.forEach((sp) => {
-      const a = (sp[3] * Math.PI) / 180;
-      // light direction (-0.45, -0.89): top walls are brightest, bottom walls darkest
-      const lit = 0.5 + 0.5 * (Math.cos(a) * -0.45 + Math.sin(a) * -0.89);
-      const base = mix(dark, light, 0.25 + 0.75 * lit);
-      const rim = mix(dark, light, 0.25 + 0.75 * lit - 0.16);
+      // the strip's own top edge is its lower-angle end (see the rotateZ in cards.css)
       html += '<i class="card__edge" style="--x:' + f4(sp[0]) + ';--y:' + f4(sp[1]) + ';--l:' + f4(sp[2]) + ';--a:' +
-        n(sp[3]) + 'deg;background:linear-gradient(90deg,' + rim + ',' + base + ' 30%,' + base + ' 70%,' + rim + ')"></i>';
+        n(sp[3]) + 'deg;--c0:' + shade(sp[3] - sp[4]) + ';--c1:' + shade(sp[3] + sp[4]) + '"></i>';
     });
     edgesCache = '<div class="card__edges">' + html + '</div>';
     return edgesCache;

@@ -12,6 +12,14 @@
  * moves that must not be hinted; isStuck (hand-made positions plus an exhaustive cross-check on
  * real dead ends); auto-complete; and random playouts over many seeds that check every invariant
  * and every record after every action.
+ *
+ * The file has two parts. The first (14 suites) was written with the engine. The second, the
+ * suite 'REVIEW (black box, from the contract alone)' at the end, was written afterwards by an
+ * independent reviewer from the build contract only, with its own helpers and its own naive
+ * statement of the rules; it is where to look for what the contract promises (the replay rule
+ * for records, undo exactness on 640 playouts, auto-complete termination, isStuck checked by
+ * brute force, hints never illegal / never missing / never circular, deserialize on garbage).
+ * The whole file takes about 45 seconds.
  */
 'use strict';
 
@@ -2097,5 +2105,1794 @@ describe('random playouts', () => {
       }
     }
     assert.ok(refused > 20000);
+  });
+});
+
+// =====================================================================================================
+// REVIEWER'S BLACK-BOX SECTION
+// Written by an independent reviewer from the build contract (sections 4 and 5) alone, without
+// looking at how the engine works inside. Nothing here uses the helpers above: it has its own
+// card notation, its own position builder (which does NOT go through deserialize) and its own
+// naive statement of the rules, so that a mistake shared by the engine and the tests above
+// cannot hide here.
+// =====================================================================================================
+describe('REVIEW (black box, from the contract alone)', () => {
+  const E = Engine;
+  const ALL = ['stock', 'waste', 'f0', 'f1', 'f2', 'f3', 't0', 't1', 't2', 't3', 't4', 't5', 't6'];
+  const TAB = ALL.slice(6);
+  const FND = ALL.slice(2, 6);
+  const DRAW_A = { type: 'draw' };
+  const UNDO_A = { type: 'undo' };
+  const AUTO = { auto: true };
+
+  // ---- cards: id('Q', 'H') or the short form c('QH') ----
+  const SUIT_IX = { S: 0, H: 1, C: 2, D: 3 };
+  const RANK_IX = { A: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, J: 11, Q: 12, K: 13 };
+  const c = (name) => {
+    const suit = SUIT_IX[name[name.length - 1]];
+    const rank = RANK_IX[name.slice(0, -1)];
+    if (suit === undefined || rank === undefined) throw new Error('bad card ' + name);
+    return suit * 13 + rank - 1;
+  };
+  const rk = (id) => (id % 13) + 1;
+  const su = (id) => Math.floor(id / 13);
+  const red = (id) => su(id) % 2 === 1;
+  const mv = (card, to) => ({ type: 'move', card: typeof card === 'string' ? c(card) : card, to });
+
+  /**
+   * A hand-made position, straight from the contract's state shape (no engine call involved).
+   *   t:     7 (or fewer) arrays of names bottom -> top; '?' in front = face-down
+   *   f:     'S3 H1' style heights, e.g. { S: 3, H: 1 }
+   *   waste, stock: names bottom -> top
+   *   rest:  where every card not mentioned goes, face-down: 'stock' (under the listed ones, default)
+   *          or a tableau pile id (under the listed ones)
+   */
+  function pos(spec) {
+    const piles = {};
+    for (const id of ALL) piles[id] = [];
+    const faceUp = new Array(52).fill(false);
+    const used = new Array(52).fill(false);
+    const use = (id) => {
+      if (used[id]) throw new Error('card listed twice: ' + id);
+      used[id] = true;
+      return id;
+    };
+    const f = spec.f || {};
+    for (const letter of Object.keys(f)) {
+      for (let r = 0; r < f[letter]; r++) {
+        const id = use(SUIT_IX[letter] * 13 + r);
+        piles['f' + SUIT_IX[letter]].push(id);
+        faceUp[id] = true;
+      }
+    }
+    (spec.t || []).forEach((col, i) => {
+      for (const raw of col) {
+        const down = raw[0] === '?';
+        const id = use(c(down ? raw.slice(1) : raw));
+        piles['t' + i].push(id);
+        faceUp[id] = !down;
+      }
+    });
+    for (const name of spec.waste || []) {
+      const id = use(c(name));
+      piles.waste.push(id);
+      faceUp[id] = true;
+    }
+    const stock = (spec.stock || []).map((name) => use(c(name)));
+    const rest = [];
+    for (let id = 0; id < 52; id++) if (!used[id]) rest.push(id);
+    const where = spec.rest || 'stock';
+    if (where === 'stock') piles.stock = rest.concat(stock);
+    else {
+      piles.stock = stock;
+      piles[where] = rest.concat(piles[where]);
+    }
+    return {
+      v: 1,
+      id: 'review',
+      seed: 12345,
+      drawCount: spec.drawCount || 1,
+      piles,
+      faceUp,
+      score: spec.score || 0,
+      moves: spec.moves || 0,
+      undos: 0,
+      recycles: spec.recycles || 0,
+      elapsedMs: 0,
+      won: false,
+      history: [],
+    };
+  }
+
+  const copy = (v) => JSON.parse(JSON.stringify(v));
+  /** The whole observable state as one string (cheap to compare). */
+  const print = (s) => JSON.stringify([s.v, s.id, s.seed, s.drawCount, s.piles, s.faceUp, s.score, s.moves, s.undos, s.recycles, s.elapsedMs, s.won, s.history]);
+  /** ...without the history (records are compared separately where it matters). */
+  const core = (s) => JSON.stringify([s.piles, s.faceUp, s.score, s.moves, s.recycles, s.won, s.history.length]);
+
+  // ---- the rules, stated naively -----------------------------------------------------------------
+  // D1 (engine decision the contract leaves open): once the game is won only undo is legal.
+  function where(s, card) {
+    for (const id of ALL) {
+      const index = s.piles[id].indexOf(card);
+      if (index >= 0) return { pile: id, index };
+    }
+    return null;
+  }
+  function runOf(s, card) {
+    if (!Number.isInteger(card) || card < 0 || card > 51 || s.won) return [];
+    const at = where(s, card);
+    const pile = s.piles[at.pile];
+    if (at.pile === 'stock') return [];
+    if (at.pile === 'waste' || at.pile[0] === 'f') return at.index === pile.length - 1 ? [card] : [];
+    return s.faceUp[card] === true ? pile.slice(at.index) : [];
+  }
+  function dropOk(s, card, to, run = runOf(s, card)) {
+    if (run.length === 0 || !ALL.includes(to)) return false;
+    if (s.piles[to].includes(card)) return false; // onto the pile it is already in
+    const dest = s.piles[to];
+    if (to[0] === 'f') {
+      if (run.length !== 1 || to !== 'f' + su(card)) return false;
+      return dest.length === 0 ? rk(card) === 1 : dest[dest.length - 1] === card - 1;
+    }
+    if (to[0] === 't') {
+      if (dest.length === 0) return rk(card) === 13;
+      const top = dest[dest.length - 1];
+      return s.faceUp[top] === true && red(top) !== red(card) && rk(top) === rk(card) + 1;
+    }
+    return false; // stock, waste
+  }
+  /** Every legal move, enumerated source by source (the slow, obviously right dropOk() is the reference: see the query test). */
+  function allMoves(s) {
+    const out = [];
+    if (s.won) return out;
+    const sources = []; // [card, pile it is in, number of cards that move]
+    const w = s.piles.waste;
+    if (w.length) sources.push([w[w.length - 1], 'waste', 1]);
+    for (const f of FND) {
+      const p = s.piles[f];
+      if (p.length) sources.push([p[p.length - 1], f, 1]);
+    }
+    for (const t of TAB) {
+      const p = s.piles[t];
+      for (let i = 0; i < p.length; i++) if (s.faceUp[p[i]] === true) sources.push([p[i], t, p.length - i]);
+    }
+    sources.sort((a, b) => a[0] - b[0]);
+    for (const [card, from, n] of sources) {
+      const home = 'f' + su(card);
+      if (n === 1 && from !== home && s.piles[home].length === rk(card) - 1) out.push({ type: 'move', card, to: home });
+      for (const t of TAB) {
+        if (t === from) continue;
+        const p = s.piles[t];
+        if (p.length === 0) {
+          if (rk(card) === 13) out.push({ type: 'move', card, to: t });
+        } else {
+          const top = p[p.length - 1];
+          if (s.faceUp[top] === true && red(top) !== red(card) && rk(top) === rk(card) + 1) out.push({ type: 'move', card, to: t });
+        }
+      }
+    }
+    return out;
+  }
+  const drawOk = (s) => !s.won && (s.piles.stock.length > 0 || s.piles.waste.length > 0);
+
+  /** The contract's invariants (section 5, last paragraph). */
+  function sound(s, label) {
+    const seen = new Set();
+    for (const id of ALL) {
+      assert.ok(Array.isArray(s.piles[id]), label + ': pile ' + id);
+      for (const card of s.piles[id]) {
+        assert.ok(Number.isInteger(card) && card >= 0 && card <= 51, label + ': card id');
+        assert.ok(!seen.has(card), label + ': card ' + card + ' twice');
+        seen.add(card);
+      }
+    }
+    assert.equal(seen.size, 52, label + ': 52 unique cards');
+    assert.deepEqual(Object.keys(s.piles).sort(), ALL.slice().sort(), label + ': pile ids');
+    assert.equal(s.faceUp.length, 52, label);
+    for (const card of s.piles.stock) assert.equal(s.faceUp[card], false, label + ': stock face-down');
+    for (const card of s.piles.waste) assert.equal(s.faceUp[card], true, label + ': waste face-up');
+    for (let k = 0; k < 4; k++) {
+      s.piles['f' + k].forEach((card, i) => {
+        assert.equal(card, k * 13 + i, label + ': foundation order');
+        assert.equal(s.faceUp[card], true, label + ': foundation face-up');
+      });
+    }
+    for (const id of TAB) {
+      let up = false;
+      for (const card of s.piles[id]) {
+        if (s.faceUp[card]) up = true;
+        else assert.ok(!up, label + ': face-down above face-up in ' + id);
+      }
+    }
+    assert.ok(Number.isFinite(s.score) && s.score >= 0, label + ': score never below 0');
+    assert.equal(s.won, FND.every((id) => s.piles[id].length === 13), label + ': won');
+    assert.equal(E.isWon(s), s.won, label + ': isWon');
+  }
+
+  /**
+   * THE REPLAY THE BOARD RELIES ON: starting from the piles and faces before an action, take each
+   * transfer in order (remove the card from `from`, put it on top of `to`) and each flip
+   * (faceUp[card] = flip.faceUp). The result must be exactly the piles and faces after it — for
+   * draw, recycle and move records, and for undo records as well.
+   */
+  function replay(beforePiles, beforeFaces, record, label) {
+    const piles = copy(beforePiles);
+    const faces = beforeFaces.slice();
+    for (const tr of record.transfers) {
+      assert.deepEqual(Object.keys(tr).sort(), ['card', 'from', 'to'], label + ': transfer fields');
+      const at = piles[tr.from].indexOf(tr.card);
+      assert.ok(at >= 0, label + ': transfer of a card that is not in ' + tr.from);
+      piles[tr.from].splice(at, 1);
+      piles[tr.to].push(tr.card);
+    }
+    for (const fl of record.flips) {
+      assert.notEqual(faces[fl.card], fl.faceUp, label + ': a flip that changes nothing');
+      faces[fl.card] = fl.faceUp;
+    }
+    return { piles, faces };
+  }
+  function checkedApply(s, action, opts, label) {
+    const beforePiles = copy(s.piles);
+    const beforeFaces = s.faceUp.slice();
+    const before = { score: s.score, moves: s.moves, recycles: s.recycles, undos: s.undos, history: s.history.length };
+    const record = E.apply(s, action, opts);
+    assert.ok(record, label + ': a legal action must apply: ' + JSON.stringify(action));
+    const after = replay(beforePiles, beforeFaces, record, label);
+    assert.deepEqual(after.piles, s.piles, label + ': transfers alone reproduce the piles (' + record.type + ')');
+    assert.deepEqual(after.faces, s.faceUp, label + ': flips alone reproduce the faces (' + record.type + ')');
+    assert.equal(record.scoreBefore, before.score, label + ': scoreBefore');
+    assert.equal(record.scoreAfter, s.score, label + ': scoreAfter');
+    assert.equal(record.movesBefore, before.moves, label + ': movesBefore');
+    assert.equal(record.movesAfter, s.moves, label + ': movesAfter');
+    assert.equal(record.won, s.won, label + ': record.won');
+    if (record.type === 'undo') {
+      assert.equal(s.undos, before.undos + 1, label + ': undo counts');
+      assert.equal(s.history.length, before.history - 1, label + ': undo pops the history');
+      assert.equal(record.won, false, label);
+    } else {
+      assert.equal(record.recyclesBefore, before.recycles, label + ': recyclesBefore');
+      assert.equal(record.recyclesAfter, s.recycles, label + ': recyclesAfter');
+      assert.equal(s.moves, before.moves + 1, label + ': every draw / recycle / move counts as one move');
+      assert.equal(s.undos, before.undos, label);
+      assert.equal(s.history.length, before.history + 1, label + ': pushed on the history');
+      assert.deepEqual(s.history[s.history.length - 1], record, label + ': history stores the record');
+    }
+    return record;
+  }
+
+  /** Random legal action from the naive rules (and the engine must agree it is legal). */
+  function randomAction(s, rng) {
+    const moves = allMoves(s);
+    const n = moves.length + (drawOk(s) ? 1 : 0);
+    if (n === 0) return null;
+    const pick = rng.int(n);
+    return pick < moves.length ? moves[pick] : DRAW_A;
+  }
+  /**
+   * A sensible player: mostly the engine's first hint, so that games go deep; sometimes random.
+   * Once the hints have run dry for a game (a dead end) it plays on at random without asking
+   * again: in a blocked game every question costs the engine a search.
+   */
+  const dry = new WeakSet();
+  function smartAction(s, rng, randomness) {
+    if (!dry.has(s) && rng.next() >= randomness) {
+      const h = E.hints(s);
+      if (h.length > 0) return h[0].action;
+      dry.add(s);
+    }
+    return randomAction(s, rng);
+  }
+
+  // ================================================================================== RNG
+  test('RNG: mulberry32 reference values, int range, shuffle', () => {
+    const reference = (a) => () => {
+      a |= 0;
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+    for (const seed of [0, 1, 2, 42, 123456789, 0xffffffff, 0x80000000]) {
+      const want = reference(seed);
+      const got = RNG.create(seed);
+      assert.equal(got.seed, seed >>> 0);
+      for (let i = 0; i < 200; i++) {
+        const v = got.next();
+        assert.equal(v, want(), 'seed ' + seed + ' value ' + i);
+        assert.ok(v >= 0 && v < 1);
+      }
+    }
+    // two published mulberry32 outputs (seed 1), so the reference itself cannot drift
+    const one = RNG.create(1);
+    assert.equal(Math.floor(one.next() * 4294967296), 2693262067);
+    assert.equal(Math.floor(one.next() * 4294967296), 11749833);
+    const r = RNG.create(99);
+    const seenInt = new Set();
+    for (let i = 0; i < 5000; i++) {
+      const v = r.int(7);
+      assert.ok(Number.isInteger(v) && v >= 0 && v < 7);
+      seenInt.add(v);
+    }
+    assert.equal(seenInt.size, 7);
+    assert.equal(RNG.create(5).int(1), 0);
+    const a = Array.from({ length: 52 }, (_, i) => i);
+    const b = a.slice();
+    assert.equal(RNG.shuffle(a, RNG.create(7)), a, 'shuffles in place and returns the same array');
+    RNG.shuffle(b, RNG.create(7));
+    assert.deepEqual(a, b, 'deterministic');
+    assert.deepEqual(a.slice().sort((x, y) => x - y), Array.from({ length: 52 }, (_, i) => i), 'a permutation');
+    assert.notDeepEqual(a, Array.from({ length: 52 }, (_, i) => i));
+    const other = RNG.shuffle(Array.from({ length: 52 }, (_, i) => i), RNG.create(8));
+    assert.notDeepEqual(a, other);
+    for (let i = 0; i < 50; i++) {
+      const s = RNG.randomSeed();
+      assert.ok(Number.isInteger(s) && s >= 0 && s <= 0xffffffff);
+    }
+  });
+
+  // ================================================================================== card model
+  test('card model, constants, helpers', () => {
+    assert.deepEqual(Array.from(E.SUITS), ['spades', 'hearts', 'clubs', 'diamonds']);
+    assert.deepEqual(Array.from(E.SUIT_SYMBOLS), ['♠', '♥', '♣', '♦']);
+    assert.deepEqual(Array.from(E.RANK_LABELS), ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']);
+    assert.deepEqual(Array.from(E.FOUNDATIONS), FND);
+    assert.deepEqual(Array.from(E.TABLEAU), TAB);
+    assert.deepEqual(Array.from(E.PILE_IDS).sort(), ALL.slice().sort());
+    assert.equal(E.PILE_IDS.length, 13);
+    for (let id = 0; id < 52; id++) {
+      assert.equal(E.suitOf(id), Math.floor(id / 13));
+      assert.equal(E.rankOf(id), (id % 13) + 1);
+      assert.equal(E.isRed(id), Math.floor(id / 13) % 2 === 1);
+      assert.equal(E.foundationFor(id), 'f' + Math.floor(id / 13));
+      const info = E.cardInfo(id);
+      assert.equal(info.id, id);
+      assert.equal(info.suit, su(id));
+      assert.equal(info.rank, rk(id));
+      assert.equal(info.suitName, E.SUITS[su(id)]);
+      assert.equal(info.symbol, E.SUIT_SYMBOLS[su(id)]);
+      assert.equal(info.label, E.RANK_LABELS[rk(id) - 1]);
+      assert.equal(info.color, red(id) ? 'red' : 'black');
+    }
+    assert.equal(E.cardInfo(0).name, 'Ace of Spades');
+    assert.equal(E.cardInfo(c('QH')).name, 'Queen of Hearts');
+    assert.equal(E.cardInfo(c('KD')).name, 'King of Diamonds');
+    assert.equal(E.cardInfo(c('JC')).name, 'Jack of Clubs');
+    assert.equal(E.cardInfo(c('10C')).name, '10 of Clubs');
+    assert.equal(E.cardInfo(c('2S')).name, '2 of Spades');
+    assert.equal(c('QH'), 24, 'the contract example: data-id 24 is the Queen of Hearts');
+    assert.equal(E.pileKind('stock'), 'stock');
+    assert.equal(E.pileKind('waste'), 'waste');
+    for (const id of FND) assert.equal(E.pileKind(id), 'foundation');
+    for (const id of TAB) assert.equal(E.pileKind(id), 'tableau');
+    // the scoring table has exactly the contract's values (whatever the keys are called)
+    const values = Object.values(E.SCORE);
+    for (const v of [5, 10, -15, -100, -20, 0]) assert.ok(values.includes(v), 'SCORE holds ' + v);
+  });
+
+  test('timeBonus: 0 under 30 seconds, round(700000 / seconds) from there', () => {
+    assert.equal(E.timeBonus(0), 0);
+    assert.equal(E.timeBonus(29999), 0);
+    assert.equal(E.timeBonus(30000), Math.round(700000 / 30));
+    assert.equal(E.timeBonus(60000), Math.round(700000 / 60));
+    assert.equal(E.timeBonus(100000), 7000);
+    assert.equal(E.timeBonus(700000), 1000);
+    assert.equal(E.timeBonus(3600000), Math.round(700000 / 3600));
+    let last = Infinity;
+    for (let ms = 30000; ms < 4000000; ms += 777) {
+      const b = E.timeBonus(ms);
+      assert.ok(Number.isInteger(b) && b >= 0 && b <= last, 'whole, never negative, never growing with time');
+      last = b;
+    }
+  });
+
+  // ================================================================================== deal
+  test('deal: shape, faces, determinism, options', () => {
+    for (let seed = 0; seed < 300; seed++) {
+      const s = E.newGame({ seed, drawCount: seed % 2 ? 3 : 1 });
+      sound(s, 'deal ' + seed);
+      for (let col = 0; col < 7; col++) {
+        const pile = s.piles['t' + col];
+        assert.equal(pile.length, col + 1);
+        pile.forEach((card, i) => assert.equal(s.faceUp[card], i === col, 'only the top card of a column is face-up'));
+      }
+      assert.equal(s.piles.stock.length, 24);
+      assert.equal(s.piles.waste.length, 0);
+      for (const id of FND) assert.equal(s.piles[id].length, 0);
+      assert.deepEqual([s.v, s.seed, s.drawCount, s.score, s.moves, s.undos, s.recycles, s.elapsedMs, s.won], [1, seed, seed % 2 ? 3 : 1, 0, 0, 0, 0, 0, false]);
+      assert.deepEqual(s.history, []);
+      assert.deepEqual(Object.keys(s).sort(), ['drawCount', 'elapsedMs', 'faceUp', 'history', 'id', 'moves', 'piles', 'recycles', 'score', 'seed', 'undos', 'v', 'won']);
+      assert.ok(typeof s.id === 'string' && s.id.length > 0);
+      assert.deepEqual(copy(s), s, 'plain JSON');
+    }
+    const a = E.newGame({ seed: 77 });
+    const b = E.newGame({ seed: 77, drawCount: 3 });
+    assert.deepEqual(a.piles, b.piles, 'same seed, same deal, in both draw modes');
+    assert.deepEqual(a.faceUp, b.faceUp);
+    assert.notEqual(a.id, b.id, 'generated ids are unique');
+    assert.notDeepEqual(E.newGame({ seed: 78 }).piles, a.piles);
+    assert.equal(E.newGame({ seed: 1, id: 'mine' }).id, 'mine');
+    assert.equal(E.newGame({ seed: 1 }).drawCount, 1, 'drawCount defaults to 1');
+    const free = E.newGame({});
+    assert.ok(Number.isInteger(free.seed) && free.seed >= 0 && free.seed <= 0xffffffff, 'a seed is chosen when none is given');
+    assert.deepEqual(E.newGame({ seed: free.seed }).piles, free.piles, 'and the chosen seed reproduces the deal');
+    // the deal comes from RNG.shuffle over 0..51 with RNG.create(seed): the multiset of cards per
+    // "deal position" must be reproducible from the shuffled deck (either end first)
+    const deck = RNG.shuffle(Array.from({ length: 52 }, (_, i) => i), RNG.create(77));
+    const dealt = [];
+    for (let r = 0; r < 7; r++) for (let col = r; col < 7; col++) dealt.push(a.piles['t' + col][r]);
+    const fromEnd = deck.slice().reverse().slice(0, 28);
+    const fromStart = deck.slice(0, 28);
+    assert.ok(JSON.stringify(dealt) === JSON.stringify(fromEnd) || JSON.stringify(dealt) === JSON.stringify(fromStart), 'dealt row by row, one card per column, from the shuffled deck');
+  });
+
+  // ================================================================================== draw
+  test('draw 1: one card, face-up, on top of the waste', () => {
+    const s = E.newGame({ seed: 3 });
+    const top = s.piles.stock[23];
+    assert.equal(E.canDraw(s), true);
+    const r = checkedApply(s, DRAW_A, undefined, 'draw');
+    assert.equal(r.type, 'draw');
+    assert.deepEqual(r.transfers, [{ card: top, from: 'stock', to: 'waste' }]);
+    assert.deepEqual(r.flips, [{ card: top, faceUp: true }]);
+    assert.deepEqual(s.piles.waste, [top]);
+    assert.equal(s.piles.stock.length, 23);
+    assert.equal(s.score, 0);
+    assert.equal(r.auto, undefined);
+    assert.equal(r.won, false);
+  });
+
+  test('draw 3: three cards one at a time; with 2 and with 1 card left it takes what is there', () => {
+    const s = pos({ drawCount: 3, stock: ['2C', '3C', '4C', '5C', '6C', '7C', '8C', '9C'], rest: 't6', t: [['KS']] });
+    assert.equal(s.piles.stock.length, 8);
+    let r = checkedApply(s, DRAW_A, undefined, 'd3 a');
+    assert.deepEqual(r.transfers.map((t) => t.card), [c('9C'), c('8C'), c('7C')], 'top of the stock first');
+    assert.deepEqual(s.piles.waste, [c('9C'), c('8C'), c('7C')], 'the last card drawn ends on top');
+    assert.deepEqual(r.flips, [c('9C'), c('8C'), c('7C')].map((card) => ({ card, faceUp: true })));
+    r = checkedApply(s, DRAW_A, undefined, 'd3 b');
+    assert.deepEqual(s.piles.waste.slice(-3), [c('6C'), c('5C'), c('4C')]);
+    // two cards left
+    r = checkedApply(s, DRAW_A, undefined, 'd3 c');
+    assert.equal(r.type, 'draw');
+    assert.deepEqual(r.transfers, [c('3C'), c('2C')].map((card) => ({ card, from: 'stock', to: 'waste' })));
+    assert.deepEqual(r.flips, [c('3C'), c('2C')].map((card) => ({ card, faceUp: true })));
+    assert.deepEqual(s.piles.stock, []);
+    assert.equal(s.piles.waste[s.piles.waste.length - 1], c('2C'));
+    assert.equal(s.moves, 3);
+
+    // exactly one card left
+    const one = pos({ drawCount: 3, stock: ['5H'], rest: 't6', t: [['KS']] });
+    r = checkedApply(one, DRAW_A, undefined, 'd3 one');
+    assert.deepEqual(r.transfers, [{ card: c('5H'), from: 'stock', to: 'waste' }]);
+    assert.deepEqual(one.piles.waste, [c('5H')]);
+    // and its undo puts exactly that back
+    const u = checkedApply(one, UNDO_A, undefined, 'd3 one undo');
+    assert.deepEqual(u.transfers, [{ card: c('5H'), from: 'waste', to: 'stock' }]);
+    assert.deepEqual(one.piles.stock, [c('5H')]);
+    assert.equal(one.faceUp[c('5H')], false);
+
+    // undo of a 2-card draw
+    const two = pos({ drawCount: 3, stock: ['5H', '6H'], rest: 't6', t: [['KS']] });
+    const before = core(two);
+    checkedApply(two, DRAW_A, undefined, 'd3 two');
+    assert.deepEqual(two.piles.waste, [c('6H'), c('5H')]);
+    checkedApply(two, UNDO_A, undefined, 'd3 two undo');
+    assert.equal(core(two), before);
+  });
+
+  test('recycle: the waste goes back face-down, reversed, so the cards come out in the same order', () => {
+    for (const drawCount of [1, 3]) {
+      for (const n of [1, 2, 3, 4, 5, 7, 24]) {
+        const names = ['AS', '2S', '3S', '4S', '5S', '6S', '7S', '8S', '9S', '10S', 'JS', 'QS', 'KS', 'AH', '2H', '3H', '4H', '5H', '6H', '7H', '8H', '9H', '10H', 'JH'].slice(0, n);
+        const s = pos({ drawCount, stock: names, rest: 't6', t: [['KD']] });
+        const firstPass = [];
+        const firstRecords = [];
+        while (s.piles.stock.length > 0) {
+          const r = checkedApply(s, DRAW_A, undefined, 'pass 1');
+          assert.equal(r.type, 'draw');
+          firstRecords.push(r.transfers.map((t) => t.card));
+          firstPass.push(s.piles.waste[s.piles.waste.length - 1]);
+        }
+        const wasteBefore = s.piles.waste.slice();
+        const rec = checkedApply(s, DRAW_A, undefined, 'recycle');
+        assert.equal(rec.type, 'recycle');
+        assert.equal(rec.recyclesAfter, rec.recyclesBefore + 1);
+        assert.equal(s.recycles, 1);
+        assert.deepEqual(s.piles.waste, []);
+        assert.deepEqual(s.piles.stock, wasteBefore.slice().reverse(), 'in reverse');
+        assert.deepEqual(rec.transfers, wasteBefore.slice().reverse().map((card) => ({ card, from: 'waste', to: 'stock' })), 'top of the waste leaves first');
+        assert.deepEqual(rec.flips.map((f) => f.card).sort((a, b) => a - b), wasteBefore.slice().sort((a, b) => a - b));
+        for (const f of rec.flips) assert.deepEqual(f, { card: f.card, faceUp: false });
+        const secondRecords = [];
+        const secondPass = [];
+        while (s.piles.stock.length > 0) {
+          const r = checkedApply(s, DRAW_A, undefined, 'pass 2');
+          secondRecords.push(r.transfers.map((t) => t.card));
+          secondPass.push(s.piles.waste[s.piles.waste.length - 1]);
+        }
+        assert.deepEqual(secondRecords, firstRecords, 'the second pass draws exactly the same cards (' + drawCount + '/' + n + ')');
+        assert.deepEqual(secondPass, firstPass);
+        assert.deepEqual(s.piles.waste, wasteBefore);
+      }
+    }
+    const empty = pos({ rest: 't6', t: [['KD']] });
+    assert.equal(E.canDraw(empty), false);
+    const before = print(empty);
+    assert.equal(E.apply(empty, DRAW_A), null, 'stock and waste both empty: illegal');
+    assert.equal(print(empty), before);
+  });
+
+  test('recycle scoring: draw 1 costs 100 every time; draw 3 costs 20 from the 4th pass; never below 0; free under auto', () => {
+    const cycle = (s, opts) => {
+      while (s.piles.stock.length > 0) checkedApply(s, DRAW_A, opts, 'cycle draw');
+      return checkedApply(s, DRAW_A, opts, 'cycle recycle');
+    };
+    // draw 1
+    let s = pos({ stock: ['2C', '3C', '4C'], rest: 't6', t: [['KD']], score: 250 });
+    let r = cycle(s);
+    assert.deepEqual([r.type, r.scoreBefore, r.scoreAfter, s.score, s.recycles], ['recycle', 250, 150, 150, 1]);
+    r = cycle(s);
+    assert.deepEqual([r.scoreBefore, r.scoreAfter, s.recycles], [150, 50, 2]);
+    r = cycle(s);
+    assert.deepEqual([r.scoreBefore, r.scoreAfter, s.score, s.recycles], [50, 0, 0, 3], 'clamped at 0');
+    r = cycle(s);
+    assert.deepEqual([r.scoreBefore, r.scoreAfter], [0, 0]);
+
+    // draw 3: pass 1 is the deal's stock; recycle k starts pass k + 1
+    s = pos({ drawCount: 3, stock: ['2C', '3C', '4C', '5C'], rest: 't6', t: [['KD']], score: 30 });
+    r = cycle(s);
+    assert.deepEqual([r.scoreAfter, s.recycles], [30, 1], 'starting pass 2 is free');
+    r = cycle(s);
+    assert.deepEqual([r.scoreAfter, s.recycles], [30, 2], 'starting pass 3 is free');
+    r = cycle(s);
+    assert.deepEqual([r.scoreBefore, r.scoreAfter, s.recycles], [30, 10, 3], 'starting pass 4 costs 20');
+    r = cycle(s);
+    assert.deepEqual([r.scoreBefore, r.scoreAfter, s.score, s.recycles], [10, 0, 0, 4], 'so does pass 5, clamped at 0');
+    // the draws themselves never score
+    s = pos({ drawCount: 3, stock: ['2C', '3C', '4C', '5C'], rest: 't6', t: [['KD']], score: 30 });
+    checkedApply(s, DRAW_A, undefined, 'd');
+    assert.equal(s.score, 30);
+
+    // auto: free, flagged, still counted
+    for (const drawCount of [1, 3]) {
+      s = pos({ drawCount, stock: ['2C', '3C'], rest: 't6', t: [['KD']], score: 500, recycles: 7 });
+      const d = checkedApply(s, DRAW_A, AUTO, 'auto draw');
+      assert.equal(d.auto, true);
+      r = cycle(s, AUTO);
+      assert.equal(r.type, 'recycle');
+      assert.equal(r.auto, true);
+      assert.deepEqual([r.scoreBefore, r.scoreAfter, s.score], [500, 500, 500]);
+      assert.equal(s.recycles, 8);
+      // not auto: opts must be exactly { auto: true }
+      const paid = cycle(s, { auto: 1 });
+      assert.equal(paid.auto, undefined);
+      assert.equal(s.score, drawCount === 1 ? 400 : 480);
+    }
+    // undo of a recycle gives the points and the pass back
+    s = pos({ stock: ['2C', '3C'], rest: 't6', t: [['KD']], score: 130 });
+    checkedApply(s, DRAW_A, undefined, 'x');
+    checkedApply(s, DRAW_A, undefined, 'x');
+    const before = core(s);
+    r = checkedApply(s, DRAW_A, undefined, 'x');
+    assert.equal(s.score, 30);
+    const u = checkedApply(s, UNDO_A, undefined, 'undo recycle');
+    assert.deepEqual([u.scoreBefore, u.scoreAfter, s.score, s.recycles, s.moves], [30, 130, 130, 0, 2]);
+    assert.equal(u.undone, r);
+    assert.equal(core(s), before);
+  });
+
+  // ================================================================================== move rules
+  test('tableau rule: face-up top, opposite colour, exactly one rank higher', () => {
+    const s = pos({
+      t: [['8S'], ['7H'], ['7C'], ['9D'], ['6D'], ['?9H', '7D'], []],
+      waste: ['6C'],
+      rest: 'stock',
+    });
+    assert.equal(E.canDrop(s, c('7H'), 't0'), true, 'red 7 on black 8');
+    assert.equal(E.canDrop(s, c('7D'), 't0'), true);
+    assert.equal(E.canDrop(s, c('7C'), 't0'), false, 'same colour');
+    assert.equal(E.canDrop(s, c('6D'), 't0'), false, 'two ranks lower');
+    assert.equal(E.canDrop(s, c('9D'), 't0'), false, 'higher rank');
+    assert.equal(E.canDrop(s, c('8S'), 't3'), true, 'black 8 on red 9');
+    assert.equal(E.canDrop(s, c('8S'), 't0'), false, 'onto the pile it is already in');
+    assert.equal(E.canDrop(s, c('6C'), 't1'), true, 'waste top onto red 7');
+    assert.equal(E.canDrop(s, c('6C'), 't2'), false);
+    assert.equal(E.canDrop(s, c('6C'), 't6'), false, 'only a King on an empty column');
+    assert.deepEqual(E.legalTargets(s, c('6C')).slice().sort(), ['t1', 't5']);
+    for (const bad of ['stock', 'waste']) {
+      for (const card of [c('7H'), c('6C'), c('8S')]) assert.equal(E.canDrop(s, card, bad), false, 'nothing drops on ' + bad);
+    }
+    // a face-down top never takes a card (only possible in a hand-made position)
+    const odd = pos({ t: [['?8S'], ['7H']], rest: 'stock' });
+    assert.equal(E.canDrop(odd, c('7H'), 't0'), false);
+    assert.equal(E.apply(odd, mv('7H', 't0')), null);
+    // the move itself
+    const r = checkedApply(s, mv('7H', 't0'), undefined, 'move');
+    assert.equal(r.type, 'move');
+    assert.deepEqual(r.transfers, [{ card: c('7H'), from: 't1', to: 't0' }]);
+    assert.deepEqual(r.flips, []);
+    assert.deepEqual(s.piles.t0, [c('8S'), c('7H')]);
+    assert.deepEqual(s.piles.t1, []);
+    assert.equal(s.score, 0, 'tableau -> tableau scores nothing');
+  });
+
+  test('runs: the card and everything above it move as one; only King runs go to an empty column', () => {
+    const s = pos({
+      t: [['?2C', '?3C', '9H', '8S', '7D', '6C'], ['10S'], [], ['KH', 'QS', 'JH'], ['?4C', 'KC'], ['10C']],
+      rest: 'stock',
+    });
+    assert.deepEqual(E.getRun(s, c('9H')), [c('9H'), c('8S'), c('7D'), c('6C')]);
+    assert.deepEqual(E.getRun(s, c('7D')), [c('7D'), c('6C')]);
+    assert.deepEqual(E.getRun(s, c('6C')), [c('6C')]);
+    assert.deepEqual(E.getRun(s, c('3C')), [], 'face-down: cannot be picked up');
+    assert.equal(E.canPickup(s, c('3C')), false);
+    assert.equal(E.canPickup(s, c('9H')), true);
+    assert.equal(E.canDrop(s, c('9H'), 't2'), false, 'a 9 run cannot start an empty column');
+    assert.equal(E.canDrop(s, c('8S'), 't2'), false);
+    assert.equal(E.canDrop(s, c('KH'), 't2'), true, 'a King run can');
+    assert.equal(E.canDrop(s, c('KC'), 't2'), true);
+    assert.equal(E.canDrop(s, c('QS'), 't2'), false);
+    assert.equal(E.canDrop(s, c('9H'), 't1'), true);
+    assert.equal(E.canDrop(s, c('9H'), 't5'), true);
+    assert.equal(E.canDrop(s, c('8S'), 't1'), false);
+    assert.deepEqual(E.legalTargets(s, c('9H')).slice().sort(), ['t1', 't5']);
+    const r = checkedApply(s, mv('9H', 't1'), undefined, 'run');
+    assert.deepEqual(r.transfers, [c('9H'), c('8S'), c('7D'), c('6C')].map((card) => ({ card, from: 't0', to: 't1' })), 'bottom -> top');
+    assert.deepEqual(s.piles.t1, [c('10S'), c('9H'), c('8S'), c('7D'), c('6C')]);
+    assert.deepEqual(s.piles.t0, [c('2C'), c('3C')]);
+    assert.deepEqual(r.flips, [{ card: c('3C'), faceUp: true, reveal: true }], 'the uncovered card turns in the same record');
+    assert.equal(s.faceUp[c('3C')], true);
+    assert.equal(s.faceUp[c('2C')], false, 'only the new top card turns');
+    assert.equal(s.score, 5);
+    // King run to the empty column, uncovering nothing (it leaves an empty column behind)
+    const k = checkedApply(s, mv('KH', 't2'), undefined, 'king run');
+    assert.deepEqual(k.transfers.map((t) => t.card), [c('KH'), c('QS'), c('JH')]);
+    assert.deepEqual(k.flips, []);
+    assert.deepEqual(s.piles.t3, []);
+    assert.deepEqual(s.piles.t2, [c('KH'), c('QS'), c('JH')]);
+    assert.equal(s.score, 5);
+  });
+
+  test('foundation rule: single cards, ace first, same suit ascending, own foundation only', () => {
+    const s = pos({
+      f: { S: 2, H: 0, C: 5 },
+      t: [['3S'], ['AH'], ['4S'], ['6C', '5H'], ['2H'], ['6D', '3D'], ['4H']],
+      waste: ['AD'],
+      rest: 'stock',
+    });
+    assert.equal(E.canDrop(s, c('3S'), 'f0'), true);
+    assert.equal(E.canDrop(s, c('4S'), 'f0'), false, 'skips a rank');
+    assert.equal(E.canDrop(s, c('AH'), 'f1'), true, 'ace on its empty foundation');
+    assert.equal(E.canDrop(s, c('2H'), 'f1'), false, 'no ace yet');
+    assert.equal(E.canDrop(s, c('AD'), 'f3'), true, 'waste top');
+    for (const other of ['f0', 'f1', 'f2']) assert.equal(E.canDrop(s, c('AD'), other), false, 'never on another suit\'s foundation: ' + other);
+    for (const other of ['f1', 'f2', 'f3']) assert.equal(E.canDrop(s, c('3S'), other), false);
+    assert.equal(E.canDrop(s, c('6C'), 'f2'), false, 'a card with cards on it is a run of two');
+    assert.equal(E.canDrop(s, c('3D'), 'f3'), false);
+    assert.deepEqual(E.legalTargets(s, c('3S')).slice().sort(), ['f0', 't6']);
+    for (const bad of [mv('4S', 'f0'), mv('2H', 'f1'), mv('AD', 'f0'), mv('6C', 'f2'), mv('AH', 'f3')]) {
+      const before = print(s);
+      assert.equal(E.apply(s, bad), null);
+      assert.equal(print(s), before);
+    }
+    let r = checkedApply(s, mv('3S', 'f0'), undefined, 't->f');
+    assert.deepEqual(r.transfers, [{ card: c('3S'), from: 't0', to: 'f0' }]);
+    assert.equal(s.score, 10);
+    r = checkedApply(s, mv('4S', 'f0'), undefined, 't->f');
+    assert.equal(s.score, 20);
+    r = checkedApply(s, mv('AD', 'f3'), undefined, 'w->f');
+    assert.deepEqual(r.transfers, [{ card: c('AD'), from: 'waste', to: 'f3' }]);
+    assert.equal(s.score, 30);
+    assert.deepEqual(s.piles.f0, [0, 1, 2, 3]);
+    sound(s, 'after foundation moves');
+  });
+
+  test('what may be picked up: waste top, foundation top, face-up tableau cards — nothing else', () => {
+    const s = pos({
+      f: { S: 3 },
+      t: [['?9D', '8C', '7H'], ['4H']],
+      waste: ['JD', 'QD'],
+      stock: ['5D', '6D'],
+      rest: 't6',
+    });
+    assert.equal(E.canPickup(s, c('QD')), true, 'waste top');
+    assert.equal(E.canPickup(s, c('JD')), false, 'buried in the waste');
+    assert.equal(E.canPickup(s, c('6D')), false, 'stock');
+    assert.equal(E.canPickup(s, c('3S')), true, 'foundation top');
+    assert.equal(E.canPickup(s, c('2S')), false, 'buried in a foundation');
+    assert.equal(E.canPickup(s, c('8C')), true);
+    assert.equal(E.canPickup(s, c('7H')), true);
+    assert.equal(E.canPickup(s, c('9D')), false, 'face-down');
+    assert.deepEqual(E.getRun(s, c('QD')), [c('QD')]);
+    assert.deepEqual(E.getRun(s, c('3S')), [c('3S')]);
+    assert.deepEqual(E.getRun(s, c('JD')), []);
+    assert.deepEqual(E.getRun(s, c('6D')), []);
+    assert.deepEqual(E.getRun(s, c('2S')), []);
+    assert.deepEqual(E.legalTargets(s, c('JD')), []);
+    assert.equal(E.canDrop(s, c('JD'), 't1'), false);
+    for (const junk of [-1, 52, 1.5, NaN, '3', null, undefined, {}, []]) {
+      assert.equal(E.canPickup(s, junk), false);
+      assert.deepEqual(E.getRun(s, junk), []);
+      assert.deepEqual(E.legalTargets(s, junk), []);
+      assert.equal(E.canDrop(s, junk, 't1'), false);
+      assert.equal(E.bestTarget(s, junk), null);
+    }
+    assert.deepEqual(E.locate(s, c('7H')), { pile: 't0', index: 2 });
+    assert.deepEqual(E.locate(s, c('9D')), { pile: 't0', index: 0 });
+    assert.deepEqual(E.locate(s, c('QD')), { pile: 'waste', index: 1 });
+    assert.deepEqual(E.locate(s, c('2S')), { pile: 'f0', index: 1 });
+    assert.equal(E.topCard(s, 'waste'), c('QD'));
+    assert.equal(E.topCard(s, 'stock'), c('6D'));
+    assert.equal(E.topCard(s, 'f0'), c('3S'));
+    assert.equal(E.topCard(s, 'f1'), null);
+    assert.equal(E.topCard(s, 't0'), c('7H'));
+    assert.equal(E.topCard(s, 't3'), null);
+    assert.equal(E.isFaceUp(s, c('7H')), true);
+    assert.equal(E.isFaceUp(s, c('9D')), false);
+    assert.equal(E.canUndo(s), false);
+    assert.equal(E.isWon(s), false);
+  });
+
+  test('a foundation top card may come back to the tableau', () => {
+    const t = pos({ f: { S: 3, D: 13 }, t: [['4H'], ['5C'], [], ['KS']], rest: 'stock', score: 40 });
+    assert.equal(E.canDrop(t, c('3S'), 't0'), true);
+    assert.equal(E.canDrop(t, c('3S'), 't1'), false);
+    assert.equal(E.canDrop(t, c('2S'), 't0'), false, 'only the top card');
+    assert.equal(E.canDrop(t, c('KD'), 't2'), true, 'a King from a foundation may start an empty column');
+    assert.equal(E.canDrop(t, c('KD'), 'f3'), false);
+    assert.equal(E.canDrop(t, c('3S'), 'f0'), false, 'not onto the pile it is in');
+    const r = checkedApply(t, mv('3S', 't0'), undefined, 'f->t');
+    assert.deepEqual(r.transfers, [{ card: c('3S'), from: 'f0', to: 't0' }]);
+    assert.deepEqual(r.flips, []);
+    assert.deepEqual([r.scoreBefore, r.scoreAfter], [40, 25]);
+    assert.deepEqual(t.piles.f0, [0, 1]);
+    const again = checkedApply(t, mv('3S', 'f0'), undefined, 't->f');
+    assert.equal(again.scoreAfter, 35);
+    // clamped at 0
+    const low = pos({ f: { S: 3 }, t: [['4H']], rest: 'stock', score: 10 });
+    const lr = checkedApply(low, mv('3S', 't0'), undefined, 'f->t low');
+    assert.deepEqual([lr.scoreBefore, lr.scoreAfter, low.score], [10, 0, 0]);
+    const u = checkedApply(low, UNDO_A, undefined, 'undo f->t');
+    assert.deepEqual([u.scoreBefore, u.scoreAfter, low.score], [0, 10, 10], 'undo restores the exact score, not score + 15');
+  });
+
+  test('scoring table, row by row', () => {
+    const base = () =>
+      pos({
+        f: { S: 2, H: 1 },
+        t: [['?9C', '3S'], ['?9D', '8C'], ['4D'], ['9H'], ['10S', '2H'], ['KC'], ['3D']],
+        waste: ['QD', '3C'],
+        rest: 'stock',
+        score: 100,
+      });
+    const delta = (action, opts) => {
+      const s = base();
+      const r = checkedApply(s, action, opts, 'score');
+      return [r.scoreAfter - r.scoreBefore, s.score - 100, r.flips.length];
+    };
+    assert.deepEqual(delta(mv('3C', 't2')), [5, 5, 0], 'waste -> tableau +5');
+    const w = base();
+    checkedApply(w, mv('3C', 't2'), undefined, 'w');
+    checkedApply(w, mv('2H', 'f1'), undefined, 'w');
+    assert.equal(w.score, 115, 'tableau -> foundation +10 (nothing uncovered: the 10 of spades was face-up)');
+    assert.deepEqual(delta(mv('2H', 'f1')), [10, 10, 0], 'tableau -> foundation +10');
+    assert.deepEqual(delta(mv('3S', 'f0')), [15, 15, 1], 'tableau -> foundation +10, and +5 for the card it uncovers');
+    assert.deepEqual(delta(mv('8C', 't3')), [5, 5, 1], 'tableau -> tableau 0, +5 for the card it uncovers');
+    assert.deepEqual(delta(mv('3S', 't2')), [5, 5, 1]);
+    assert.deepEqual(delta(mv('2H', 't0')), [0, 0, 0], 'tableau -> tableau 0');
+    assert.deepEqual(delta(mv('2S', 't6')), [-15, -15, 0], 'foundation -> tableau -15');
+    const f = pos({ f: { S: 2, H: 1 }, waste: ['3S'], t: [['4H']], rest: 'stock', score: 7 });
+    const r = checkedApply(f, mv('3S', 'f0'), undefined, 'w->f');
+    assert.equal(r.scoreAfter - r.scoreBefore, 10, 'waste -> foundation +10');
+    // every draw / recycle / move counts one move
+    const m = base();
+    checkedApply(m, mv('3C', 't2'), undefined, 'm');
+    checkedApply(m, DRAW_A, undefined, 'm');
+    checkedApply(m, mv('3S', 'f0'), undefined, 'm');
+    assert.equal(m.moves, 3);
+    assert.equal(m.history.length, 3);
+  });
+
+  test('reveal: the flip is part of the move record, and of its undo', () => {
+    const s = pos({ t: [['?2C', '?3C', '9H', '8S'], ['10S'], ['?5D', 'AS']], rest: 'stock', score: 50 });
+    const before = print(s);
+    const r = checkedApply(s, mv('9H', 't1'), undefined, 'reveal');
+    assert.deepEqual(r.flips, [{ card: c('3C'), faceUp: true, reveal: true }]);
+    assert.equal(r.scoreAfter, 55);
+    const u = checkedApply(s, UNDO_A, undefined, 'undo reveal');
+    assert.equal(u.type, 'undo');
+    assert.equal(u.undone, r);
+    assert.equal(u.flips.length, 1);
+    assert.equal(u.flips[0].card, c('3C'));
+    assert.equal(u.flips[0].faceUp, false, 'the undo turns the card back down');
+    assert.equal(s.faceUp[c('3C')], false);
+    assert.deepEqual(s.piles.t0, [c('2C'), c('3C'), c('9H'), c('8S')], 'the run is back in its original order');
+    assert.deepEqual(u.transfers.map((t) => [t.from, t.to]), [['t1', 't0'], ['t1', 't0']]);
+    assert.deepEqual(u.transfers.map((t) => t.card).sort(), [c('9H'), c('8S')].sort());
+    assert.deepEqual([u.scoreBefore, u.scoreAfter, u.movesBefore, u.movesAfter, u.won], [55, 50, 1, 0, false]);
+    s.undos = 0;
+    assert.equal(print(s), before);
+    // a foundation move that uncovers
+    const r2 = checkedApply(s, mv('AS', 'f0'), undefined, 'reveal 2');
+    assert.deepEqual(r2.flips, [{ card: c('5D'), faceUp: true, reveal: true }]);
+    assert.equal(r2.scoreAfter - r2.scoreBefore, 15);
+    // moving the last card of a column, or uncovering a face-up card, flips nothing
+    const t = pos({ t: [['9H', '8S'], ['10S'], ['9D']], rest: 'stock' });
+    assert.deepEqual(checkedApply(t, mv('8S', 't2'), undefined, 'no reveal').flips, []);
+    assert.deepEqual(checkedApply(t, mv('9H', 't1'), undefined, 'no reveal').flips, []);
+  });
+
+  test('winning, and undo after a win', () => {
+    const s = pos({ f: { S: 13, H: 13, C: 13, D: 11 }, t: [['KD'], ['QD']], score: 300 });
+    assert.equal(s.piles.stock.length, 0);
+    assert.equal(E.isWon(s), false);
+    let r = checkedApply(s, mv('QD', 'f3'), undefined, 'almost');
+    assert.equal(r.won, false);
+    assert.equal(s.won, false);
+    r = checkedApply(s, mv('KD', 'f3'), undefined, 'win');
+    assert.equal(r.won, true);
+    assert.equal(s.won, true);
+    assert.equal(E.isWon(s), true);
+    assert.equal(E.isStuck(s), false, 'a won game is not stuck');
+    assert.equal(E.canAutoComplete(s), false);
+    assert.equal(E.nextAutoAction(s), null);
+    assert.deepEqual(E.hints(s), []);
+    assert.equal(E.canDraw(s), false);
+    assert.equal(E.canUndo(s), true);
+    const u = checkedApply(s, UNDO_A, undefined, 'undo win');
+    assert.equal(u.won, false);
+    assert.equal(s.won, false, 'undo clears won');
+    assert.equal(E.isWon(s), false);
+    assert.deepEqual(s.piles.t0, [c('KD')]);
+    assert.equal(s.score, 310);
+    r = checkedApply(s, mv('KD', 'f3'), undefined, 'win again');
+    assert.equal(s.won, true);
+    assert.equal(s.score, 320);
+  });
+
+  // ================================================================================== undo
+  test('undo: illegal on an empty history; exact inverse of each kind of record', () => {
+    const fresh = E.newGame({ seed: 9 });
+    const before = print(fresh);
+    assert.equal(E.apply(fresh, UNDO_A), null);
+    assert.equal(print(fresh), before);
+
+    // a run of three with a reveal, undone: the transfers of the undo alone must rebuild the column
+    const s = pos({ t: [['?AC', '9H', '8S', '7D'], ['10S']], rest: 'stock' });
+    const start = print(s);
+    const m = checkedApply(s, mv('9H', 't1'), undefined, 'run');
+    const u = checkedApply(s, UNDO_A, undefined, 'undo run');
+    assert.deepEqual(Object.keys(u).sort().filter((k) => !/^recycles/.test(k)), ['flips', 'movesAfter', 'movesBefore', 'scoreAfter', 'scoreBefore', 'transfers', 'type', 'undone', 'won']);
+    assert.equal(u.undone, m);
+    assert.deepEqual(u.transfers, [c('9H'), c('8S'), c('7D')].map((card) => ({ card, from: 't1', to: 't0' })), 'the run comes back as a block, bottom -> top, so that replaying the transfers rebuilds the column');
+    assert.deepEqual(u.flips, [{ card: c('AC'), faceUp: false, reveal: true }]);
+    assert.equal(s.history.length, 0, 'an undo is not pushed on the history');
+    assert.equal(s.undos, 1);
+    assert.equal(E.canUndo(s), false);
+    s.undos = 0;
+    assert.equal(print(s), start);
+
+    // draw 3 undone
+    const d = E.newGame({ seed: 4, drawCount: 3 });
+    const dStart = print(d);
+    const dr = checkedApply(d, DRAW_A, undefined, 'draw3');
+    const du = checkedApply(d, UNDO_A, undefined, 'undo draw3');
+    assert.deepEqual(du.transfers, dr.transfers.slice().reverse().map((t) => ({ card: t.card, from: 'waste', to: 'stock' })), 'inverse, in reverse order');
+    assert.deepEqual(du.flips.map((f) => [f.card, f.faceUp]).sort(), dr.flips.map((f) => [f.card, false]).sort());
+    d.undos = 0;
+    assert.equal(print(d), dStart);
+  });
+
+  test('undo exactness: long random playouts on 320 seeds in both draw modes, undone one step at a time', () => {
+    let actions = 0;
+    let kinds = { draw: 0, recycle: 0, move: 0 };
+    for (let seed = 1000; seed < 1320; seed++) {
+      for (const drawCount of [1, 3]) {
+        const s = E.newGame({ seed, drawCount, id: 'u' + seed });
+        const rng = RNG.create(seed * 31 + drawCount);
+        const prints = [];
+        const randomness = seed % 4 === 0 ? 1 : 0.35; // every 4th game is purely random
+        const target = 100 + (seed % 5) * 50;
+        for (let i = 0; i < target; i++) {
+          const action = smartAction(s, rng, randomness);
+          if (!action) break;
+          prints.push(core(s));
+          const r = E.apply(s, action);
+          assert.ok(r, 'seed ' + seed + ': legal action refused ' + JSON.stringify(action));
+          kinds[r.type]++;
+          if (s.won) break;
+        }
+        const n = s.history.length;
+        actions += n;
+        assert.equal(s.moves, n);
+        for (let i = n - 1; i >= 0; i--) {
+          const u = E.apply(s, UNDO_A);
+          assert.ok(u && u.type === 'undo', 'undo ' + i);
+          assert.equal(core(s), prints[i], 'seed ' + seed + ' draw ' + drawCount + ' step ' + i);
+          assert.equal(s.undos, n - i);
+        }
+        const fresh = E.newGame({ seed, drawCount, id: 'u' + seed });
+        fresh.undos = n;
+        assert.equal(print(s), print(fresh), 'back at the deal, minus undos');
+        assert.equal(E.apply(s, UNDO_A), null);
+      }
+    }
+    assert.ok(actions > 50000, 'enough actions were undone: ' + actions);
+    assert.ok(kinds.recycle > 400 && kinds.move > 10000 && kinds.draw > 10000, JSON.stringify(kinds));
+  });
+
+  // ================================================================================== records
+  test('record completeness: transfers + flips alone reproduce every state, undo included (playouts with interleaved undos)', () => {
+    const stats = { draw: 0, recycle: 0, move: 0, undo: 0, runUndo: 0, reveals: 0, revealUndo: 0, wins: 0 };
+    for (let seed = 1; seed <= 180; seed++) {
+      const drawCount = seed % 2 ? 1 : 3;
+      const s = E.newGame({ seed, drawCount });
+      const rng = RNG.create(seed ^ 0x5bd1e995);
+      for (let i = 0; i < 260 && !s.won; i++) {
+        let action;
+        if (s.history.length > 0 && rng.next() < 0.12) action = UNDO_A;
+        else action = smartAction(s, rng, 0.3);
+        if (!action) {
+          if (!s.history.length) break;
+          action = UNDO_A;
+        }
+        const r = checkedApply(s, action, undefined, 'seed ' + seed + ' step ' + i);
+        stats[r.type]++;
+        if (r.type === 'undo') {
+          if (r.undone.type === 'move' && r.undone.transfers.length > 1) stats.runUndo++;
+          if (r.flips.some((f) => f.reveal)) stats.revealUndo++;
+          // the undo is the inverse of what it undoes: same cards, opposite direction, opposite faces
+          assert.deepEqual(r.transfers.map((t) => t.card).sort(), r.undone.transfers.map((t) => t.card).sort());
+          for (const t of r.transfers) assert.deepEqual([t.from, t.to], [r.undone.transfers[0].to, r.undone.transfers[0].from]);
+          assert.deepEqual(r.flips.map((f) => [f.card, f.faceUp]).sort(), r.undone.flips.map((f) => [f.card, !f.faceUp]).sort());
+          assert.equal(r.scoreAfter, r.undone.scoreBefore);
+          assert.equal(r.movesAfter, r.undone.movesBefore);
+          assert.equal(s.recycles, r.undone.recyclesBefore);
+        } else {
+          assert.ok(['draw', 'recycle', 'move'].includes(r.type));
+          for (const f of r.flips) {
+            if (f.reveal !== undefined) {
+              assert.equal(f.reveal, true);
+              assert.equal(r.type, 'move');
+              assert.equal(f.faceUp, true);
+              stats.reveals++;
+            }
+          }
+          if (r.type === 'move') {
+            assert.ok(r.flips.length <= 1);
+            if (r.flips.length) assert.equal(r.flips[0].reveal, true, 'a move only ever flips the card it uncovers');
+          }
+          assert.equal(r.auto, undefined);
+        }
+        sound(s, 'seed ' + seed + ' step ' + i);
+        if (s.won) stats.wins++;
+      }
+    }
+    if (process.env.REVIEW_STATS) console.log(stats);
+    for (const k of Object.keys(stats)) assert.ok(stats[k] > (k === 'wins' ? 5 : 100), k + ': ' + stats[k]);
+  });
+
+  // ================================================================================== illegal input
+  test('apply returns null and changes nothing for anything illegal', () => {
+    const positions = [];
+    for (let seed = 1; seed <= 12; seed++) {
+      const s = E.newGame({ seed, drawCount: seed % 2 ? 1 : 3 });
+      const rng = RNG.create(seed);
+      for (let i = 0; i < 25 * seed; i++) {
+        const a = smartAction(s, rng, 0.4);
+        if (!a) break;
+        E.apply(s, a);
+      }
+      positions.push(s);
+    }
+    const junkActions = [
+      null, undefined, 0, 1, 'draw', 'undo', [], {}, { type: null }, { type: 'DRAW' }, { type: 'recycle' }, { type: 'move' },
+      { type: 'move', card: 0 }, { type: 'move', to: 't0' }, { type: 'move', card: '5', to: 't0' }, { type: 'move', card: -1, to: 't0' },
+      { type: 'move', card: 52, to: 't0' }, { type: 'move', card: 2.5, to: 't0' }, { type: 'move', card: NaN, to: 't0' },
+      { type: 'move', card: null, to: 't0' }, { type: 'move', card: [3], to: 't0' }, { type: 'move', card: {}, to: 't0' },
+      { type: 'redo' }, { type: 'deal' }, { type: ['draw'] }, { type: 'move', card: 3, to: ['t0'] },
+    ];
+    const junkPiles = ['', 't7', 't-1', 'f4', 'T0', 't', 'f', 'tableau', 'foundation', 'stock', 'waste', 't00', ' t0', 't0 ', '__proto__', 'constructor', 'toString', 'hasOwnProperty', null, undefined, 0, 3, {}, [], true];
+    let refused = 0;
+    for (const s of positions) {
+      const before = print(s);
+      for (const a of junkActions) {
+        assert.equal(E.apply(s, a), null, JSON.stringify(a));
+        assert.equal(E.apply(s, a, AUTO), null);
+        refused++;
+      }
+      for (let card = 0; card < 52; card++) {
+        for (const to of junkPiles) {
+          assert.equal(E.canDrop(s, card, to), false);
+          assert.equal(E.apply(s, { type: 'move', card, to }), null, card + ' -> ' + String(to));
+          refused++;
+        }
+        for (const to of ALL) {
+          const legal = dropOk(s, card, to);
+          assert.equal(E.canDrop(s, card, to), legal, 'canDrop ' + card + ' -> ' + to);
+          if (!legal) {
+            assert.equal(E.apply(s, { type: 'move', card, to }), null, 'illegal move ' + card + ' -> ' + to);
+            refused++;
+          }
+        }
+      }
+      assert.equal(print(s), before, 'nothing changed');
+      assert.equal(E.pileKind('t7'), E.pileKind('nope'));
+    }
+    assert.ok(refused > 5000);
+    assert.equal(E.apply(null, DRAW_A), null);
+    assert.equal(E.apply(undefined, DRAW_A), null);
+  });
+
+  // ================================================================================== queries vs rules
+  test('canPickup / getRun / canDrop / legalTargets / canDraw / bestTarget agree with the naive rules in every position of 50 playouts', () => {
+    let checked = 0;
+    let best = { foundation: 0, tableau: 0, empty: 0, none: 0 };
+    for (let seed = 1; seed <= 50; seed++) {
+      const s = E.newGame({ seed: seed * 17, drawCount: seed % 3 ? 1 : 3 });
+      const rng = RNG.create(seed + 4242);
+      for (let i = 0; i < 180; i++) {
+        const fast = allMoves(s).map((m) => m.card + '>' + m.to);
+        const slow = [];
+        for (let card = 0; card < 52; card++) {
+          const run = runOf(s, card);
+          assert.equal(E.canPickup(s, card), run.length > 0, 'canPickup ' + card);
+          assert.deepEqual(E.getRun(s, card), run, 'getRun ' + card);
+          const targets = ALL.filter((to) => dropOk(s, card, to, run));
+          for (const to of targets) slow.push(card + '>' + to);
+          assert.deepEqual(E.legalTargets(s, card).slice().sort(), targets.slice().sort(), 'legalTargets ' + card);
+          for (const to of ALL) assert.equal(E.canDrop(s, card, to), targets.includes(to));
+          assert.deepEqual(E.locate(s, card), where(s, card));
+          assert.equal(E.isFaceUp(s, card), s.faceUp[card]);
+
+          // bestTarget, restated from the contract
+          let want = null;
+          const at = where(s, card);
+          if (run.length > 0 && at.pile[0] !== 'f') {
+            const home = 'f' + su(card);
+            if (run.length === 1 && targets.includes(home)) want = home;
+            if (want === null) want = TAB.find((t) => s.piles[t].length > 0 && targets.includes(t)) || null;
+            if (want === null && !(rk(card) === 13 && at.pile[0] === 't' && at.index === 0)) {
+              want = TAB.find((t) => s.piles[t].length === 0 && targets.includes(t)) || null;
+            }
+          }
+          const got = E.bestTarget(s, card);
+          assert.equal(got, want, 'bestTarget of ' + card + ' at seed ' + seed + ' step ' + i);
+          if (got !== null) {
+            assert.ok(targets.includes(got), 'bestTarget must be legal');
+            best[got[0] === 'f' ? 'foundation' : s.piles[got].length ? 'tableau' : 'empty']++;
+          } else best.none++;
+          checked++;
+        }
+        for (const id of ALL) {
+          const pile = s.piles[id];
+          assert.equal(E.topCard(s, id), pile.length ? pile[pile.length - 1] : null);
+        }
+        assert.deepEqual(fast.sort(), slow.sort(), 'the two naive move generators of this file agree');
+        // legalMoves (an extra of this engine): exactly the legal moves, each once
+        const listed = E.legalMoves(s);
+        for (const m of listed) assert.deepEqual(Object.keys(m).sort(), ['card', 'to', 'type']);
+        assert.deepEqual(listed.map((m) => m.type + m.card + '>' + m.to).sort(), slow.map((m) => 'move' + m).sort(), 'legalMoves');
+        assert.equal(E.canDraw(s), drawOk(s));
+        assert.equal(E.canUndo(s), s.history.length > 0);
+        const a = smartAction(s, rng, 0.35);
+        if (!a || s.won) break;
+        assert.ok(E.apply(s, a));
+      }
+    }
+    assert.ok(checked > 150000, String(checked));
+    assert.ok(best.foundation > 300 && best.tableau > 300 && best.empty > 10, JSON.stringify(best));
+  });
+
+  test('bestTarget: the contract cases by hand', () => {
+    const s = pos({
+      f: { S: 1 },
+      t: [['KH', 'QS'], [], ['3H'], ['?5C', 'KD'], ['3D', '2S'], ['?6C', 'KC', 'QH'], []],
+      waste: ['2C'],
+      rest: 'stock',
+    });
+    assert.equal(E.bestTarget(s, c('2S')), 'f0', 'alone and legal on its foundation');
+    assert.equal(E.bestTarget(s, c('2C')), 't2', 'leftmost legal non-empty column');
+    assert.equal(E.bestTarget(s, c('KD')), 't1', 'a King that is not at the bottom goes to the leftmost empty column');
+    assert.equal(E.bestTarget(s, c('KH')), null, 'a King run already at index 0 does not hop');
+    assert.equal(E.bestTarget(s, c('KC')), 't1');
+    assert.equal(E.bestTarget(s, c('QS')), 't3', 'onto the red King');
+    assert.equal(E.bestTarget(s, c('QH')), null, 'nowhere to go');
+    assert.equal(E.bestTarget(s, c('AS')), null, 'a card on a foundation');
+    assert.equal(E.bestTarget(s, c('5C')), null, 'face-down');
+    assert.equal(E.bestTarget(s, c('3D')), null, 'a run of two never goes to a foundation, and no column takes a 3 here');
+    const k = pos({ t: [[], ['QD']], waste: ['KS'], rest: 'stock' });
+    assert.equal(E.bestTarget(k, c('KS')), 't0', 'a King from the waste takes the leftmost empty column');
+    const run = pos({ f: { S: 1 }, t: [['2S', 'AH'], ['3D']], rest: 'stock' });
+    assert.equal(E.bestTarget(run, c('2S')), 't1', 'not alone: the tableau, even though the foundation would take the card itself');
+    assert.equal(E.bestTarget(run, c('AH')), 'f1');
+  });
+
+  // ================================================================================== clone / serialize
+  test('clone is a deep copy', () => {
+    const s = E.newGame({ seed: 11, drawCount: 3 });
+    const rng = RNG.create(11);
+    for (let i = 0; i < 80; i++) {
+      const a = smartAction(s, rng, 0.3);
+      if (!a) break;
+      E.apply(s, a);
+    }
+    const before = print(s);
+    const k = E.clone(s);
+    assert.notEqual(k, s);
+    assert.equal(print(k), before);
+    assert.deepEqual(k, s);
+    assert.notEqual(k.piles, s.piles);
+    for (const id of ALL) assert.notEqual(k.piles[id], s.piles[id]);
+    assert.notEqual(k.faceUp, s.faceUp);
+    assert.notEqual(k.history, s.history);
+    // wreck the copy in every way a caller could
+    for (const id of ALL) k.piles[id].length = 0;
+    k.faceUp.fill(true);
+    k.score = -1;
+    k.moves = -1;
+    for (const r of k.history) {
+      r.type = 'x';
+      r.scoreBefore = -1;
+      r.transfers.push({ card: 0, from: 'stock', to: 'waste' });
+      r.transfers[0].card = 99;
+      r.transfers[0].to = 'nowhere';
+      r.flips.push({ card: 1, faceUp: true });
+      if (r.flips.length > 1) r.flips[0].faceUp = 'x';
+    }
+    k.history.length = 1;
+    assert.equal(print(s), before, 'the original is untouched, history records included');
+    assert.ok(s.history.length > 20);
+    // playing on a copy does not touch the original, and vice versa
+    const k2 = E.clone(s);
+    for (let i = 0; i < 40; i++) {
+      const a = smartAction(k2, rng, 0.5);
+      if (!a) break;
+      E.apply(k2, a);
+    }
+    while (E.apply(k2, UNDO_A));
+    assert.equal(print(s), before);
+    const k3 = E.clone(s);
+    while (E.apply(s, UNDO_A));
+    s.undos = 0;
+    assert.equal(print(s), print(E.newGame({ seed: 11, drawCount: 3, id: s.id })));
+    assert.equal(print(k3), before, 'undoing the original does not touch the copy');
+  });
+
+  test('serialize / deserialize round trip (every 9th position of 40 playouts, and won games)', () => {
+    let wins = 0;
+    for (let seed = 1; seed <= 40; seed++) {
+      const s = E.newGame({ seed: seed * 101, drawCount: seed % 2 ? 3 : 1 });
+      const rng = RNG.create(seed);
+      for (let i = 0; i < 400 && !s.won; i++) {
+        if (i % 9 === 0) {
+          const text = E.serialize(s);
+          assert.equal(typeof text, 'string');
+          const back = E.deserialize(text);
+          assert.ok(back, 'seed ' + seed + ' step ' + i + ' must load');
+          assert.equal(E.serialize(back), text);
+          if (i % 45 === 0) assert.deepEqual(back, copy(s));
+          // and it plays on exactly like the original
+          const a = smartAction(E.clone(s), RNG.create(i), 0.3);
+          if (a) assert.deepEqual(E.apply(back, a), E.apply(E.clone(s), a));
+          if (s.history.length) {
+            const again = E.deserialize(text);
+            assert.deepEqual(E.apply(again, UNDO_A), copy(E.apply(E.clone(s), UNDO_A)));
+          }
+        }
+        const a = s.history.length && rng.next() < 0.05 ? UNDO_A : smartAction(s, rng, 0.15);
+        if (!a) break;
+        E.apply(s, a);
+      }
+      s.elapsedMs = 61234.5; // the controller owns it; the engine only carries it
+      const back = E.deserialize(E.serialize(s));
+      assert.deepEqual(back, copy(s));
+      if (s.won) {
+        wins++;
+        assert.equal(back.won, true);
+        assert.ok(E.apply(back, UNDO_A), 'a loaded won game can still be undone');
+        assert.equal(back.won, false);
+      }
+    }
+    assert.ok(wins >= 4, 'some won games were round-tripped: ' + wins);
+  });
+
+  test('deserialize: null (never a throw) on garbage of every kind', () => {
+    const tryLoad = (v, label) => {
+      let out;
+      assert.doesNotThrow(() => {
+        out = E.deserialize(v);
+      }, label);
+      return out;
+    };
+    // things that are not saved games at all
+    const junk = [
+      undefined, null, 0, 1, -1, 3.5, NaN, Infinity, true, false, '', ' ', 'null', 'undefined', '0', '42', '"text"', 'true', '[]', '{}', '[1,2,3]',
+      '{"v":1}', '{"piles":{}}', 'not json', '{', '}', '[', '{"v":1,', '\u0000', '{"__proto__":{"v":1}}', {}, [], () => {}, Symbol('x'),
+      new Date(), /re/, 12345678901234567890n, '{"v":1,"piles":null}', '{"v":1,"piles":[]}', '{"v":1,"piles":{"stock":null}}',
+      '[' .repeat(5000) + ']'.repeat(5000), '{"a":'.repeat(3000) + '1' + '}'.repeat(3000),
+    ];
+    for (const v of junk) assert.equal(tryLoad(v, String(typeof v)), null, 'junk: ' + String(typeof v === 'string' ? v.slice(0, 40) : typeof v));
+
+    const s = E.newGame({ seed: 2024, drawCount: 3 });
+    const rng = RNG.create(1);
+    for (let i = 0; i < 60; i++) E.apply(s, smartAction(s, rng, 0.3) || DRAW_A);
+    const good = E.serialize(s);
+    assert.ok(E.deserialize(good), 'the base save loads');
+    // a state object instead of a string is not a string: null or a state, but never a throw
+    tryLoad(s, 'state object');
+
+    // every truncation of a real save
+    for (let cut = 0; cut < good.length; cut++) {
+      assert.equal(tryLoad(good.slice(0, cut), 'cut at ' + cut), null, 'truncated at ' + cut);
+    }
+    // text around it
+    assert.equal(tryLoad(good + '}', 'trailing'), null);
+    assert.equal(tryLoad('x' + good, 'leading'), null);
+    assert.equal(tryLoad('[' + good + ']', 'wrapped'), null);
+    assert.equal(tryLoad(JSON.stringify(good), 'double encoded'), null);
+
+    // structured damage
+    const damage = (fn, label) => {
+      const o = JSON.parse(good);
+      fn(o);
+      assert.equal(tryLoad(JSON.stringify(o), label), null, label);
+    };
+    const fields = ['v', 'id', 'seed', 'drawCount', 'piles', 'faceUp', 'score', 'moves', 'undos', 'recycles', 'elapsedMs', 'won', 'history'];
+    for (const f of fields) {
+      damage((o) => delete o[f], 'missing ' + f);
+      for (const bad of [null, 'x', -1, 1.5, [], {}, true, 1e400]) {
+        const o = JSON.parse(good);
+        if (JSON.stringify(o[f]) === JSON.stringify(bad)) continue;
+        if (f === 'id' && bad === 'x') continue; // any non-empty string is an id
+        if (f === 'won' && bad === true) continue; // covered below
+        if (f === 'elapsedMs' && bad === 1.5) continue; // a legitimate time
+        if (f === 'history' && Array.isArray(bad)) continue; // an empty history is a (trimmed) history
+        if (f === 'drawCount' && bad === true) continue;
+        o[f] = bad;
+        const text = JSON.stringify(o);
+        assert.equal(tryLoad(text, f + '=' + JSON.stringify(bad)), null, f + ' = ' + JSON.stringify(bad));
+      }
+    }
+    damage((o) => (o.v = 2), 'other version');
+    damage((o) => (o.drawCount = 2), 'drawCount 2');
+    damage((o) => (o.drawCount = '3'), 'drawCount string');
+    damage((o) => (o.won = true), 'won without 52 cards home');
+    damage((o) => (o.seed = -5), 'negative seed');
+    damage((o) => (o.seed = 2 ** 32), 'seed too large');
+    damage((o) => (o.seed = 0.5), 'fractional seed');
+    // cards
+    damage((o) => o.piles.stock.push(o.piles.stock[0]), 'duplicated card (53 cards)');
+    damage((o) => (o.piles.stock[0] = o.piles.stock[1]), 'duplicated card (52 ids, one twice)');
+    damage((o) => (o.piles.t6[0] = o.piles.t5[0]), 'duplicate across piles');
+    damage((o) => o.piles.stock.pop(), '51 cards');
+    damage((o) => o.piles.t6.shift(), '51 cards');
+    damage((o) => (o.piles.stock[0] = 52), 'card 52');
+    damage((o) => (o.piles.stock[0] = -1), 'card -1');
+    damage((o) => (o.piles.stock[0] = 1.5), 'card 1.5');
+    damage((o) => (o.piles.stock[0] = String(o.piles.stock[0])), 'card as string');
+    damage((o) => (o.piles.stock[0] = null), 'card null');
+    damage((o) => (o.piles.stock[0] = [o.piles.stock[0]]), 'card as array');
+    // piles
+    for (const id of ALL) {
+      damage((o) => delete o.piles[id], 'no ' + id);
+      damage((o) => (o.piles[id] = null), id + ' null');
+      damage((o) => (o.piles[id] = {}), id + ' object');
+      damage((o) => (o.piles[id] = 'x'), id + ' string');
+      damage((o) => (o.piles[id] = 7), id + ' number');
+    }
+    damage((o) => (o.piles.t7 = []), 'unknown pile t7');
+    damage((o) => (o.piles.f4 = []), 'unknown pile f4');
+    damage((o) => (o.piles.extra = []), 'unknown pile');
+    damage((o) => {
+      o.piles.t7 = o.piles.t6;
+      delete o.piles.t6;
+    }, 'renamed pile');
+    // faces
+    damage((o) => o.faceUp.pop(), 'faceUp length 51');
+    damage((o) => o.faceUp.push(false), 'faceUp length 53');
+    damage((o) => (o.faceUp = []), 'faceUp empty');
+    damage((o) => (o.faceUp[5] = 1), 'faceUp number');
+    damage((o) => (o.faceUp[5] = null), 'faceUp null');
+    damage((o) => (o.faceUp[5] = 'true'), 'faceUp string');
+    damage((o) => (o.faceUp = Object.assign({}, o.faceUp)), 'faceUp object');
+    // numbers must be finite numbers
+    for (const f of ['score', 'moves', 'undos', 'recycles', 'elapsedMs', 'seed']) {
+      const o = JSON.parse(good);
+      for (const raw of ['1e999', '-1e999', '"12"', 'null', '[1]', '{}']) {
+        const text = JSON.stringify(o).replace(new RegExp('"' + f + '":[^,}]+'), '"' + f + '":' + raw);
+        assert.notEqual(text, JSON.stringify(o));
+        assert.equal(tryLoad(text, f + ' ' + raw), null, f + ' = ' + raw);
+      }
+    }
+    // random byte damage: never a throw, and whatever loads is a sound state that still plays and undoes
+    const dmg = RNG.create(77);
+    let loaded = 0;
+    for (let i = 0; i < 4000; i++) {
+      const at = dmg.int(good.length);
+      const n = 1 + dmg.int(3);
+      const mode = dmg.int(3);
+      const text = mode === 0 ? good.slice(0, at) + good.slice(at + n) : mode === 1 ? good.slice(0, at) + String.fromCharCode(32 + dmg.int(95)) + good.slice(at + 1) : good.slice(0, at) + good.slice(at, at + n) + good.slice(at);
+      const out = tryLoad(text, 'damage ' + i);
+      if (out) {
+        loaded++;
+        sound(out, 'damaged save ' + i);
+        assert.ok([1, 3].includes(out.drawCount));
+        const k = E.clone(out);
+        let guard = 0;
+        while (E.apply(k, UNDO_A)) {
+          sound(k, 'damaged save undo');
+          assert.ok(guard++ < 1000);
+        }
+        for (let j = 0; j < 30; j++) {
+          const a = randomAction(out, dmg);
+          if (!a) break;
+          assert.ok(E.apply(out, a), 'a loaded state plays by the rules');
+          sound(out, 'damaged save play');
+        }
+      }
+    }
+    assert.ok(loaded < 4000);
+  });
+
+  // ================================================================================== auto-complete
+  test('canAutoComplete: the contract conditions', () => {
+    const allUp = { f: { S: 9, H: 9, C: 9, D: 9 }, t: [['KS', 'QH', 'JS', '10H'], ['KH', 'QS', 'JH', '10S'], ['KC', 'QD', 'JC', '10D'], ['KD', 'QC', 'JD', '10C']] };
+    assert.equal(E.canAutoComplete(pos(allUp)), true);
+    assert.equal(E.canAutoComplete(pos(Object.assign({}, allUp, { drawCount: 3 }))), true);
+    // a face-down tableau card
+    const hidden = { f: { S: 9, H: 9, C: 9, D: 9 }, t: [['?KS', 'QH', 'JS', '10H'], ['KH', 'QS', 'JH', '10S'], ['KC', 'QD', 'JC', '10D'], ['KD', 'QC', 'JD', '10C']] };
+    assert.equal(E.canAutoComplete(pos(hidden)), false);
+    assert.equal(E.nextAutoAction(pos(hidden)), null);
+    // stock / waste left
+    const loose = (drawCount, stock, waste) =>
+      pos({ drawCount, stock, waste, f: { S: 9, H: 9, C: 9, D: 9 }, t: [['KS', 'QH', 'JS'], ['KH', 'QS', 'JH'], ['KC', 'QD', 'JC'], ['KD', 'QC', 'JD']], rest: 'stock' });
+    assert.equal(E.canAutoComplete(loose(1, ['10S', '10H'], ['10C', '10D'])), true, 'draw 1: stock and waste may hold cards');
+    assert.equal(E.canAutoComplete(loose(3, [], ['10S'])), false, 'draw 3: three tens are still in the stock (rest)');
+    const mk = (drawCount, stock, waste) =>
+      pos({ drawCount, stock, waste, f: { S: 10, H: 10, C: 9, D: 9 }, t: [['KS', 'QH', 'JS'], ['KH', 'QS', 'JH'], ['KC', 'QD', 'JC'], ['KD', 'QC', 'JD']] });
+    assert.equal(E.canAutoComplete(mk(3, [], ['10C', '10D'])), false, 'draw 3: two waste cards');
+    assert.equal(E.canAutoComplete(mk(3, ['10C'], ['10D'])), false, 'draw 3: a stock card');
+    assert.equal(E.canAutoComplete(mk(3, ['10C', '10D'], [])), false);
+    assert.equal(E.canAutoComplete(mk(1, [], ['10C', '10D'])), true);
+    assert.equal(E.canAutoComplete(mk(1, ['10C', '10D'], [])), true);
+    const single = pos({ drawCount: 3, waste: ['10D'], f: { S: 10, H: 10, C: 10, D: 9 }, t: [['KS', 'QH', 'JS'], ['KH', 'QS', 'JH'], ['KC', 'QD', 'JC'], ['KD', 'QC', 'JD']] });
+    assert.equal(E.canAutoComplete(single), true, 'draw 3: an empty stock and one waste card is fine');
+    assert.equal(E.canAutoComplete(E.newGame({ seed: 1 })), false);
+  });
+
+  test('nextAutoAction: lowest rank first, draws when it must, records are auto, and it ends in a win', () => {
+    const s = pos({
+      stock: ['10C', '9S'],
+      waste: ['9D', '10D'],
+      f: { S: 8, H: 9, C: 9, D: 8 },
+      t: [['KS', 'QH', 'JS', '10H'], ['KH', 'QS', 'JH', '10S'], ['KC', 'QD', 'JC'], ['KD', 'QC', 'JD']],
+      score: 200,
+    });
+    assert.equal(E.canAutoComplete(s), true);
+    assert.deepEqual(E.nextAutoAction(s), { type: 'move', card: c('10H'), to: 'f1' }, 'the only card that can go home');
+    const low = pos({
+      waste: ['9D'],
+      f: { S: 8, H: 9, C: 9, D: 8 },
+      t: [['KS', 'QH', 'JS', '10H'], ['KH', 'QS', 'JH', '10S', '9S'], ['KC', 'QD', 'JC', '10C'], ['KD', 'QC', 'JD', '10D']],
+    });
+    const first = E.nextAutoAction(low);
+    assert.equal(first.type, 'move');
+    assert.equal(rk(first.card), 9, 'a 9 before the 10s');
+    let steps = 0;
+    let recycles = 0;
+    while (!s.won) {
+      const a = E.nextAutoAction(s);
+      assert.ok(a, 'never gives up before the win');
+      assert.ok(a.type === 'draw' || a.to[0] === 'f', 'only draws and foundation moves');
+      const r = checkedApply(s, a, AUTO, 'auto ' + steps);
+      assert.equal(r.auto, true);
+      if (r.type === 'recycle') {
+        recycles++;
+        assert.equal(r.scoreAfter, r.scoreBefore, 'a recycle is free under auto');
+      }
+      assert.ok(++steps < 500);
+    }
+    assert.ok(recycles >= 1, 'this position needs a second pass through the stock');
+    assert.equal(E.nextAutoAction(s), null);
+    assert.equal(s.score, 200 + 10 * 18);
+  });
+
+  test('auto-complete from the canAutoComplete positions met in 400 playouts always wins', () => {
+    let reached = 0;
+    let fromStates = 0;
+    let withStock = 0;
+    for (let seed = 1; seed <= 200; seed++) {
+      for (const drawCount of [1, 3]) {
+        const s = E.newGame({ seed: seed * 7 + 3, drawCount });
+        const rng = RNG.create(seed * 13 + drawCount);
+        let seen = false;
+        let inGame = 0;
+        for (let i = 0; i < 600 && !s.won; i++) {
+          const can = E.canAutoComplete(s);
+          // (run the whole completion from the first eight such positions of a game, then from every fourth)
+          if (can && (++inGame <= 8 || inGame % 4 === 0)) {
+            // the contract condition, restated
+            assert.equal(TAB.every((id) => s.piles[id].every((card) => s.faceUp[card])), true);
+            assert.ok(drawCount === 1 || (s.piles.stock.length === 0 && s.piles.waste.length <= 1));
+            fromStates++;
+            if (!seen) reached++;
+            seen = true;
+            if (s.piles.stock.length + s.piles.waste.length > 0) withStock++;
+            const k = E.clone(s);
+            const startScore = k.score;
+            const home = FND.reduce((n, id) => n + k.piles[id].length, 0);
+            let steps = 0;
+            while (!k.won) {
+              const a = E.nextAutoAction(k);
+              assert.ok(a, 'seed ' + seed + ': nextAutoAction gave up before the win');
+              const r = E.apply(k, a, AUTO);
+              assert.ok(r, 'seed ' + seed + ': nextAutoAction proposed an illegal action');
+              assert.equal(r.auto, true);
+              assert.ok(r.type !== 'move' || r.transfers[0].to[0] === 'f');
+              assert.ok(++steps < 2000, 'seed ' + seed + ': auto-complete does not terminate');
+            }
+            assert.equal(k.score, startScore + 10 * (52 - home), 'auto-complete scores 10 per card and pays nothing for recycles');
+            sound(k, 'auto-completed');
+            if (fromStates % 25 === 1) {
+              const text = E.serialize(k);
+              const back = E.deserialize(text);
+              assert.ok(back, 'an auto-completed game loads again');
+              assert.equal(E.serialize(back), text);
+            }
+          } else if (!can) {
+            assert.equal(E.nextAutoAction(s), null, 'null unless canAutoComplete');
+            const noHidden = TAB.every((id) => s.piles[id].every((card) => s.faceUp[card]));
+            const reachable = drawCount === 1 || (s.piles.stock.length === 0 && s.piles.waste.length <= 1);
+            assert.ok(!(noHidden && reachable), 'seed ' + seed + ': canAutoComplete is false although the contract condition holds');
+          }
+          const a = smartAction(s, rng, 0.1);
+          if (!a) break;
+          E.apply(s, a);
+        }
+      }
+    }
+    if (process.env.REVIEW_STATS) console.log({ reached, fromStates, withStock });
+    assert.ok(reached >= 60, 'games that reached auto-complete: ' + reached);
+    assert.ok(fromStates >= 400, String(fromStates));
+    assert.ok(withStock >= 30, 'some with stock/waste cards left: ' + withStock);
+  });
+
+  // ================================================================================== hints
+  /** Is this hinted action a King hopping from the bottom of a column to an empty column? */
+  function pointlessKing(s, action) {
+    if (action.type !== 'move' || rk(action.card) !== 13) return false;
+    const at = where(s, action.card);
+    return at.pile[0] === 't' && at.index === 0 && action.to[0] === 't' && s.piles[action.to].length === 0;
+  }
+
+  test('hints: shape, order, legality, and no pointless King shuffle, in every position of 200 playouts', () => {
+    let total = 0;
+    const byPriority = {};
+    for (let seed = 1; seed <= 100; seed++) {
+      for (const drawCount of [1, 3]) {
+        const s = E.newGame({ seed: seed * 3 + 1, drawCount });
+        const rng = RNG.create(seed * 29 + drawCount);
+        let dead = 0;
+        for (let i = 0; i < 300; i++) {
+          const before = core(s);
+          const hs = E.hints(s);
+          assert.equal(core(s), before, 'hints never mutates');
+          assert.ok(Array.isArray(hs));
+          if (s.won) {
+            assert.deepEqual(hs, []);
+            break;
+          }
+          let last = -Infinity;
+          const seenActions = new Set();
+          for (const h of hs) {
+            assert.deepEqual(Object.keys(h).sort(), ['action', 'priority', 'reason']);
+            assert.ok(typeof h.priority === 'number' && h.priority >= 1);
+            assert.ok(h.priority >= last, 'best first');
+            last = h.priority;
+            assert.ok(typeof h.reason === 'string' && h.reason.length > 0);
+            const a = h.action;
+            if (a.type === 'draw') {
+              assert.deepEqual(a, { type: 'draw' });
+              assert.ok(drawOk(s), 'a draw hint needs something to draw');
+            } else {
+              assert.deepEqual(Object.keys(a).sort(), ['card', 'to', 'type']);
+              assert.equal(a.type, 'move');
+              assert.ok(dropOk(s, a.card, a.to), 'seed ' + seed + ' step ' + i + ': illegal hint ' + JSON.stringify(h));
+              assert.ok(!pointlessKing(s, a), 'seed ' + seed + ' step ' + i + ': pointless King hop hinted ' + JSON.stringify(h));
+            }
+            const key = JSON.stringify(a);
+            assert.ok(!seenActions.has(key), 'the same action is not hinted twice');
+            seenActions.add(key);
+            byPriority[h.priority] = (byPriority[h.priority] || 0) + 1;
+            total++;
+            // every hinted action applies
+            assert.ok(E.apply(E.clone(s), a), 'hinted action applies');
+          }
+          // the contract kinds: a legal foundation move, or a move that uncovers a card, is always worth a hint
+          const moves = allMoves(s);
+          const toFoundation = moves.filter((m) => m.to[0] === 'f');
+          const uncovering = moves.filter((m) => {
+            const at = where(s, m.card);
+            return at.pile[0] === 't' && at.index > 0 && !s.faceUp[s.piles[at.pile][at.index - 1]];
+          });
+          if (toFoundation.length || uncovering.length) assert.ok(hs.length > 0, 'seed ' + seed + ' step ' + i + ': a useful move exists but there is no hint');
+          for (const m of toFoundation) {
+            assert.ok(hs.some((h) => h.action.type === 'move' && h.action.card === m.card && h.action.to === m.to), 'seed ' + seed + ' step ' + i + ': foundation move not hinted');
+          }
+          // a blocked game is only worth a few more looks (each costs the engine a search)
+          if (hs.length === 0 && ++dead > 3) break;
+          const a = smartAction(s, rng, 0.3);
+          if (!a) break;
+          E.apply(s, a);
+        }
+      }
+    }
+    if (process.env.REVIEW_STATS) console.log({ total, byPriority });
+    assert.ok(total > 25000, String(total));
+    for (const p of [1, 2, 3, 4, 5, 6]) assert.ok(byPriority[p] > 20, 'priority ' + p + ' seen: ' + byPriority[p]);
+  });
+
+  test('hints: the contract kinds by hand', () => {
+    const first = (s) => E.hints(s)[0];
+    // 1 foundation beats everything
+    let s = pos({ f: { S: 1 }, t: [['?9C', '2S'], ['?8D', '7C'], ['8H']], waste: ['6D'], rest: 'stock' });
+    assert.deepEqual(first(s).action, mv('2S', 'f0'));
+    assert.equal(first(s).priority, 1);
+    // 2 uncover a face-down card
+    s = pos({ t: [['?9C', '7C'], ['8H'], ['?3D', 'KS']], rest: 'stock' });
+    assert.deepEqual(first(s).action, mv('7C', 't1'));
+    assert.equal(first(s).priority, 2);
+    // 3 King to an empty column when that uncovers a card
+    s = pos({ t: [['?9C', 'KH'], [], ['QD']], rest: 'stock' });
+    assert.deepEqual(first(s).action, mv('KH', 't1'));
+    assert.equal(first(s).priority, 3);
+    // 3 empty a column when a King is waiting for one
+    s = pos({ t: [['7C'], ['8H'], ['?3D', 'KS'], ['2C'], ['4C'], ['6C'], ['10C']], rest: 'stock' });
+    const h3 = E.hints(s).find((h) => h.priority === 3);
+    assert.deepEqual(h3 && h3.action, mv('7C', 't1'));
+    // 4 waste to tableau
+    s = pos({ t: [['8H'], ['KS']], waste: ['7C'], stock: [], rest: 't6' });
+    assert.ok(E.hints(s).some((h) => h.priority === 4 && JSON.stringify(h.action) === JSON.stringify(mv('7C', 't0'))));
+    // 6 draw when the stock holds something playable; not when it holds nothing useful
+    s = pos({ t: [['8H'], ['KS']], stock: ['7C'], rest: 't6' });
+    assert.deepEqual(E.hints(s).map((h) => h.action), [DRAW_A]);
+    assert.equal(E.hints(s)[0].priority, 6);
+    s = pos({ t: [['8H'], ['KS']], stock: ['2D'], rest: 't6' });
+    assert.deepEqual(E.hints(s), []);
+    // never: a King from the bottom of a column to another empty column
+    s = pos({ t: [['KH', 'QS'], [], ['KD']], rest: 't6' });
+    for (const h of E.hints(s)) assert.ok(!pointlessKing(s, h.action));
+    assert.ok(!E.hints(s).some((h) => h.action.type === 'move' && (h.action.card === c('KH') || h.action.card === c('KD'))));
+    // never: a run going back and forth between two equivalent columns
+    s = pos({ t: [['9H', '8S'], ['9D']], rest: 't6' });
+    assert.ok(!E.hints(s).some((h) => h.action.type === 'move' && h.action.card === c('8S')), 'moving the 8 from one red 9 to the other changes nothing');
+    const a = E.clone(s);
+    E.apply(a, mv('8S', 't1'));
+    assert.ok(!E.hints(a).some((h) => h.action.type === 'move' && h.action.card === c('8S')));
+  });
+
+  test('hints: a card that was just taken back from its foundation can still be hinted home (regression)', () => {
+    // Found by the playouts above: after the 2 of diamonds was taken back from its foundation, the
+    // engine could not tell within its search budget whether that leads anywhere and returned no
+    // hint at all — although a card could go to a foundation.
+    const s = pos({
+      drawCount: 3,
+      f: { S: 3, H: 4, C: 2, D: 2 },
+      t: [
+        ['8C', '7D'],
+        ['KC', 'QH', 'JS', '10D', '9C', '8H', '7C', '6D', '5S'],
+        ['KH', 'QC', 'JH'],
+        ['?KD', '?8D', '7S', '6H', '5C', '4D', '3C'],
+        [],
+        ['10C'],
+        ['?4C', '?9S', '?KS', '?9H', '?5H', '?6C', 'JD', '10S', '9D', '8S', '7H', '6S', '5D', '4S', '3D'],
+      ],
+      waste: ['10H', 'QS'],
+      stock: ['JC', 'QD'],
+    });
+    sound(s, 'regression position');
+    assert.equal(s.piles.stock.length, 2, 'all 52 cards are placed by hand');
+    checkedApply(s, mv('2D', 't3'), undefined, 'take back');
+    assert.ok(dropOk(s, c('2D'), 'f3'));
+    const hs = E.hints(s);
+    assert.ok(hs.some((h) => h.action.type === 'move' && h.action.card === c('2D') && h.action.to === 'f3'), 'the foundation move is among the hints: ' + JSON.stringify(hs));
+    assert.equal(E.isStuck(s), false);
+  });
+
+  test('hints: following the first hint never goes round in circles (600 games)', () => {
+    let wins = 0;
+    let dead = 0;
+    for (let seed = 1; seed <= 300; seed++) {
+      for (const drawCount of [1, 3]) {
+        const s = E.newGame({ seed: seed + 50000, drawCount });
+        const seen = new Map();
+        let steps = 0;
+        for (;;) {
+          const hs = E.hints(s);
+          if (!hs.length) break;
+          assert.ok(E.apply(s, hs[0].action), 'first hint applies');
+          const key = JSON.stringify([s.piles, s.faceUp]);
+          const times = (seen.get(key) || 0) + 1;
+          seen.set(key, times);
+          assert.ok(times <= 3, 'seed ' + seed + ' draw ' + drawCount + ': the same position came up ' + times + ' times following hints');
+          assert.ok(++steps < 3000, 'seed ' + seed + ': hints never run out');
+        }
+        if (s.won) wins++;
+        else dead++;
+      }
+    }
+    assert.ok(wins > 100, 'hint-led wins: ' + wins);
+    assert.ok(dead > 100);
+  });
+
+  // ================================================================================== isStuck
+  /** Cards that cycling the stock (draws and recycles only) ever brings to the top of the waste. */
+  function cycleTops(s) {
+    const k = E.clone(s);
+    const tops = new Set();
+    const total = k.piles.stock.length + k.piles.waste.length;
+    if (k.piles.waste.length) tops.add(k.piles.waste[k.piles.waste.length - 1]);
+    // finishing this pass plus two whole passes shows everything that can ever come up
+    for (let i = 0; i < 3 * (total + 2); i++) {
+      if (!E.apply(k, DRAW_A)) break;
+      if (k.piles.waste.length) tops.add(k.piles.waste[k.piles.waste.length - 1]);
+    }
+    return tops;
+  }
+  /** Could a loose card (from the waste) be placed anywhere in this layout? */
+  function placeable(s, card) {
+    const f = s.piles['f' + su(card)];
+    if (f.length === rk(card) - 1) return true;
+    return TAB.some((t) => {
+      const pile = s.piles[t];
+      if (pile.length === 0) return rk(card) === 13;
+      const top = pile[pile.length - 1];
+      return s.faceUp[top] && red(top) !== red(card) && rk(top) === rk(card) + 1;
+    });
+  }
+  /**
+   * Brute force. From `s`, tries every legal non-draw move, breadth first, through every position
+   * such moves can reach (up to `cap` positions). Returns what it found that would be progress:
+   *   'foundation'  a legal move to a foundation in the position itself
+   *   'reveal'      some reachable position has a move that turns over a face-down card
+   *   'loose'       some reachable position lets a card from the stock cycle be placed
+   *   null          nothing, and the search was complete
+   *   'cap'         nothing found, but the search was cut off
+   */
+  function bruteProgress(s, cap) {
+    const tops = Array.from(cycleTops(s));
+    const root = E.clone(s);
+    root.history = [];
+    if (allMoves(root).some((m) => m.to[0] === 'f')) return 'foundation';
+    // columns are interchangeable, and so are the piles a card came from: only the layout matters
+    const key = (x) => TAB.map((t) => x.piles[t].join(',')).sort().join('|') + '#' + FND.map((f) => x.piles[f].length).join(',');
+    const seen = new Set([key(root)]);
+    let frontier = [root];
+    while (frontier.length) {
+      const next = [];
+      for (const x of frontier) {
+        if (tops.some((card) => placeable(x, card))) return 'loose';
+        for (const m of allMoves(x)) {
+          const r = E.apply(x, m);
+          assert.ok(r, 'brute force: a legal move applies');
+          if (r.flips.length > 0) return 'reveal';
+          const k = key(x);
+          if (!seen.has(k)) {
+            if (seen.size >= cap) return 'cap';
+            seen.add(k);
+            const y = E.clone(x);
+            y.history = [];
+            next.push(y);
+          }
+          assert.ok(E.apply(x, UNDO_A));
+        }
+      }
+      frontier = next;
+    }
+    return null;
+  }
+
+  test('isStuck: hand-made positions', () => {
+    assert.equal(E.isStuck(E.newGame({ seed: 1 })), false);
+    // nothing moves, nothing in the stock helps
+    const dead = (over) => pos(Object.assign({ t: [['?JS', '8H'], ['8D'], ['8S'], ['8C'], ['6H'], ['6D'], ['6S']], stock: ['2D', '2C'], rest: 't0' }, over));
+    let s = dead({});
+    assert.equal(allMoves(s).length, 0);
+    assert.equal(bruteProgress(s, 5000), null);
+    assert.equal(E.isStuck(s), true);
+    assert.deepEqual(E.hints(s), []);
+    // ...but a playable stock card means not stuck
+    s = dead({ stock: ['7C', '2C'] });
+    assert.equal(E.isStuck(s), false);
+    assert.deepEqual(E.hints(s).map((h) => h.action), [DRAW_A]);
+    // a foundation move exists
+    s = dead({ t: [['?JS', '8H'], ['8D'], ['8S'], ['8C'], ['6H'], ['6D'], ['AS']] });
+    assert.equal(E.isStuck(s), false);
+    // an uncovering move exists
+    s = dead({ t: [['?JS', '7S'], ['8D'], ['8S'], ['8C'], ['6H'], ['6D'], ['6S']] });
+    assert.equal(E.isStuck(s), false);
+    // a move exists, but it only shuffles a card between two equivalent columns: still stuck
+    s = dead({ t: [['?JS', '8H'], ['8D', '7S'], ['10S'], ['8C'], ['6H'], ['6D'], ['6S']] });
+    assert.ok(allMoves(s).length > 0);
+    assert.equal(bruteProgress(s, 5000), null);
+    assert.equal(E.isStuck(s), true);
+    // draw 3: the playable card is in the stock but the cycle never shows it
+    s = dead({ drawCount: 3, stock: ['2C', '7C', '2D'] });
+    assert.deepEqual(Array.from(cycleTops(s)), [c('2C')]);
+    assert.equal(E.isStuck(s), true);
+    // draw 3: ...and here it does
+    s = dead({ drawCount: 3, stock: ['7C', '2C', '2D'] });
+    assert.equal(E.isStuck(s), false);
+    // draw 1 sees every stock card
+    s = dead({ drawCount: 1, stock: ['2C', '7C', '2D'] });
+    assert.equal(E.isStuck(s), false);
+    // a waste card that plays
+    s = dead({ stock: [], waste: ['2C', '7C'] });
+    assert.equal(E.isStuck(s), false);
+    // a waste card that does not, with an empty stock
+    s = dead({ stock: [], waste: ['7C', '2C'] });
+    assert.equal(E.isStuck(s), false, 'draw 1: the 7 of clubs comes up again after a recycle');
+    s = dead({ drawCount: 3, stock: [], waste: ['7C', '2D', '2C'] });
+    assert.equal(E.isStuck(s), true, 'draw 3: after the recycle the three cards come out together, the 2 of clubs on top');
+  });
+
+  test('isStuck has no false positives: every stuck verdict in 500 playouts is confirmed by brute force', () => {
+    let verdicts = 0;
+    let confirmed = 0;
+    let capped = 0;
+    let positions = 0;
+    let unknown = 0;
+    for (let seed = 1; seed <= 250; seed++) {
+      for (const drawCount of [1, 3]) {
+        const s = E.newGame({ seed: seed * 11 + 5, drawCount });
+        const rng = RNG.create(seed * 97 + drawCount);
+        // a third of the games are played half at random, which reaches odder dead ends (cards
+        // taken back from the foundations, half-built runs)
+        const randomness = seed % 3 === 0 ? 0.5 : 0.05;
+        let noHint = 0;
+        for (let i = 0; i < 400 && !s.won; i++) {
+          positions++;
+          const before = core(s);
+          const stuck = E.isStuck(s);
+          assert.equal(core(s), before, 'isStuck never mutates');
+          const label = 'seed ' + seed + ' draw ' + drawCount + ' step ' + i;
+          if (stuck) {
+            verdicts++;
+            // the cheap, exact part of the contract: no foundation move, no uncovering move, no
+            // waste move, and nothing the stock cycle shows can be placed
+            for (const m of allMoves(s)) {
+              assert.notEqual(m.to[0], 'f', label + ': stuck although a foundation move exists');
+              assert.notEqual(where(s, m.card).pile, 'waste', label + ': stuck although the waste card can be played');
+              const r = E.apply(E.clone(s), m);
+              assert.equal(r.flips.length, 0, label + ': stuck although a move uncovers a card');
+            }
+            for (const card of cycleTops(s)) assert.ok(!placeable(s, card), label + ': stuck although the stock brings up a playable card');
+            assert.deepEqual(E.hints(s), [], label + ': stuck, yet there is a hint');
+            // the expensive part: no sequence of non-draw moves changes that
+            const found = bruteProgress(s, 800);
+            if (found === 'cap') capped++;
+            else {
+              assert.equal(found, null, label + ': isStuck is true but brute force found: ' + found);
+              confirmed++;
+            }
+            break; // a stuck game stays stuck: one verdict per game is enough
+          }
+          // no hint, yet not called stuck: allowed (the engine may be unsure), but it should be rare
+          if (E.hints(s).length === 0) {
+            unknown++;
+            if (++noHint > 3) break; // each further look costs the engine another search
+          }
+          const a = smartAction(s, rng, randomness);
+          if (!a) break;
+          E.apply(s, a);
+        }
+      }
+    }
+    if (process.env.REVIEW_STATS) console.log({ verdicts, confirmed, capped, positions, unknown });
+    assert.ok(verdicts >= 150, 'stuck verdicts: ' + verdicts);
+    assert.ok(confirmed >= 140, 'confirmed by brute force: ' + confirmed + ' (too large to check: ' + capped + ')');
+    assert.ok(positions > 25000, String(positions));
+    assert.ok(unknown < positions / 20, 'positions without a hint that are not called stuck: ' + unknown);
   });
 });

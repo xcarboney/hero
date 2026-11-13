@@ -18,4 +18,9 @@ captures/
 *.keystore
 keystore.properties
 
+# Packaged apps, e.g. the signed release that README.md has apksigner write next to gradlew
+*.apk
+*.aab
+*.idsig
+
 .DS_Store

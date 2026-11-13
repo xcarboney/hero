@@ -105,7 +105,8 @@ in, so the build output is unsigned and has to be signed before it can be instal
    "$BUILD_TOOLS/apksigner" verify --print-certs solitaire-3d-1.0.0.apk
    ```
 
-   `solitaire-3d-1.0.0.apk` is the installable release.
+   `solitaire-3d-1.0.0.apk` is the installable release (`*.apk` and `*.idsig` are git-ignored
+   here, so it cannot be committed by accident).
 
 In Android Studio the same is *Build > Generate Signed App Bundle or APK > APK*, variant
 `release`.

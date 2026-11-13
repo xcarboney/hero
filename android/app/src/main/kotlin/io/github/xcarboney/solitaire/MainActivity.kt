@@ -3,6 +3,7 @@ package io.github.xcarboney.solitaire
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -82,6 +83,11 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
         drawUnderDisplayCutouts()
+
+        // The game only plays short sound effects. Before Android 9 the volume keys change the
+        // ringer volume unless media is audible at that very moment, so point them at the
+        // stream the WebView plays on.
+        volumeControlStream = AudioManager.STREAM_MUSIC
 
         assetLoader = WebViewAssetLoader.Builder()
             .setDomain(GameSite.HOST)

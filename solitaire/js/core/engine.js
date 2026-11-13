@@ -39,8 +39,9 @@
  *       Deal: ids 0..51 shuffled with RNG.create(seed); cards are dealt from the END of the shuffled
  *       array, row by row (row r = 0..6, columns c = r..6); the 24 cards left (array indexes 0..23,
  *       in that order) are the stock. So the n-th card dealt is piles['t' + c][r], rows first.
- *   clone(state) -> independent copy. History RECORDS are immutable values and are shared between
- *       clones (the history array itself is copied) — never mutate a record.
+ *   clone(state) -> deep copy: piles, faces and every history record are copied, nothing is shared.
+ *       Its cost grows with the history (0.3 us + about 0.2 us per record): a search should clone
+ *       ONCE and then walk the tree with apply() + apply({ type: 'undo' }) on that one copy.
  *   serialize(state) -> string
  *   deserialize(string) -> state | null     null (never a throw) unless the text is a fully
  *       consistent state: known fields with the right types, 52 unique cards over the 13 piles, the
@@ -56,6 +57,12 @@
  *   getRun(state, cardId) -> cardId[]        the card + everything above it; [] when it cannot be picked up
  *   canDrop(state, cardId, toPile) -> boolean              would moving getRun(card) onto toPile be legal?
  *   legalTargets(state, cardId) -> pileId[]  (its foundation first, then tableau left to right)
+ *   legalMoves(state) -> [{ type: 'move', card, to }]      EXTRA (not in the contract), for the solver:
+ *       every legal move of the position in one pass (about 1 us; legalTargets for all 52 cards
+ *       costs 7). Order: the waste top, the face-up tableau cards column by column (bottom -> top),
+ *       then the foundation tops; per card its foundation first, then the columns left to right.
+ *       Draws are not included (see canDraw). Complete: a King hopping between empty columns and
+ *       cards coming back from a foundation are in the list — prune what you do not want.
  *   bestTarget(state, cardId) -> pileId | null             where a tap sends the card: its foundation
  *       (single card), else the leftmost legal non-empty column, else the leftmost empty column
  *       (not for a King already at the bottom of a column). null for foundation cards.
@@ -73,7 +80,9 @@
  *           the player took it back on purpose, or a priority-7 rearrangement should come first
  *       Pointless moves are never suggested (a King hopping between empty columns, shuffling a run
  *       between equivalent columns, emptying a column no King can use). Following hints[0] until
- *       the list is empty never loops.
+ *       the list is empty never loops. The list is never empty while a card can go to a
+ *       foundation, a move would uncover a card, or the waste card can be played: such a move is
+ *       always in it (possibly last, at priority 8).
  *   isWon(state) -> boolean
  *   isStuck(state) -> boolean                not won, and provably nothing can ever again uncover a
  *       card or play a card from the stock/waste — not even after taking cards back from the
@@ -104,14 +113,30 @@
  *     won,                                  the state is won after this action
  *     auto?: true }
  *   Undo returns (and does not store):
- *   { type: 'undo', undone: <reverted record>, transfers: <inverse, reverse order>, flips: <inverse,
- *     reverse order, reveal flag kept>, scoreBefore, scoreAfter, movesBefore, movesAfter,
- *     recyclesBefore, recyclesAfter, won: false }
- *   transfers say WHICH cards travelled and in what order; read final positions from state.piles.
+ *   { type: 'undo', undone: <reverted record>, transfers: <inverse>, flips: <inverse, reverse order,
+ *     reveal flag kept>, scoreBefore, scoreAfter, movesBefore, movesAfter, recyclesBefore,
+ *     recyclesAfter, won: false }
+ *     transfers of an undo: every transfer of the undone record with from/to swapped. An undone
+ *     draw or recycle lists them in reverse order (the cards went over one at a time, the last one
+ *     comes back first). An undone move lists its run bottom -> top again: the run goes back as
+ *     the block it came as. (The contract says "in reverse order"; for a run that order would
+ *     rebuild the column upside down when replayed, so it is deliberately not reversed.)
  *
- * COST (for the solver): apply, apply + undo, clone and legalTargets are a few hundred nanoseconds;
- * hints and isStuck a few microseconds, except in the rare positions where the last-resort search
- * runs (bounded, at most a few milliseconds, cached for the most recent positions).
+ * REPLAYING A RECORD (what a view can rely on — it holds for draw, recycle, move AND undo records):
+ *   start from the piles and faces before the action; for each transfer, in order, take `card` out
+ *   of pile `from` and put it on top of pile `to`; for each flip set faceUp[card] = flip.faceUp.
+ *   The result is exactly state.piles / state.faceUp after the action. Nothing else changes them.
+ *   The record apply() returns for draw / recycle / move is the very object stored on
+ *   state.history: treat records as read-only (copy one before changing it).
+ *
+ * COST (for the solver; measured on random and hint-led playouts, one desktop core):
+ *   apply + undo       about 4.5 million operations per second (0.2 us each), no allocation but the record
+ *   legalMoves         about 1 us for the whole position
+ *   clone              0.3 us + 0.2 us per history record  -> clone once, then apply / undo
+ *   hints, isStuck     2-3 us in open positions — but in a blocked position (no ordinary move left)
+ *                      they run the last-resort search: usually well under 1 ms, up to about 20 ms.
+ *                      Results are cached for the 64 most recent positions. Fine once per player
+ *                      action; NEVER call them per search node or per frame.
  */
 (function (root) {
   'use strict';
@@ -871,6 +896,43 @@
     return out;
   }
 
+  /** legalMoves() helper: appends every legal target of one source card (or run) to `out`. */
+  function addMoves(state, out, card, single, fromColumn) {
+    // (fromColumn: the tableau column the card is in; -1 for the waste, -2 for a foundation)
+    if (single && fromColumn !== -2 && foundationAccepts(state, card)) out.push({ type: 'move', card: card, to: FOUNDATION_OF[card] });
+    const piles = state.piles;
+    for (let t = 0; t < 7; t++) {
+      if (t !== fromColumn && tableauAccepts(state, card, tableauPile(piles, t))) out.push({ type: 'move', card: card, to: TABLEAU[t] });
+    }
+  }
+
+  /**
+   * EXTRA (not in the contract): every legal { type: 'move', card, to } of the position, found in
+   * one pass over the piles. Exactly the moves canDrop() accepts, in this order: the waste top, the
+   * face-up tableau cards column by column (bottom -> top), the foundation tops; for each card its
+   * foundation first, then the columns left to right. Draws are not included. [] once won.
+   */
+  function legalMoves(state) {
+    const out = [];
+    if (state.won) return out;
+    const piles = state.piles;
+    const faceUp = state.faceUp;
+    const waste = piles.waste;
+    if (waste.length > 0 && faceUp[waste[waste.length - 1]] === true) addMoves(state, out, waste[waste.length - 1], true, -1);
+    for (let t = 0; t < 7; t++) {
+      const p = tableauPile(piles, t);
+      const len = p.length;
+      let d = len; // index of the lowest card of the face-up part of the column
+      while (d > 0 && faceUp[p[d - 1]] === true) d--;
+      for (let j = d; j < len; j++) addMoves(state, out, p[j], j === len - 1, t);
+    }
+    for (let s = 0; s < 4; s++) {
+      const f = foundationPile(piles, s);
+      if (f.length > 0 && faceUp[f[f.length - 1]] === true) addMoves(state, out, f[f.length - 1], true, -2);
+    }
+    return out;
+  }
+
   /**
    * Where a tap sends the card: its foundation when it is a single card and that is legal; else the
    * leftmost legal non-empty tableau pile; else the leftmost empty tableau pile — unless the card is
@@ -1489,12 +1551,13 @@
     }
   }
 
-  /** Identifies a whole position (the search results are cached under it). */
-  function positionKey(state) {
+  /** Identifies the foundations and the tableau of a position — everything but the stock and the waste. */
+  function layoutKey(state) {
     const p = state.piles;
     const faceUp = state.faceUp;
-    let s = state.drawCount === 3 ? '3' : '1';
-    for (let i = 0; i < PILE_IDS.length; i++) {
+    let s = 'L';
+    for (let i = 2; i < PILE_IDS.length; i++) {
+      // (PILE_IDS: stock, waste, then the foundations and the tableau)
       const pile = p[PILE_IDS[i]];
       s += '|';
       for (let j = 0; j < pile.length; j++) s += String.fromCharCode(48 + pile[j]);
@@ -1507,6 +1570,17 @@
       s += String.fromCharCode(48 + d);
     }
     return s;
+  }
+
+  /** Identifies a whole position (the search results are cached under it). `layout` = layoutKey(state). */
+  function positionKey(state, layout) {
+    const stock = state.piles.stock;
+    const waste = state.piles.waste;
+    let s = state.drawCount === 3 ? '3|' : '1|';
+    for (let j = 0; j < stock.length; j++) s += String.fromCharCode(48 + stock[j]);
+    s += '|';
+    for (let j = 0; j < waste.length; j++) s += String.fromCharCode(48 + waste[j]);
+    return s + (layout === undefined ? layoutKey(state) : layout);
   }
 
   /** Stores a search result under a position key, dropping the oldest entry when the cache is full. */
@@ -1602,8 +1676,9 @@
   function deepSearch(state) {
     // Nothing hidden and nothing left to draw: there is no progress of that kind to look for.
     if (!hasUnseen(state)) return { status: 'none', action: null };
-    const key = positionKey(state);
-    const cached = deepCache.get(key);
+    const layout = layoutKey(state);
+    const key = positionKey(state, layout);
+    const cached = deepCache.get(key) || deepCache.get(layout);
     if (cached) return cached;
     ensureDeepBuffers();
 
@@ -1663,6 +1738,17 @@
     const wasteTop = waste.length > 0 ? waste[waste.length - 1] : -1;
     listExposable(state);
     const others = expo.slice(0, expoCount);
+    // Stock and waste cards that drawing can never bring up from here (draw 3 only). They are not
+    // goals for this position, but they tell whether a "nothing" verdict would also hold for every
+    // other order of the same stock and waste cards (see the end of this function).
+    const unreachable = [];
+    for (let i = 0; i < piles.stock.length; i++) {
+      if (!expoSeen[piles.stock[i]]) unreachable.push(piles.stock[i]);
+    }
+    for (let i = 0; i < waste.length; i++) {
+      if (!expoSeen[waste[i]]) unreachable.push(waste[i]);
+    }
+    let otherOrder = false; // one of those cards could be played somewhere in the space searched
 
     const tabA = dsTabA;
     const tabB = dsTabB;
@@ -1703,6 +1789,10 @@
         const s13 = s * 13;
         while (h < 13 && pool[base + s13 + h] === P_FOUND) h++;
         fh[s] = h;
+      }
+
+      for (let i = 0; !otherOrder && i < unreachable.length; i++) {
+        if (deepPlayable(unreachable[i], base, empties)) otherOrder = true;
       }
 
       // goal: a card from the stock/waste can be played in this arrangement
@@ -1812,7 +1902,11 @@
     } else {
       result = { status: 'none', action: null };
     }
-    cacheResult(key, result);
+    // A verdict of "nothing" (or "unknown") reached without any stock or waste card being playable
+    // anywhere in the space searched does not depend on the order of those cards: it is remembered
+    // for the layout. Someone going round and round the stock in a dead game then costs one
+    // search, not one for every draw.
+    cacheResult(found < 0 && !viaDraw && !otherOrder ? layout : key, result);
     return result;
   }
 
@@ -2044,6 +2138,7 @@
     getRun: getRun,
     canDrop: canDrop,
     legalTargets: legalTargets,
+    legalMoves: legalMoves,
     bestTarget: bestTarget,
     canDraw: canDraw,
     canUndo: canUndo,

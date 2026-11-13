@@ -50,9 +50,13 @@ jobs:
         with:
           cache-provider: basic
 
+      # chmod: a wrapper script committed through the GitHub web UI or API loses its executable
+      # bit, and the build would then stop with "Permission denied".
       - name: Lint and build the debug APK
         working-directory: android
-        run: ./gradlew lint assembleDebug
+        run: |
+          chmod +x gradlew
+          ./gradlew lint assembleDebug
 
       - name: Upload the debug APK
         uses: actions/upload-artifact@v7

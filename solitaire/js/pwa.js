@@ -108,10 +108,15 @@
     promptInstall() {
       const event = promptEvent;
       if (!event) return Promise.resolve(false);
-      promptEvent = null; // an install offer can be shown once; the browser sends a new one
+      promptEvent = null; // an offer can be shown once; the browser sends a new one if it still applies
+      let shown;
+      try {
+        shown = event.prompt(); // right now: it needs the user gesture this call came from
+      } catch (err) {
+        shown = Promise.reject(err);
+      }
       update();
-      return Promise.resolve()
-        .then(() => event.prompt())
+      return Promise.resolve(shown)
         // Current Chrome resolves prompt() with the choice; older versions only set userChoice.
         .then((choice) => (choice && choice.outcome ? choice : event.userChoice))
         .then((choice) => !!choice && choice.outcome === 'accepted')
@@ -153,7 +158,7 @@
   const metas = {
     'application-name': 'Solitaire',
     'mobile-web-app-capable': 'yes',
-    'apple-mobile-web-app-capable': 'yes', // iOS before 17.4 only knows this name
+    'apple-mobile-web-app-capable': 'yes', // the same switch under iOS Safari's name
     'apple-mobile-web-app-title': 'Solitaire',
     // Draw under the status bar; the layout already keeps clear of it (the safe-area tokens in base.css).
     'apple-mobile-web-app-status-bar-style': 'black-translucent',
@@ -200,9 +205,9 @@
     }
     registering
       .then(function (registration) {
-        // A worker version that finished installing during an earlier visit has been waiting for
-        // a launch: this is one. A version found from now on waits for the next launch. Either
-        // way the page is not reloaded, so a game in progress is never interrupted.
+        // A worker version that has finished installing is waiting for a launch: this is one.
+        // A version that finishes installing later waits for the next launch. Either way the
+        // page is not reloaded, so a game in progress is never interrupted.
         if (registration.waiting) registration.waiting.postMessage({ type: 'SKIP_WAITING' });
       })
       .catch(function () {
