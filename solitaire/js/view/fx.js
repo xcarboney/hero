@@ -4,10 +4,12 @@
  *
  * Public API  (all coordinates are viewport / client pixels; angles are radians, 0 = right, -PI/2 = up)
  * ----------
- *   FX.init({ back: HTMLCanvasElement, front: HTMLCanvasElement })     either may be omitted
+ *   FX.init({ back: HTMLCanvasElement, front: HTMLCanvasElement })     either may be omitted; may be called
+ *                                    again (whatever was showing is wiped from the canvases)
  *   FX.resize()                      re-measures both canvases. Also runs by itself on window resize and when
- *                                    the canvases change size. Backing store = CSS size x devicePixelRatio
- *                                    (capped at 2, at 1.5 in 'low' quality, and at ~8.3M pixels per canvas).
+ *                                    the canvases change size. Front backing store = CSS size x devicePixelRatio,
+ *                                    capped at 2 (1.5 in 'low' quality) and at ~8.3M pixels. The back canvas
+ *                                    only ever shows soft light and is kept at 1 device pixel per CSS pixel.
  *   FX.burst(x, y, { count = 18, colors, kind = 'spark', suit, speed, spread = 2PI, angle = -PI/2,
  *                    gravity, life, size, layer = 'front' })
  *        kind 'spark'  hot streaks that arc and fall            (speed 320 px/s, gravity 560, life 700ms, size 2.4)
@@ -25,14 +27,16 @@
  *   FX.trail(x, y, { color, size = 2.6, layer })     call once per frame, per flying thing, with its current
  *                                    position: leaves fading motes and the odd twinkle. The gap to the same
  *                                    flyer's previous position is filled in, so fast flights get a continuous tail.
- *   FX.floatText(x, y, text, { color, size = 22, rise = 46, duration = 900 })    "+10" popups (centred on x, y)
+ *   FX.floatText(x, y, text, { color, size = 22, rise = 46, duration = 900 })    "+10" popups (centred on x, y;
+ *                                    kept inside the viewport: a popup near an edge stops there)
  *   FX.confetti({ duration = 3500, density = 1, origin, colors }) -> stop()
  *        origin omitted / 'top': rains from above the top edge across the whole width.
  *        origin { x, y, angle = -PI/2, spread = 1.3 }: a cannon firing from that point.
  *        duration may be Infinity (until stop()). stop() ends the emission; airborne pieces finish falling.
  *        Rain never takes more than 70% of the particle pool, so bursts and fireworks always find room.
  *   FX.fireworks({ duration = 4500, intensity = 1, colors }) -> stop()
- *        shells rise from the bottom edge and burst (peony, ring, two-colour, willow and suit-shaped shells).
+ *        shells rise from the bottom edge and burst with a flash of light into comet-tailed stars (peony, ring,
+ *        two-colour, willow and suit-shaped shells).
  *   FX.shimmer(rect, { color, duration = 900, radius })
  *        a slanted band of light plus sparkles sweeping left to right across `rect`
  *        ({ x, y, width, height } or a DOMRect), clipped to its rounded corners.
@@ -45,8 +49,9 @@
  *   FX.clear()                       removes every particle / ring / text / shimmer and stops running
  *                                    confetti and fireworks. The ambient layer keeps going.
  *   FX.count() -> number             live particles (ambient motes are not counted)
- *   FX.stats() -> { particles, rings, texts, shimmers, rockets, sprites, awake, quality, cap, dpr,
- *                   frameMs, avgFrameMs }                      (extra) for tests and tuning
+ *   FX.stats() -> { particles, rings, texts, shimmers, rockets, emitters, sprites, awake, quality, cap, dpr,
+ *                   ambient, load, resStep, frameMs, avgFrameMs }       (extra) for tests and tuning.
+ *                                    dpr = current front-canvas resolution; load / resStep: see "Load shedding".
  *
  * floatText, shimmer, confetti and fireworks always draw on the front canvas. Front-canvas order, bottom to top:
  * shimmers, particles, rockets, rings, texts.
@@ -64,9 +69,22 @@
  *   particles are dropped. The frame loop allocates nothing; shapes are sprites drawn once per (kind, colour),
  *   cached, and blitted with drawImage.
  * - The loop is a SOL.Anim.frame subscription that exists only while there is something to draw; only the
- *   region touched by the previous frame is cleared. With only the ambient layer active the back canvas is
- *   redrawn at ~30fps.
+ *   region touched by the previous frame is cleared.
+ * - The ambient layer is built to run for hours: its light pools are composed at 1/8 resolution and repainted
+ *   four times a second, its motes advance at ~20fps, and between pool updates only the motes' own boxes are
+ *   repainted. It costs well under a millisecond per frame even on a software-rendered canvas.
  * - Suit particles are drawn from canvas paths (no fonts). floatText uses the system UI font.
+ *
+ * Load shedding
+ * -------------
+ * FX watches the interval between frames while 80+ particles are alive. When frames stay slow (under ~43fps
+ * for 300ms) it first lowers the resolution of the front canvas (x0.75, then x0.5, never below 1 device pixel
+ * per CSS pixel; full resolution returns as soon as the front canvas is empty, and a step that was needed is
+ * taken at once by the next big effect for the following minute) and then thins out the continuous emitters —
+ * confetti, firework shells, trails — down to 35%, recovering as frames get fast again. FX.burst() counts are
+ * never reduced.
+ * Trails never take more than 60% of the particle pool and confetti rain never more than 70%, so the bursts
+ * that mark game events always find room.
  */
 (function (root) {
   'use strict';
@@ -81,6 +99,7 @@
   const CAP_LOW = 500;
   const DPR_HIGH = 2;
   const DPR_LOW = 1.5;
+  const DPR_BACK = 1; // the back canvas only ever shows soft light
   const MAX_PIXELS = 8.3e6; // per canvas: a 4K backing store at most
   const MAX_DT = 50;
   const MAX_SPRITES = 160;
@@ -95,7 +114,9 @@
   const K_DUST = 3;
   const K_CONFETTI = 4;
   const K_MOTE = 5;
+  const K_FLASH = 6; // the burst of light when a firework shell opens
   const F_TWINKLE = 1; // flag: flickers towards the end of its life (firework stars)
+  const F_COMET = 2; // flag: a long streak along the direction of travel (firework stars)
 
   // sprite kinds
   const S_GLOW = 0;
@@ -243,7 +264,7 @@
   let ambWanted = false;
   let ambAlpha = 0; // current fade 0..1
   let ambTime = 0;
-  let ambAcc = 0; // ms since the back canvas was last drawn (30fps throttle)
+  let ambAcc = 0; // ms since the ambient layer last advanced (it runs at ~20fps)
   let ambTint = '';
   let ambNextTint = '';
   let ambThemeHint = '';
@@ -252,6 +273,22 @@
   let ambH = 0;
   const ambPoolSpr = [0, 0, 0];
   let ambReady = false;
+  // The ambient layer runs for as long as the game is open, so it has to cost next to nothing:
+  //  - the three big light pools are composed into a canvas 1/8 the size (they are pure low-frequency light) and
+  //    re-rendered only every AMB_BG_MS — they drift a few px per second;
+  //  - motes move less than a pixel per frame, so ~20fps is indistinguishable from 60;
+  //  - between pool updates only the boxes the motes occupied are repainted (clipped), not the whole canvas.
+  const AMB_FRAME_MS = 48;
+  const AMB_BG_MS = 250;
+  const AMB_BG_SCALE = 8;
+  let ambBg = null; // the composed light pools
+  let ambBgCtx = null;
+  let ambBgW = 0;
+  let ambBgH = 0;
+  let ambBgAge = Infinity; // ms since the pools were rendered
+  let ambFull = true; // the next back-canvas frame must repaint everything
+  const ambRect = new Float32Array(AMB_MAX * 4); // device-px boxes of the motes drawn last frame
+  let ambRectN = 0;
 
   // ---- misc
   let trailTick = 0;
@@ -452,9 +489,11 @@
     if (kind === S_GLOW) {
       c = newCanvas(64, 64);
       g = c.getContext('2d');
-      radial(g, 32, 32, 32, [0, 1, 0.26, 0.92, 0.5, 0.38, 0.78, 0.09, 1, 0]);
+      radial(g, 32, 32, 32, [0, 1, 0.28, 0.94, 0.5, 0.4, 0.78, 0.09, 1, 0]);
       tint(g, 64, 64, color);
-      radial(g, 32, 32, 8.5, [0, 0.92, 0.55, 0.5, 1, 0]); // white-hot core
+      // A small white-hot core only: the body of the particle keeps its colour (gold sparks read as gold on the
+      // felt and stay visible on a white card, firework stars read as coloured light instead of white beads).
+      radial(g, 32, 32, 6.4, [0, 0.9, 0.5, 0.55, 1, 0]);
     } else if (kind === S_DUST) {
       c = newCanvas(64, 64);
       g = c.getContext('2d');
@@ -469,10 +508,10 @@
       g.fill();
       tint(g, 96, 96, color);
       // a small bright heart only: on a white card the coloured star itself has to carry the shape
-      g.fillStyle = 'rgba(255,255,255,0.75)';
-      starPath(g, 48, 48, 17);
+      g.fillStyle = 'rgba(255,255,255,0.7)';
+      starPath(g, 48, 48, 13);
       g.fill();
-      radial(g, 48, 48, 7, [0, 1, 0.6, 0.6, 1, 0]);
+      radial(g, 48, 48, 6, [0, 1, 0.6, 0.6, 1, 0]);
     } else if (kind >= S_SUIT && kind < S_SUIT + 4) {
       c = newCanvas(96, 96);
       g = c.getContext('2d');
@@ -666,8 +705,14 @@
           // stretched along the direction of travel, the head leading: a little comet
           ux = vx / sp;
           uy = vy / sp;
-          let st = 1 + sp * 0.0048;
-          if (st > 3.4) st = 3.4;
+          let st;
+          if ((pflags[i] & F_COMET) !== 0) {
+            st = 1 + sp * 0.0125;
+            if (st > 5.5) st = 5.5;
+          } else {
+            st = 1 + sp * 0.0048;
+            if (st > 3.4) st = 3.4;
+          }
           long = half * st;
           X -= ux * (long - half) * 0.55;
           Y -= uy * (long - half) * 0.55;
@@ -720,6 +765,14 @@
         const age = 1 - t;
         const half = psize[i] * DUST_K * (1 + age * 1.3) * dpr;
         ctx.globalAlpha = (age < 0.12 ? age * 8.333 : 1) * t * 0.26;
+        ctx.setTransform(half, 0, 0, half, X, Y);
+        ctx.drawImage(sprites[pspr[i]], -1, -1, 2, 2);
+        ext = half;
+      } else if (kind === K_FLASH) {
+        // opens fast, fades as it swells: the light a shell throws when it bursts
+        const age = 1 - t;
+        const half = psize[i] * (0.35 + 0.65 * (1 - t * t * t)) * dpr;
+        ctx.globalAlpha = (age < 0.1 ? age * 10 : t * t) * 0.9;
         ctx.setTransform(half, 0, 0, half, X, Y);
         ctx.drawImage(sprites[pspr[i]], -1, -1, 2, 2);
         ext = half;
@@ -873,17 +926,30 @@
         s = 0.5 + 0.7 * (1 - q * q);
       } else if (t < 0.3) s = 1.2 - 0.2 * ((t - 0.14) / 0.16);
       else s = 1;
-      const y = tx.y - tx.rise * (1 - u * u * u);
+      let y = tx.y - tx.rise * (1 - u * u * u);
+      let x = tx.x;
+      // Keep the popup on screen: a score rising from the top row (or from a card at the edge of a phone)
+      // stops at the edge instead of leaving the viewport.
+      const hh = tx.size * 0.7;
+      const hw = tx.width * 0.5 + tx.size * 0.25;
+      if (L.h > hh * 2) {
+        if (y < L.oy + hh) y = L.oy + hh;
+        else if (y > L.oy + L.h - hh) y = L.oy + L.h - hh;
+      }
+      if (L.w > hw * 2) {
+        if (x < L.ox + hw) x = L.ox + hw;
+        else if (x > L.ox + L.w - hw) x = L.ox + L.w - hw;
+      }
       const a = t < 0.08 ? t * 12.5 : t > 0.6 ? u * 2.5 : 1;
       const k = dpr * s;
       ctx.globalAlpha = a;
-      ctx.setTransform(k, 0, 0, k, (tx.x - L.ox) * dpr, (y - L.oy) * dpr);
+      ctx.setTransform(k, 0, 0, k, (x - L.ox) * dpr, (y - L.oy) * dpr);
       ctx.font = tx.font;
       ctx.lineWidth = tx.size * 0.2;
       ctx.strokeText(tx.text, 0, 0);
       ctx.fillStyle = tx.color;
       ctx.fillText(tx.text, 0, 0);
-      grow(L, tx.x, y, (tx.width * 0.5 + tx.size * 0.3) * s, tx.size * 0.9 * s);
+      grow(L, x, y, (tx.width * 0.5 + tx.size * 0.3) * s, tx.size * 0.9 * s);
     }
   }
 
@@ -957,7 +1023,19 @@
     n = n < 14 ? 14 : n > AMB_MAX ? AMB_MAX : n;
     ambCount = n;
     for (let i = 0; i < n; i++) seedMote(i, true);
-    ambReady = true;
+    if (!ambBg) {
+      ambBg = newCanvas(1, 1);
+      ambBgCtx = ambBg.getContext('2d');
+    }
+    ambBgW = Math.max(1, Math.ceil(ambW / AMB_BG_SCALE));
+    ambBgH = Math.max(1, Math.ceil(ambH / AMB_BG_SCALE));
+    if (ambBg.width !== ambBgW || ambBg.height !== ambBgH) {
+      ambBg.width = ambBgW;
+      ambBg.height = ambBgH;
+    }
+    ambBgAge = Infinity;
+    ambFull = true;
+    ambReady = !!ambBgCtx;
   }
 
   // light pools: [cx, cy, orbitX, orbitY, speedX, speedY, phase, radius (x max side), alpha]
@@ -967,14 +1045,14 @@
     [0.55, 0.9, 0.3, 0.08, 0.039, 0.081, 4.2, 0.46, 0.14],
   ];
 
-  function drawAmbient(L, dtMs) {
-    const ctx = L.ctx;
-    const dpr = L.dpr;
+  /** Advances the ambient layer by `dtMs`: fades, the theme cross-fade, mote drift. Draws nothing. */
+  function stepAmbient(L, dtMs) {
     const dt = dtMs * 0.001;
     const active = ambientActive();
     // First use, or a theme change while nothing is showing: (re)build right away.
     if (ambAlpha <= 0 && active && (ambNextTint || !ambReady)) buildAmbient();
     const want = active && !ambNextTint ? 1 : 0;
+    const before = ambAlpha;
     // Fade in / out — and through zero when the theme tint changes while showing.
     if (ambAlpha < want) {
       ambAlpha += dtMs / 900;
@@ -986,6 +1064,7 @@
         if (ambNextTint && active) buildAmbient();
       }
     }
+    if (ambAlpha !== before) ambFull = true;
     if (ambAlpha <= 0) return;
     if (L.w !== ambW || L.h !== ambH) {
       // resized: redistribute the motes, keep the tint
@@ -993,23 +1072,14 @@
       buildAmbient();
     }
     ambTime += dt;
+    ambBgAge += dtMs;
+    if (ambBgAge >= AMB_BG_MS) ambFull = true; // the pools have drifted far enough to be worth a repaint
     const W = ambW;
-    const H = ambH;
-    const side = W > H ? W : H;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    for (let p = 0; p < POOLS.length; p++) {
-      const P = POOLS[p];
-      const x = (P[0] + P[2] * Math.sin(ambTime * P[4] + P[6])) * W;
-      const y = (P[1] + P[3] * Math.cos(ambTime * P[5] + P[6] * 1.7)) * H;
-      const r = P[7] * side;
-      ctx.globalAlpha = P[8] * ambAlpha * (0.8 + 0.2 * Math.sin(ambTime * 0.23 + P[6]));
-      ctx.drawImage(sprites[ambPoolSpr[p]], x - r, y - r, r * 2, r * 2);
-    }
     for (let i = 0; i < ambCount; i++) {
       const ph = aphase[i] + arate[i] * dt;
       aphase[i] = ph;
       let x = ax[i] + (avx[i] + Math.sin(ph * 0.7) * 5) * dt;
-      let y = ay[i] + avy[i] * dt;
+      const y = ay[i] + avy[i] * dt;
       const m = asize[i] * 4 + 4;
       if (y < -m) {
         seedMote(i, false);
@@ -1019,18 +1089,110 @@
       else if (x > W + m) x = -m;
       ax[i] = x;
       ay[i] = y;
-      const half = abokeh[i] ? asize[i] : asize[i] * GLOW_K;
-      ctx.globalAlpha = aalpha[i] * ambAlpha * (0.55 + 0.45 * Math.sin(ph));
-      ctx.drawImage(sprites[aspr[i]], x - half, y - half, half * 2, half * 2);
     }
-    L.x0 = 0;
-    L.y0 = 0;
-    L.x1 = L.canvas.width;
-    L.y1 = L.canvas.height;
-    L.dirty = true;
   }
 
-  /** Called when the theme may have changed: cross-fade to the new tint (drawAmbient does the fading). */
+  /** Composes the three light pools into the small `ambBg` canvas. */
+  function renderPools() {
+    const g = ambBgCtx;
+    const W = ambW / AMB_BG_SCALE;
+    const H = ambH / AMB_BG_SCALE;
+    const side = W > H ? W : H;
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalAlpha = 1;
+    g.clearRect(0, 0, ambBgW, ambBgH);
+    for (let p = 0; p < POOLS.length; p++) {
+      const P = POOLS[p];
+      const x = (P[0] + P[2] * Math.sin(ambTime * P[4] + P[6])) * W;
+      const y = (P[1] + P[3] * Math.cos(ambTime * P[5] + P[6] * 1.7)) * H;
+      const r = P[7] * side;
+      g.globalAlpha = P[8] * (0.8 + 0.2 * Math.sin(ambTime * 0.23 + P[6]));
+      g.drawImage(sprites[ambPoolSpr[p]], x - r, y - r, r * 2, r * 2);
+    }
+    g.globalAlpha = 1;
+    ambBgAge = 0;
+  }
+
+  /** Paints the pools onto the back canvas (through whatever clip is set). Always the same blit, so a clipped
+   *  repaint produces exactly the pixels of a full one. */
+  function blitPools(L) {
+    const ctx = L.ctx;
+    const k = AMB_BG_SCALE * L.dpr;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = ambAlpha;
+    ctx.drawImage(ambBg, 0, 0, ambBgW * k, ambBgH * k);
+    ctx.globalAlpha = 1;
+  }
+
+  function drawMotes(L) {
+    const ctx = L.ctx;
+    const dpr = L.dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    let n = 0;
+    for (let i = 0; i < ambCount; i++) {
+      const half = abokeh[i] ? asize[i] : asize[i] * GLOW_K;
+      const x = ax[i];
+      const y = ay[i];
+      ctx.globalAlpha = aalpha[i] * ambAlpha * (0.55 + 0.45 * Math.sin(aphase[i]));
+      ctx.drawImage(sprites[aspr[i]], x - half, y - half, half * 2, half * 2);
+      // remember the box (device px, a pixel of margin) so the next frame can repaint just that
+      const bx = Math.floor((x - half) * dpr) - 1;
+      const by = Math.floor((y - half) * dpr) - 1;
+      ambRect[n] = bx;
+      ambRect[n + 1] = by;
+      ambRect[n + 2] = Math.ceil((x + half) * dpr) + 1 - bx;
+      ambRect[n + 3] = Math.ceil((y + half) * dpr) + 1 - by;
+      n += 4;
+    }
+    ambRectN = n;
+  }
+
+  /**
+   * One frame of the back canvas while the ambient layer is (or was just) showing: erases what the previous
+   * frame drew — everything on a full repaint, otherwise only the mote boxes and the region the back particles
+   * touched — puts the light pools back underneath, then draws motes, particles and rings.
+   */
+  function paintAmbientBack(L, busy) {
+    const ctx = L.ctx;
+    const W = L.canvas.width;
+    const H = L.canvas.height;
+    const showing = ambAlpha > 0 && ambReady;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    if (ambFull || !showing) {
+      ctx.clearRect(0, 0, W, H);
+      if (showing) {
+        if (ambBgAge >= AMB_BG_MS) renderPools();
+        blitPools(L);
+      }
+    } else {
+      ctx.save();
+      ctx.beginPath();
+      for (let i = 0; i < ambRectN; i += 4) ctx.rect(ambRect[i], ambRect[i + 1], ambRect[i + 2], ambRect[i + 3]);
+      if (L.dirty) {
+        const x = Math.floor(L.x0) - 1;
+        const y = Math.floor(L.y0) - 1;
+        ctx.rect(x, y, Math.ceil(L.x1) + 1 - x, Math.ceil(L.y1) + 1 - y);
+      }
+      ctx.clip();
+      ctx.clearRect(0, 0, W, H);
+      blitPools(L);
+      ctx.restore();
+    }
+    ambFull = false;
+    L.dirty = false;
+    L.x0 = Infinity;
+    L.y0 = Infinity;
+    L.x1 = -Infinity;
+    L.y1 = -Infinity;
+    if (showing) drawMotes(L);
+    else ambRectN = 0;
+    if (L.n > 0) drawParticles(L, BACK);
+    if (busy && ringCount > 0) drawRings(L, BACK);
+    ctx.globalAlpha = 1;
+  }
+
+  /** Called when the theme may have changed: cross-fade to the new tint (stepAmbient does the fading). */
   function refreshTint() {
     if (!inited || !ambWanted) return;
     const next = readTint();
@@ -1129,7 +1291,7 @@
     if (e.cannon) {
       // most of the load leaves in the first third of a second
       const windowMs = e.dur < 320 ? e.dur : 320;
-      if (e.age - dtMs < windowMs) e.acc += (e.total / windowMs) * dtMs;
+      if (e.age - dtMs < windowMs) e.acc += ((e.total * (0.4 + 0.6 * load)) / windowMs) * dtMs;
       while (e.acc >= 1) {
         e.acc -= 1;
         const a = e.angle + (rand() - 0.5) * e.spread;
@@ -1142,7 +1304,7 @@
         initConfetti(i, e.colors);
       }
     } else {
-      e.acc += e.rate * dtMs;
+      e.acc += e.rate * load * dtMs;
       // Rain never takes more than 70% of the pool: bursts and fireworks must still find room.
       if (count >= cap * 0.7) e.acc = 0;
       // long enough to fall the whole height at terminal velocity (gravity / drag = 174 px/s)
@@ -1193,22 +1355,31 @@
       const i = spawn(K_SPARK, FRONT, x, y, Math.cos(a) * sp, Math.sin(a) * sp, o[3] * (0.72 + rand() * 0.28), o[4] * (0.8 + rand() * 0.4), o[2], o[1], spr);
       if (i < 0) return;
       if (o[6]) {
-        pflags[i] = F_TWINKLE;
+        pflags[i] = F_TWINKLE | F_COMET;
         pa[i] = rand() * TAU;
+      } else {
+        pflags[i] = F_COMET;
       }
     }
   }
 
-  const SHELL_PEONY = [0.3, 2.1, 95, 1300, 2.6, false, true];
-  const SHELL_RING = [1, 2.1, 80, 1200, 2.7, true, true];
-  const SHELL_CORE = [0.2, 2.6, 70, 850, 2.1, false, false];
-  const SHELL_WILLOW = [0.35, 1.25, 210, 2100, 2.4, false, true];
+  /** The light a shell throws when it opens: one big soft glow in the shell's colour. */
+  function flash(x, y, radius, color) {
+    spawn(K_FLASH, FRONT, x, y, 0, 0, 340, radius, 0, 0, sprite(S_DUST, color));
+  }
+
+  const SHELL_PEONY = [0.3, 2.1, 95, 1350, 2.9, false, true];
+  const SHELL_RING = [1, 2.1, 80, 1250, 3, true, true];
+  const SHELL_CORE = [0.2, 2.6, 70, 850, 2.3, false, false];
+  const SHELL_WILLOW = [0.35, 1.25, 210, 2100, 2.6, false, true];
 
   function explode(r) {
     const x = r.tx;
     const y = r.ty;
-    const S = 360 * r.scale;
-    const q = quality === 'low' ? 0.5 : 1;
+    const S = 430 * r.scale;
+    // fewer stars per shell in 'low' quality and while frames are slow (see govern())
+    const q = (quality === 'low' ? 0.5 : 1) * (0.45 + 0.55 * load);
+    flash(x, y, 150 * r.scale + 40, r.style === 3 ? GOLD : r.c1);
     switch (r.style) {
       case 1:
         shell(x, y, Math.round(46 * q), S, r.c1, SHELL_RING);
@@ -1243,7 +1414,6 @@
         shell(x, y, Math.round(64 * q), S, r.c1, SHELL_PEONY);
         shell(x, y, Math.round(10 * q), S * 0.35, '#ffffff', SHELL_CORE);
     }
-    addRing(x, y, '#fff6d8', 46 * r.scale + 26, 3, 420, FRONT);
   }
 
   function stepRockets(dtMs) {
@@ -1261,10 +1431,15 @@
       const t = r.age / r.fuse;
       const u = 1 - t;
       const e = 1 - u * u;
+      const px0 = r.x;
+      const py0 = r.y;
       r.x = r.sx + (r.tx - r.sx) * e + Math.sin(t * 9 + r.sx) * 2.5 * u;
       r.y = r.sy + (r.ty - r.sy) * e;
-      if (quality === 'high' || (r.tick++ & 1) === 0) {
+      const rich = quality === 'high' && load > 0.75;
+      if (rich || (r.tick++ & 1) === 0) {
         spawn(K_MOTE, FRONT, r.x + (rand() - 0.5) * 3, r.y + rand() * 6, (rand() - 0.5) * 22, 30 + rand() * 50, 260 + rand() * 240, 1.5 + rand() * 1.1, 60, 1, r.spr);
+        // a second ember half-way back along this frame's climb: a tail, not a string of beads
+        if (rich) spawn(K_MOTE, FRONT, (r.x + px0) * 0.5 + (rand() - 0.5) * 3, (r.y + py0) * 0.5, (rand() - 0.5) * 22, 30 + rand() * 50, 220 + rand() * 220, 1.3 + rand() * 0.9, 60, 1, r.spr);
       }
     }
   }
@@ -1278,7 +1453,7 @@
     e.next -= dtMs;
     while (e.next <= 0) {
       launchRocket(e);
-      e.next += e.gap * (0.5 + rand());
+      e.next += (e.gap * (0.5 + rand())) / (0.5 + 0.5 * load);
     }
   }
 
@@ -1293,6 +1468,79 @@
       if (!e.dead) emitters[w++] = e;
     }
     emitters.length = w;
+  }
+
+  // ------------------------------------------------------------------ load shedding
+  // When frames come in slowly while a lot of particles are alive, the continuous emitters thin out — confetti
+  // rain, firework shells, trails — so a weak phone gets a lighter celebration instead of a slide show. Explicit
+  // FX.burst() counts are never touched (callers and tests can rely on them). 1 = full richness.
+  // Before the emitters thin out, the front canvas gives up resolution (x0.75, then x0.5, never under 1 device
+  // pixel per CSS pixel): particles in motion look the same and a software-rendered canvas gets up to twice as
+  // fast. Full resolution comes back as soon as the front canvas is empty, so small effects (a foundation
+  // burst, a score popup) are always crisp; a step that was needed once is taken at once the next time a big
+  // effect starts.
+  const LOAD_MIN = 0.35;
+  let load = 1;
+  let loadDt = 16.7; // smoothed interval between frames while there is real work
+  let loadSlow = 0; // ms spent over budget / comfortably under it since the last adjustment
+  let loadFast = 0;
+  let resStep = 0; // current resolution step of the front canvas
+  let resLearned = 0; // the step big effects needed lately
+  let resLearnedAt = 0; // when a step was last needed (real time): the lesson is forgotten a step a minute
+  let loadSeen = 0; // when govern() last ran (real time)
+
+  function govern(dtMs) {
+    // Time spent asleep counts towards recovery too (12s from the floor to full): one bad moment — a
+    // background task, a cold start — must not make every later celebration a thin one.
+    const tNow = now();
+    if (load < 1 && tNow - loadSeen > 1000) {
+      load += (tNow - loadSeen) / 12000;
+      if (load > 1) load = 1;
+    }
+    loadSeen = tNow;
+    if (resLearned > 0 && tNow - resLearnedAt > 60000) {
+      resLearned--; // try the sharper canvas again: if it is still too slow, 300ms of the next big effect show it
+      resLearnedAt = tNow;
+    }
+    if (count >= 80) {
+      loadDt += (dtMs - loadDt) * 0.12;
+      if (count >= 250 && resStep < resLearned) setRes(resLearned);
+      if (loadDt > 23) {
+        // under ~43fps
+        loadFast = 0;
+        loadSlow += dtMs;
+        if (loadSlow >= 300) {
+          loadSlow = 0;
+          if (count >= 150 && resStep < 2 && layers[FRONT].ctx && layers[FRONT].dpr > 1) {
+            setRes(resStep + 1);
+          } else {
+            load *= 0.72;
+            if (load < LOAD_MIN) load = LOAD_MIN;
+          }
+        }
+      } else if (loadDt < 19) {
+        loadSlow = 0;
+        loadFast += dtMs;
+        if (loadFast >= 1200) {
+          loadFast = 0;
+          load /= 0.85;
+          if (load > 1) load = 1;
+        }
+      } else {
+        loadSlow = 0;
+        loadFast = 0;
+      }
+    } else if (load < 1) {
+      // little on screen: these frames say nothing about the load, so drift back towards full richness
+      loadDt = 16.7;
+      loadSlow = 0;
+      loadFast += dtMs;
+      if (loadFast >= 2500) {
+        loadFast = 0;
+        load /= 0.85;
+        if (load > 1) load = 1;
+      }
+    }
   }
 
   // ------------------------------------------------------------------ frame loop
@@ -1340,6 +1588,11 @@
   }
 
   function clearLayer(L) {
+    if (L === layers[BACK]) {
+      // the ambient picture is gone too: its next frame repaints everything
+      ambFull = true;
+      ambRectN = 0;
+    }
     if (!L.ctx) return;
     L.ctx.setTransform(1, 0, 0, 1, 0, 0);
     L.ctx.clearRect(0, 0, L.canvas.width, L.canvas.height);
@@ -1387,21 +1640,29 @@
     if (!L.ctx) return;
     const ambient = ambAlpha > 0 || ambientActive();
     const busy = L.n > 0 || (ringCount > 0 && ringsOn(BACK));
-    if (!ambient && !busy && !L.dirty) return;
-    if (ambient && !busy) {
-      // nothing but the slow ambient layer: 30fps is plenty
-      ambAcc += dtMs;
-      if (ambAcc < 30) return;
-      dtMs = ambAcc;
-    } else if (ambient) {
-      dtMs += ambAcc;
+    if (!ambient) {
+      if (!busy && !L.dirty) return;
+      beginLayer(L);
+      if (L.n > 0) drawParticles(L, BACK);
+      if (busy && ringCount > 0) drawRings(L, BACK);
+      L.ctx.globalAlpha = 1;
+      return;
     }
-    ambAcc = 0;
-    beginLayer(L);
-    if (ambient) drawAmbient(L, dtMs > 100 ? 100 : dtMs);
-    if (L.n > 0) drawParticles(L, BACK);
-    if (busy && ringCount > 0) drawRings(L, BACK);
-    L.ctx.globalAlpha = 1;
+    // The ambient layer advances at its own slow rate; back particles (if any) still get every frame.
+    ambAcc += dtMs;
+    const due = ambAcc >= AMB_FRAME_MS || ambFull;
+    if (!due && !busy && !L.dirty) return;
+    if (due) {
+      const dt = ambAcc > 100 ? 100 : ambAcc;
+      ambAcc = 0;
+      stepAmbient(L, dt);
+    }
+    paintAmbientBack(L, busy);
+  }
+
+  /** Anything alive that draws on (or will soon draw on) the front canvas. */
+  function frontBusy() {
+    return layers[FRONT].n > 0 || ringCount > 0 || textCount > 0 || shimmerCount > 0 || rocketCount > 0 || emitters.length > 0;
   }
 
   function hasWork() {
@@ -1442,6 +1703,7 @@
       ambAlpha = 0;
       clearLayer(layers[FRONT]);
       clearLayer(layers[BACK]);
+      restoreRes();
       sleep();
       return;
     }
@@ -1450,6 +1712,7 @@
     if (!(dtMs >= 0)) dtMs = 0;
     else if (dtMs > MAX_DT) dtMs = MAX_DT;
 
+    govern(dtMs);
     if (emitters.length > 0) stepEmitters(dtMs);
     if (rocketCount > 0) stepRockets(dtMs);
     if (shimmerCount > 0) stepShimmers(dtMs);
@@ -1462,18 +1725,31 @@
 
     statFrame = now() - t0;
     statAvg += (statFrame - statAvg) * 0.05;
+    // The front canvas is blank: the moment to go back to full resolution without anybody seeing the switch.
+    if (resStep !== 0 && !layers[FRONT].dirty && !frontBusy()) restoreRes();
     if (!hasWork()) sleep();
   }
 
   // ------------------------------------------------------------------ public API
-  function measure(L, dprCap) {
+  /** Reads the canvas' CSS box (a layout read: only on init / resize, never per frame). */
+  function measure(L) {
     const canvas = L.canvas;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
-    const w = Math.round(rect.width);
-    const h = Math.round(rect.height);
+    L.w = Math.round(rect.width);
+    L.h = Math.round(rect.height);
+    L.ox = rect.left;
+    L.oy = rect.top;
+  }
+
+  /** Sizes the backing store for the measured box: CSS size x devicePixelRatio, capped. No layout read. */
+  function allocate(L, dprCap) {
+    const canvas = L.canvas;
+    if (!canvas) return;
+    const w = L.w;
+    const h = L.h;
     let dpr = root.devicePixelRatio || 1;
-    if (dpr > dprCap) dpr = dprCap;
+    if (!(dpr <= dprCap)) dpr = dprCap; // also catches a NaN devicePixelRatio
     if (dpr < 1) dpr = 1;
     if (w * h * dpr * dpr > MAX_PIXELS) dpr = Math.sqrt(MAX_PIXELS / (w * h));
     const pw = Math.max(1, Math.round(w * dpr));
@@ -1482,19 +1758,46 @@
       canvas.width = pw; // resizing clears the canvas
       canvas.height = ph;
       L.dirty = false;
+      if (L === layers[BACK]) {
+        ambFull = true;
+        ambRectN = 0;
+      }
     }
-    L.w = w;
-    L.h = h;
     L.dpr = w > 0 ? pw / w : dpr;
-    L.ox = rect.left;
-    L.oy = rect.top;
+  }
+
+  /** Resolution cap of the front canvas right now: the quality setting, lowered while frames are slow. */
+  function frontCap() {
+    const cap = quality === 'low' ? DPR_LOW : DPR_HIGH;
+    const k = resStep === 0 ? 1 : resStep === 1 ? 0.75 : 0.5;
+    return cap * k < 1 ? 1 : cap * k;
+  }
+
+  /** Changes the front canvas' resolution step (0 full, 1 = x0.75, 2 = x0.5). Clears it: call before drawing. */
+  function setRes(step) {
+    resStep = step;
+    if (step >= resLearned) {
+      resLearned = step;
+      resLearnedAt = now();
+    }
+    allocate(layers[FRONT], frontCap());
+  }
+
+  /** Back to full resolution (only ever called while the front canvas is empty). */
+  function restoreRes() {
+    if (resStep === 0) return;
+    resStep = 0;
+    allocate(layers[FRONT], frontCap());
   }
 
   function resize() {
     if (!inited) return;
-    const dprCap = quality === 'low' ? DPR_LOW : DPR_HIGH;
-    measure(layers[FRONT], dprCap);
-    measure(layers[BACK], dprCap);
+    measure(layers[FRONT]);
+    measure(layers[BACK]);
+    allocate(layers[FRONT], frontCap());
+    // Everything behind the table is soft light (ambient pools and motes, dust, glows): one device pixel per CSS
+    // pixel is all it needs, and it makes the always-on ambient layer four to nine times cheaper on a phone.
+    allocate(layers[BACK], DPR_BACK);
     const L = layers[FRONT].canvas ? layers[FRONT] : layers[BACK];
     if (L.w > 0 && L.h > 0) {
       const m = Math.sqrt((L.w < L.h ? L.w : L.h) / 800);
@@ -1559,11 +1862,17 @@
     if (!front && !back) return;
     sleep();
     wipe();
+    // A second init() while effects are showing: their last frame must not stay painted on the canvases
+    // (neither on the ones we are leaving nor on the ones we are taking over).
+    clearLayer(layers[FRONT]);
+    clearLayer(layers[BACK]);
     layers[FRONT].canvas = front ? opts.front : null;
     layers[FRONT].ctx = front;
     layers[BACK].canvas = back ? opts.back : null;
     layers[BACK].ctx = back;
-    layers[FRONT].dirty = layers[BACK].dirty = false;
+    clearLayer(layers[FRONT]);
+    clearLayer(layers[BACK]);
+    resStep = 0;
     inited = true;
     ambReady = false;
     ambAlpha = 0;
@@ -1721,25 +2030,28 @@
     }
     const tick = trailTick++;
     const low = quality === 'low';
-    if (slot >= 0) {
+    // Trails are decoration: they never take more than 60% of the pool (bursts, confetti and fireworks must
+    // still find room) and they thin out while frames are slow.
+    const room = count < cap * 0.6;
+    if (slot >= 0 && room) {
       // fill the gap: one mote every few px (twice as sparse in 'low'), at most 8 per call
       const dist = Math.sqrt(best);
-      const step = (low ? 2 : 1) * (size * 1.6 + 2);
+      const step = ((low ? 2 : 1) * (size * 1.6 + 2)) / load;
       let n = Math.floor(dist / step);
       if (n > 8) n = 8;
       for (let k = 1; k <= n; k++) {
         const f = k / (n + 1);
         trailMote(layer, trX[slot] + (x - trX[slot]) * f, trY[slot] + (y - trY[slot]) * f, size, spr);
       }
-    } else {
+    } else if (slot < 0) {
       slot = oldest;
     }
     trX[slot] = x;
     trY[slot] = y;
     trFrame[slot] = frameNo;
 
-    if (!low || (tick & 1) === 0) trailMote(layer, x, y, size, spr);
-    if (tick % (low ? 8 : 4) === 0) {
+    if (count < cap * 0.8 && (!low || (tick & 1) === 0)) trailMote(layer, x, y, size, spr);
+    if (room && tick % (low || load < 0.6 ? 8 : 4) === 0) {
       // now and then a twinkle, so the trail sparkles instead of smearing
       const i = spawn(K_STAR, layer, x + (rand() - 0.5) * size * 5, y + (rand() - 0.5) * size * 5, (rand() - 0.5) * 20, (rand() - 0.5) * 20, 420 + rand() * 300, size * (1.1 + rand() * 0.9), 25, 1.2, sprite(S_STAR, color));
       if (i >= 0) {
@@ -1755,7 +2067,11 @@
   function floatText(x, y, text, o) {
     if (!ready() || !layers[FRONT].ctx) return;
     if (text === null || text === undefined) return;
-    text = String(text);
+    try {
+      text = String(text);
+    } catch (err) {
+      return; // an object whose toString throws: nothing to show
+    }
     if (!text) return;
     if (text.length > 80) text = text.slice(0, 80);
     o = o || EMPTY;
@@ -1909,8 +2225,8 @@
     if (!inited) return;
     wipe();
     clearLayer(layers[FRONT]);
-    // With the ambient layer showing, its next frame repaints the whole back canvas anyway.
-    if (ambAlpha <= 0) clearLayer(layers[BACK]);
+    clearLayer(layers[BACK]); // the ambient layer (if showing) repaints itself on its next frame
+    restoreRes();
     if (hasWork()) wake();
   }
 
@@ -1928,6 +2244,8 @@
       cap: cap,
       dpr: layers[FRONT].ctx ? layers[FRONT].dpr : layers[BACK].dpr,
       ambient: ambAlpha,
+      load: load,
+      resStep: resStep,
       frameMs: statFrame,
       avgFrameMs: statAvg,
     };

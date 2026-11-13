@@ -90,6 +90,21 @@
   transition: transform var(--dur-3) var(--ease-back), opacity var(--dur-2) ease-out;
 }
 
+/*
+ * While cards rest on the stock its slot is the visible edge of the pile: the top cards sit a few px up and
+ * to the left (the pile's thickness), the slot shows as a sliver of stacked paper below and to the right.
+ * (The cards deep inside the pile are not rendered at all — see Sprite.cover in board.js.)
+ */
+.pile--stock.is-stacked {
+  background:
+    repeating-linear-gradient(135deg, rgba(60, 54, 40, 0.28) 0 0.6px, transparent 0.6px 1.8px),
+    var(--card-face-shade, #efe9da);
+  box-shadow: 0 max(1px, calc(var(--card-w) * 0.012)) calc(var(--card-w) * 0.03) rgba(3, 8, 6, 0.5);
+}
+.pile--stock.is-stacked .pile__mark {
+  opacity: 0;
+}
+
 /* nothing left to draw and nothing to recycle: the symbol fades back */
 .pile--stock.is-spent .pile__mark {
   opacity: 0.22;
@@ -167,6 +182,51 @@
 }
 
 /* ------------------------------------------------------------------ cards on the table */
+/*
+ * Layer diet. A card is a dozen compositor layers (two faces, the lift shadow and its two cross-fading
+ * halves, the flip veil pair, the glare pair, the 3D boxes around them); 52 cards made ~700 layers and the
+ * compositor work for them was the largest per-frame cost on a throttled CPU. Most of those layers show
+ * nothing most of the time, so on the table they only exist while they are in use. The board toggles the
+ * state classes (Sprite._write):
+ *   .is-lifted    lift > 0, or the card is turning  -> the lift shadow
+ *   .is-turning   --flip between 0 and 180          -> the flip veil (faces darken edge-on)
+ *   .is-glare     set by whoever animates --glare-* -> the glare planes
+ * Together with not rendering covered cards at all (Sprite.cover) a resting table is ~170 layers.
+ * Only cards inside #cards are affected; the inspector and the gallery build their own cards.
+ */
+#cards .card:not(.is-lifted) .card__shadow,
+#cards .card:not(.is-glare) .card__glare {
+  display: none;
+}
+#cards .card:not(.is-turning) .card__flip::before,
+#cards .card:not(.is-turning) .card__flip::after {
+  display: none;
+}
+
+
+/* The top card of the stock asks for a tap: a slow gold breath around its back (opacity only). */
+.card.is-inviting:not(.is-hint) .card__back::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow:
+    0 0 0 calc(var(--card-w) * 0.03) var(--gold, #f3c969),
+    0 0 calc(var(--card-w) * 0.2) calc(var(--card-w) * 0.06) rgba(243, 201, 105, 0.55);
+  opacity: 0;
+  will-change: opacity;
+  animation: board-invite-card 1700ms ease-in-out infinite;
+}
+@keyframes board-invite-card {
+  0%, 100% { opacity: 0.08; }
+  50% { opacity: 0.9; }
+}
+:root[data-reduced-motion="true"] .card.is-inviting:not(.is-hint) .card__back::before {
+  animation: none;
+  opacity: 0.6;
+}
+
 /*
  * The pile a drag would land on: the generic .is-target ring (cards.css) turns gold and stops pulsing, so the
  * player can tell "legal" from "this one" under a thumb.

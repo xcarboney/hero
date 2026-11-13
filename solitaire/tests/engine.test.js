@@ -2125,7 +2125,7 @@ describe('REVIEW (black box, from the contract alone)', () => {
   const UNDO_A = { type: 'undo' };
   const AUTO = { auto: true };
 
-  // ---- cards: id('Q', 'H') or the short form c('QH') ----
+  // ---- cards by name: c('QH') is the Queen of Hearts, c('10S') the 10 of Spades ----
   const SUIT_IX = { S: 0, H: 1, C: 2, D: 3 };
   const RANK_IX = { A: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6, 7: 7, 8: 8, 9: 9, 10: 10, J: 11, Q: 12, K: 13 };
   const c = (name) => {
@@ -2985,7 +2985,7 @@ describe('REVIEW (black box, from the contract alone)', () => {
 
   test('undo exactness: long random playouts on 320 seeds in both draw modes, undone one step at a time', () => {
     let actions = 0;
-    let kinds = { draw: 0, recycle: 0, move: 0 };
+    const kinds = { draw: 0, recycle: 0, move: 0 };
     for (let seed = 1000; seed < 1320; seed++) {
       for (const drawCount of [1, 3]) {
         const s = E.newGame({ seed, drawCount, id: 'u' + seed });
@@ -3127,7 +3127,7 @@ describe('REVIEW (black box, from the contract alone)', () => {
   // ================================================================================== queries vs rules
   test('canPickup / getRun / canDrop / legalTargets / canDraw / bestTarget agree with the naive rules in every position of 50 playouts', () => {
     let checked = 0;
-    let best = { foundation: 0, tableau: 0, empty: 0, none: 0 };
+    const best = { foundation: 0, tableau: 0, empty: 0, none: 0 };
     for (let seed = 1; seed <= 50; seed++) {
       const s = E.newGame({ seed: seed * 17, drawCount: seed % 3 ? 1 : 3 });
       const rng = RNG.create(seed + 4242);

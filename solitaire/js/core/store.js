@@ -5,6 +5,22 @@
  * (private mode, file:// in some browsers, quota), so every access is guarded and falls back to
  * an in-memory map: the game always works, it just may not remember things across reloads.
  *
+ * Inside the Android app (/android) there is a second, more durable place: the shell's own
+ * key/value files, reached through the bridge methods SolitaireNative.storageGet / storageSet /
+ * storageRemove (contract: the header of platform.js). A WebView writes localStorage to disk
+ * lazily, so a move made just before the app is swiped away could be lost; the shell's store
+ * has the value the moment storageSet returns. When that bridge exists:
+ *   - get reads the native value first and falls back to localStorage. A value found only in
+ *     localStorage (saved by an app version without the native store, or after the native copy
+ *     was lost) is copied into the native store on that read;
+ *   - set writes the native store AND localStorage;
+ *   - remove removes from localStorage and leaves a marker in the native store (the value
+ *     '<removed>', which no stored JSON can be). Without the marker a removal would be the one
+ *     thing that is not durable: the lazily written localStorage could still hold the old value
+ *     after the app was swiped away, and the next start would read it back and migrate it as if
+ *     it were new.
+ * Outside the app nothing changes: localStorage, then memory. The API is the same everywhere.
+ *
  * Events (SOL.Bus):
  *   'settings:change'  { key, value, previous, all }
  *   'stats:change'     { stats }
@@ -24,6 +40,80 @@
     }
   }
 
+  /**
+   * The Android shell's key/value store, or null: outside the app, and in an app version whose
+   * shell does not have it yet. Looked up on every call (it is three property reads), so nothing
+   * depends on when the bridge appears.
+   */
+  function nativeStore() {
+    try {
+      const b = root.SolitaireNative;
+      if (!b || typeof b !== 'object') return null;
+      const ok =
+        typeof b.storageGet === 'function' &&
+        typeof b.storageSet === 'function' &&
+        typeof b.storageRemove === 'function';
+      return ok ? b : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function nativeGet(nat, k) {
+    try {
+      const raw = nat.storageGet(k);
+      // "No value" is a Java null, which a WebView hands over as undefined (not null).
+      return typeof raw === 'string' ? raw : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /**
+   * True when the shell accepted the value. When it did not (over its size limit, bridge error)
+   * the key is removed there: get prefers the native copy, so an older value left behind would
+   * come back as if it were the latest. Without one, get falls through to localStorage.
+   */
+  function nativeSet(nat, k, raw) {
+    let ok = false;
+    try {
+      ok = typeof raw === 'string' && nat.storageSet(k, raw) !== false;
+    } catch (err) {
+      ok = false;
+    }
+    if (!ok) nativeRemove(nat, k);
+    return ok;
+  }
+
+  function nativeRemove(nat, k) {
+    try {
+      nat.storageRemove(k);
+    } catch (err) {
+      /* ignore */
+    }
+  }
+
+  /**
+   * What the native store holds for a key the page removed. Every stored value is the output of
+   * JSON.stringify, which never starts with '<', so the marker cannot be mistaken for a value.
+   */
+  const REMOVED = '<removed>';
+
+  /**
+   * Store.remove inside the app: "this key was removed" has to outlive the process just like a
+   * value does, so it is written as a value. If the shell does not take the marker, the key is
+   * at least removed there (which is all a removal was before the marker existed).
+   */
+  function nativeMarkRemoved(nat, k) {
+    let marked = false;
+    try {
+      marked = nat.storageSet(k, REMOVED) !== false;
+    } catch (err) {
+      marked = false;
+    }
+    if (!marked) nativeRemove(nat, k);
+  }
+
   function emit(event, payload) {
     if (SOL.Bus) SOL.Bus.emit(event, payload);
   }
@@ -33,6 +123,20 @@
     /** Read a JSON value; returns `fallback` when missing or unreadable. */
     get(key, fallback) {
       const k = PREFIX + key;
+      const nat = nativeStore();
+      if (nat) {
+        const nativeRaw = nativeGet(nat, k);
+        // Removed, and nothing was written since (a write also lands in `memory`): whatever
+        // localStorage still holds for the key is the stale copy the marker is there to stop.
+        if (nativeRaw === REMOVED && !memory.has(k)) return fallback;
+        if (nativeRaw !== null && nativeRaw !== REMOVED) {
+          try {
+            return JSON.parse(nativeRaw);
+          } catch (err) {
+            /* unreadable native copy: fall back to localStorage, which then replaces it */
+          }
+        }
+      }
       let raw = null;
       const ls = storage();
       try {
@@ -40,13 +144,18 @@
       } catch (err) {
         raw = null;
       }
+      const fromLocalStorage = raw !== null && raw !== undefined;
       if (raw === null && memory.has(k)) raw = memory.get(k);
       if (raw === null || raw === undefined) return fallback;
+      let value;
       try {
-        return JSON.parse(raw);
+        value = JSON.parse(raw);
       } catch (err) {
         return fallback;
       }
+      // Reached only when the native store had no usable value: bring it up to date.
+      if (nat && fromLocalStorage) nativeSet(nat, k, raw);
+      return value;
     },
 
     /** Write a JSON value. Returns true when it reached persistent storage. */
@@ -54,6 +163,8 @@
       const k = PREFIX + key;
       const raw = JSON.stringify(value);
       memory.set(k, raw);
+      const nat = nativeStore();
+      const savedNatively = nat ? nativeSet(nat, k, raw) : false;
       const ls = storage();
       try {
         if (ls) {
@@ -63,12 +174,14 @@
       } catch (err) {
         /* quota or disabled: the in-memory copy still serves this session */
       }
-      return false;
+      return savedNatively;
     },
 
     remove(key) {
       const k = PREFIX + key;
       memory.delete(k);
+      const nat = nativeStore();
+      if (nat) nativeMarkRemoved(nat, k);
       const ls = storage();
       try {
         if (ls) ls.removeItem(k);
@@ -96,6 +209,9 @@
     showTimer: { def: true, ok: (v) => typeof v === 'boolean' },
     effects: { def: 'high', ok: (v) => v === 'high' || v === 'low' },
     haptics: { def: true, ok: (v) => typeof v === 'boolean' },
+    // Android app only: hide the status and navigation bars (applied by platform.js through
+    // SolitaireNative.setFullscreen). It has no effect in a browser.
+    fullscreen: { def: true, ok: (v) => typeof v === 'boolean' },
   };
 
   /** animSpeed -> multiplier handed to SOL.Anim.setSpeed (durations are divided by it). */

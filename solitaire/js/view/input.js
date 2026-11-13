@@ -69,7 +69,12 @@
   }
   function haptic(kind) {
     try {
-      if (SOL.Haptics) SOL.Haptics.play(kind);
+      if (!SOL.Haptics) return;
+      // Before the first tap a browser refuses to vibrate and logs an intervention for every attempt
+      // (the opening deal runs without any gesture). The native shell has no such rule.
+      const ua = root.navigator && root.navigator.userActivation;
+      if (ua && !ua.hasBeenActive && !(SOL.Platform && SOL.Platform.isNativeApp)) return;
+      SOL.Haptics.play(kind);
     } catch (err) {
       /* ignore */
     }
@@ -82,6 +87,27 @@
   }
   function celebrating() {
     return !!(SOL.Celebrate && SOL.Celebrate.isPlaying && SOL.Celebrate.isPlaying());
+  }
+
+  // ------------------------------------------------------------------ mouse cursor
+  // The cards do not receive pointer events themselves (hit-testing is model based), so the table shows the
+  // cursor for whatever is under the mouse: a hand over a card that can be picked up, a pointer over the stock.
+  let cursor = '';
+  function setCursor(value) {
+    if (value === cursor || !tableEl) return;
+    cursor = value;
+    tableEl.style.cursor = value;
+  }
+
+  function hoverCursor(x, y) {
+    if (locked()) {
+      setCursor('');
+      return;
+    }
+    const h = hit(x, y, 'mouse');
+    if (h.pile === 'stock') setCursor('pointer');
+    else if (h.card >= 0 && canPickup(h.card)) setCursor('grab');
+    else setCursor('');
   }
 
   // ------------------------------------------------------------------ gesture bookkeeping
@@ -111,6 +137,7 @@
     clearTimer();
     active = null;
     releaseCapture(a.id);
+    setCursor('');
     if (B()) {
       if (a.phase === 'drag' || B().isDragging()) B().dragCancel();
       B().unpress();
@@ -228,7 +255,11 @@
     pointer.type = e.pointerType || 'mouse';
     pointer.inside = true;
     const a = active;
-    if (!a || e.pointerId !== a.id) return;
+    if (!a) {
+      if (e.pointerType === 'mouse') hoverCursor(e.clientX, e.clientY);
+      return;
+    }
+    if (e.pointerId !== a.id) return;
     a.x = e.clientX;
     a.y = e.clientY;
     const board = B();
@@ -241,6 +272,7 @@
       clearTimer();
       if (a.card >= 0 && !locked() && canPickup(a.card) && board.dragStart(a.card, a.x, a.y) > 0) {
         a.phase = 'drag';
+        if (a.type === 'mouse') setCursor('grabbing');
       } else {
         a.phase = 'dead';
         board.unpress();
@@ -264,6 +296,7 @@
     clearTimer();
     active = null;
     releaseCapture(a.id);
+    if (a.type === 'mouse') setCursor('');
     const board = B();
     const g = G();
     if (!board || !g) return;
@@ -323,7 +356,10 @@
   }
 
   function onPointerLeave(e) {
-    if (e.pointerType === 'mouse') pointer.inside = false;
+    if (e.pointerType === 'mouse') {
+      pointer.inside = false;
+      if (!active) setCursor('');
+    }
   }
 
   function onContextMenu(e) {
@@ -363,12 +399,20 @@
       status = null;
     }
     const ui = SOL.UI;
+    // The UI owns the "abandon this game?" question; prefer its complete flow when it has one.
+    if (ui && typeof ui.newGame === 'function') {
+      try {
+        ui.newGame();
+        return;
+      } catch (err) {
+        /* fall through to the plain paths */
+      }
+    }
     if (status && status.started && !status.won && ui && typeof ui.confirm === 'function') {
-      // an unfinished game would be abandoned: ask first (the UI owns the dialog)
       Promise.resolve(
         ui.confirm({
           title: 'Start a new game?',
-          message: 'The current game will count as a loss.',
+          message: 'The game in progress will be abandoned and counts as a loss in your statistics.',
           confirmLabel: 'New game',
           cancelLabel: 'Keep playing',
         })

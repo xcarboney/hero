@@ -1,0 +1,1105 @@
+/*
+ * inspector.css — the 3D card preview (SOL.Inspector, js/view/inspector.js): card inspector + deck gallery.
+ *
+ * Layout is phone portrait first (controls in the thumb zone, --safe-* insets respected), then short
+ * landscape, then desktop. Only `transform` and `opacity` ever animate; there is no blur and no filter at all.
+ * html[data-effects="low"] drops the foil sheen and the lamp glow. Reduced motion is handled by base.css (CSS)
+ * and SOL.Anim (JS).
+ *
+ * Cards are styled by cards.css alone. This file sizes them through --card-w on an ancestor, positions the
+ * wrappers it owns around them (.insp-obj, .insp-gal__item, .insp-back) and adds its own lighting planes next
+ * to the card element — it never reaches into .card internals.
+ *
+ * Custom properties set from JS (in layout(), never per frame):
+ *   --card-w        on .insp-card__stage / .insp-gal__ring / .insp-gal__row
+ *   --insp-cx/-cy   resting centre of the inspected card inside the stage (also the vanishing point)
+ *   --insp-persp    perspective distance of the scene
+ */
+
+/* ------------------------------------------------------------------ shell */
+.insp {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: auto;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  outline: none;
+  color: var(--ink, #f6f1e4);
+  font-family: var(--font-ui, system-ui, sans-serif);
+}
+
+.insp[hidden],
+.insp__view[hidden],
+.insp-gal__panel[hidden] {
+  display: none;
+}
+
+.insp-src-hidden {
+  visibility: hidden !important;                 /* the source card is "in the hand" while it is inspected */
+}
+
+/*
+ * The stage. Opaque on purpose: once it has faded in, the paused table underneath is taken out of rendering
+ * (see below) and every frame of the inspector gets several times cheaper. It borrows the hue of the table's
+ * felt so it still belongs to the chosen theme. No blur anywhere: there is nothing left to blur.
+ */
+.insp__backdrop {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(125% 74% at 50% 38%, #12241f 0%, #0a1211 44%, #050809 76%, #020304 100%);
+  opacity: 0;
+  transition: opacity 180ms var(--ease-out, ease-out);
+}
+
+@supports (color: color-mix(in srgb, red, blue)) {
+  .insp__backdrop {
+    background: radial-gradient(
+      125% 74% at 50% 38%,
+      color-mix(in srgb, var(--felt, #0f5a43) 30%, #070b0c) 0%,
+      color-mix(in srgb, var(--felt, #0f5a43) 11%, #06090a) 44%,
+      #050809 76%,
+      #020304 100%
+    );
+  }
+}
+
+.insp.is-open .insp__backdrop {
+  opacity: 1;
+}
+
+.insp.is-closing .insp__backdrop {
+  transition-duration: 200ms;
+}
+
+html[data-effects="low"] .insp__backdrop {
+  background: #070b0c;
+}
+
+/*
+ * Set by inspector.js while the opaque backdrop covers the screen. content-visibility keeps the table's layout
+ * (cards can still be measured for the flight home) but drops its paint and its hundreds of compositor layers;
+ * unlike `visibility` it is not inherited, so switching it does not restyle every card.
+ */
+html.insp-covered .table {
+  content-visibility: hidden;
+}
+
+html.insp-covered .fx-layer {
+  visibility: hidden;
+}
+
+.insp__view {
+  position: absolute;
+  inset: 0;
+}
+
+/* ------------------------------------------------------------------ shared controls */
+.insp-btn {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  flex: 1 1 0;
+  min-width: 44px;
+  height: 52px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 16px;
+  background: transparent;
+  color: var(--ink, #f6f1e4);
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition: opacity 140ms ease-out, transform 140ms var(--ease-out, ease-out);
+}
+
+.insp-btn:active {
+  transform: scale(0.9);
+  background: rgba(255, 255, 255, 0.14);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .insp-btn:hover {
+    background: rgba(255, 255, 255, 0.09);
+  }
+}
+
+.insp-ic {
+  display: block;
+  width: 24px;
+  height: 24px;
+  flex: none;
+}
+
+.insp-btn__label {
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  color: var(--ink-dim, rgba(246, 241, 228, 0.68));
+}
+
+.insp-btn.is-on {
+  color: var(--gold, #f3c969);
+  background: rgba(243, 201, 105, 0.15);
+}
+
+.insp-btn.is-on .insp-btn__label {
+  color: var(--gold, #f3c969);
+}
+
+.insp-btn.is-disabled {
+  opacity: 0.32;
+}
+
+.insp-btn--close {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* ==================================================================== CARD INSPECTOR */
+.insp-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto auto;
+  grid-template-areas: "frame" "caption" "bar";
+  padding:
+    calc(var(--safe-t, 0px) + 10px) calc(var(--safe-r, 0px) + 12px)
+    calc(var(--safe-b, 0px) + 12px) calc(var(--safe-l, 0px) + 12px);
+  pointer-events: none;                          /* the stage and the bar opt back in */
+}
+
+/* the whole view is the gesture surface; the scenes of the cards are appended to it */
+.insp-card__stage {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: auto;
+  touch-action: none;
+  cursor: grab;
+}
+
+.insp-card__stage:active {
+  cursor: grabbing;
+}
+
+.insp-card:not(.is-active) .insp-card__stage {
+  pointer-events: none;
+}
+
+.insp-card__frame {
+  grid-area: frame;
+  min-height: 0;                                 /* invisible: only measured, the card is centred in it */
+}
+
+/* chrome fades with the view; the flying card itself never does */
+.insp-card__caption,
+.insp-card__bar,
+.insp-card__glow,
+.insp-card__floor {
+  opacity: 0;
+  transition: opacity 220ms var(--ease-out, ease-out), transform 340ms var(--ease-out, ease-out);
+}
+
+.insp-card.is-active.is-zoomed .insp-card__caption {
+  opacity: 0;                                    /* a zoomed-in card reaches down here */
+}
+
+.insp-card.is-active .insp-card__caption,
+.insp-card.is-active .insp-card__bar,
+.insp-card.is-active .insp-card__glow,
+.insp-card.is-active .insp-card__floor {
+  opacity: 1;
+}
+
+/* the lamp: a soft pool of light behind the card */
+.insp-card__glow {
+  position: absolute;
+  left: var(--insp-cx, 50%);
+  top: var(--insp-cy, 45%);
+  width: calc(var(--card-w) * 3.6);
+  height: calc(var(--card-w) * 3.6);
+  margin: calc(var(--card-w) * -1.8) 0 0 calc(var(--card-w) * -1.8);
+  background: radial-gradient(closest-side, rgba(255, 238, 200, 0.17) 0%, rgba(255, 238, 200, 0.06) 46%, rgba(255, 238, 200, 0) 74%);
+  pointer-events: none;
+}
+
+html[data-effects="low"] .insp-card__glow {
+  display: none;
+}
+
+/* the floor under the card: a lit patch (so the shadow has something to fall on) and two shadow blobs */
+.insp-card__floor {
+  position: absolute;
+  left: var(--insp-cx, 50%);
+  top: calc(var(--insp-cy, 45%) + var(--card-w) * 0.82);
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.insp-card__pool {
+  position: absolute;
+  left: calc(var(--card-w) * -1.2);
+  top: calc(var(--card-w) * -0.27);
+  width: calc(var(--card-w) * 2.4);
+  height: calc(var(--card-w) * 0.54);
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(255, 244, 220, 0.16) 0%, rgba(255, 244, 220, 0.06) 56%, rgba(255, 244, 220, 0) 100%);
+}
+
+.insp-card__shadow {
+  position: absolute;
+  border-radius: 50%;
+  opacity: 0;
+  will-change: transform, opacity;
+}
+
+.insp-card__shadow--core {
+  left: calc(var(--card-w) * -0.56);
+  top: calc(var(--card-w) * -0.1);
+  width: calc(var(--card-w) * 1.12);
+  height: calc(var(--card-w) * 0.2);
+  background: radial-gradient(closest-side, rgba(0, 0, 0, 0.8) 0%, rgba(0, 0, 0, 0.55) 42%, rgba(0, 0, 0, 0) 100%);
+}
+
+.insp-card__shadow--soft {
+  left: calc(var(--card-w) * -0.9);
+  top: calc(var(--card-w) * -0.19);
+  width: calc(var(--card-w) * 1.8);
+  height: calc(var(--card-w) * 0.38);
+  background: radial-gradient(closest-side, rgba(0, 0, 0, 0.5) 0%, rgba(0, 0, 0, 0.24) 50%, rgba(0, 0, 0, 0) 100%);
+}
+
+/* ---- the object: a perspective scene (fades as a whole) > the rotating wrapper > card + lighting planes */
+.insp-scene {
+  position: absolute;
+  inset: 0;
+  perspective: var(--insp-persp, 1000px);
+  perspective-origin: var(--insp-cx, 50%) var(--insp-cy, 45%);
+  pointer-events: none;
+}
+
+.insp-obj {
+  position: absolute;
+  left: var(--insp-cx, 50%);
+  top: var(--insp-cy, 45%);
+  width: var(--card-w);
+  height: calc(var(--card-w) * 1.4);
+  margin: calc(var(--card-w) * -0.7) 0 0 calc(var(--card-w) * -0.5);
+  transform-style: preserve-3d;
+  /*
+   * No will-change here, on purpose: with it the compositor keeps the raster scale the card had when it left
+   * its (small) source and the art stays blurry at full size. Without it every layer of the card is rastered
+   * at device resolution or better (inside a perspective the compositor never goes below that, and only steps
+   * up in whole multiples when the card is zoomed).
+   */
+}
+
+/* one plane hugging each face (thickness of a thick card = 2.5% of its width), culled from behind */
+.insp-obj__plane {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: calc(var(--card-w) * 0.075);
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+  pointer-events: none;
+}
+
+.insp-obj__plane--front {
+  transform: translateZ(calc(var(--card-w) * 0.0125 + 0.7px));
+}
+
+.insp-obj__plane--back {
+  transform: rotateY(180deg) translateZ(calc(var(--card-w) * 0.0125 + 0.7px));
+}
+
+/* shade: the face darkens as it turns away from the lamp (opacity from JS) */
+.insp-obj__shade {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(128deg, rgba(6, 9, 16, 0.52) 0%, rgba(6, 9, 16, 0.9) 100%);
+  opacity: 0;
+  will-change: opacity;
+}
+
+/*
+ * sheen: holographic foil. A band of upright rainbow stripes with a period of 1.1 card widths, slanted by a
+ * skew and slid sideways by exactly its fractional phase (transform from JS) — it wraps without a seam and
+ * never repaints. Wide enough to cover the face at every phase: 0.3 + 1.1 + 0.26 (skew) card widths of slack.
+ */
+.insp-obj__sheen {
+  --p: calc(var(--card-w) * 1.1);
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(var(--card-w) * -0.3);
+  width: calc(var(--card-w) * 2.75);
+  transform-origin: 0 50%;
+  opacity: 0;
+  will-change: transform, opacity;
+  background: repeating-linear-gradient(
+    90deg,
+    rgba(255, 70, 130, 0) 0,
+    rgba(255, 70, 130, 0.5) calc(var(--p) * 0.1),
+    rgba(255, 176, 64, 0.5) calc(var(--p) * 0.2),
+    rgba(244, 238, 96, 0.44) calc(var(--p) * 0.3),
+    rgba(92, 236, 150, 0.46) calc(var(--p) * 0.4),
+    rgba(70, 200, 255, 0.52) calc(var(--p) * 0.5),
+    rgba(118, 124, 255, 0.52) calc(var(--p) * 0.6),
+    rgba(214, 104, 255, 0.46) calc(var(--p) * 0.7),
+    rgba(214, 104, 255, 0) calc(var(--p) * 0.8),
+    rgba(255, 255, 255, 0) calc(var(--p) * 0.86),
+    rgba(255, 255, 255, 0.5) calc(var(--p) * 0.9),
+    rgba(255, 255, 255, 0) calc(var(--p) * 0.94),
+    rgba(255, 70, 130, 0) var(--p)
+  );
+}
+
+html[data-effects="low"] .insp-obj__sheen {
+  display: none;
+}
+
+/* ---- caption */
+.insp-card__caption {
+  grid-area: caption;
+  z-index: 1;
+  padding: 2px 8px 10px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.insp-card__name {
+  margin: 0;
+  font: 600 clamp(21px, 6.2vw, 30px) / 1.15 var(--font-display, Georgia, serif);
+  letter-spacing: 0.01em;
+  color: var(--ink, #f6f1e4);
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.55);
+}
+
+.insp-word {
+  display: inline-block;
+  white-space: nowrap;
+}
+
+.insp-ch {
+  display: inline-block;
+  transform-origin: 50% 100%;
+  /* `backwards` only: once it has played the letter is a plain inline box again, not a composited layer */
+  animation: insp-ch-in 460ms var(--ease-out, ease-out) backwards;
+  animation-delay: calc(var(--i, 0) * 17ms);
+}
+
+.insp-card__name[data-dir="next"] .insp-ch {
+  animation-name: insp-ch-next;
+}
+
+.insp-card__name[data-dir="prev"] .insp-ch {
+  animation-name: insp-ch-prev;
+}
+
+@keyframes insp-ch-in {
+  from { opacity: 0; transform: translate3d(0, 0.55em, 0) rotateX(-75deg); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes insp-ch-next {
+  from { opacity: 0; transform: translate3d(0.9em, 0, 0) rotateY(60deg); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes insp-ch-prev {
+  from { opacity: 0; transform: translate3d(-0.9em, 0, 0) rotateY(-60deg); }
+  to { opacity: 1; transform: none; }
+}
+
+.insp-card__meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 5px 0 0;
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-dim, rgba(246, 241, 228, 0.68));
+  font-variant-numeric: tabular-nums;
+}
+
+.insp-card__meta .sol-suit {
+  color: var(--ink, #f6f1e4);
+}
+
+.insp-card__meta[data-color="red"] .sol-suit {
+  color: #ff7d8c;
+}
+
+.insp-card__hint {
+  margin: 7px 0 0;
+  min-height: 1.3em;
+  font-size: 12px;
+  line-height: 1.3;
+  color: var(--ink-dim, rgba(246, 241, 228, 0.68));
+  opacity: 0;
+  transition: opacity 500ms ease-out;
+}
+
+.insp-card__hint.is-on {
+  opacity: 0.85;
+}
+
+/* ---- control bar: one row in the thumb zone */
+.insp-card__bar {
+  grid-area: bar;
+  z-index: 1;
+  justify-self: center;
+  width: min(100%, 356px);
+  display: flex;
+  gap: 2px;
+  padding: 5px;
+  border-radius: 22px;
+  background: var(--panel, rgba(8, 16, 14, 0.62));
+  border: 1px solid var(--panel-border, rgba(255, 255, 255, 0.1));
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  pointer-events: auto;
+  transform: translate3d(0, 16px, 0);
+}
+
+.insp-card.is-active .insp-card__bar {
+  transform: none;
+  transition-delay: 70ms;
+}
+
+.insp-card:not(.is-active) .insp-card__bar {
+  pointer-events: none;
+}
+
+.insp-card__bar .insp-btn--close {
+  margin-left: 4px;
+}
+
+/* ==================================================================== DECK GALLERY */
+.insp-gal {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  padding:
+    calc(var(--safe-t, 0px) + 10px) calc(var(--safe-r, 0px) + 12px)
+    calc(var(--safe-b, 0px) + 12px) calc(var(--safe-l, 0px) + 12px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms var(--ease-out, ease-out);
+}
+
+.insp-gal.is-active {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/*
+ * A card has been pulled out of it: the gallery fades away behind the inspector. Opacity only — no scaling —
+ * so the carousel slot the card came from stays exactly where the card will fly back to.
+ */
+.insp-gal.is-behind {
+  opacity: 0;
+}
+
+.insp-gal__head {
+  grid-row: 1;
+  padding: 4px 0 0;
+  text-align: center;
+}
+
+.insp-gal__title {
+  margin: 0;
+  font: 600 12px / 1.3 var(--font-ui, system-ui, sans-serif);
+  letter-spacing: 0.26em;
+  text-transform: uppercase;
+  color: var(--gold, #f3c969);
+}
+
+.insp-gal__panels {
+  grid-row: 2;                                   /* placed explicitly: the header is hidden in landscape */
+  position: relative;
+  min-height: 0;
+  perspective: 1500px;                           /* for the turn between the two tabs */
+}
+
+.insp-gal__panel {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto auto auto;
+  justify-items: center;
+}
+
+/* ---- carousel: every item is a direct child of the perspective box (own 3D context, stacked by z-index) */
+.insp-gal__ring {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  perspective: var(--insp-persp, 900px);
+  perspective-origin: 50% 47%;
+  touch-action: none;
+  cursor: grab;
+  outline: none;
+}
+
+.insp-gal__ring:active {
+  cursor: grabbing;
+}
+
+.insp-gal__ring:focus-visible {
+  outline: 2px solid var(--gold-soft, rgba(243, 201, 105, 0.35));
+  outline-offset: -3px;
+  border-radius: 18px;
+}
+
+.insp-gal__item {
+  position: absolute;
+  left: 50%;
+  top: 47%;
+  width: var(--card-w);
+  height: calc(var(--card-w) * 1.4);
+  margin: calc(var(--card-w) * -0.7) 0 0 calc(var(--card-w) * -0.5);
+  will-change: transform, opacity;
+  cursor: pointer;
+}
+
+/* soft contact shadow on the floor under every card */
+.insp-gal__item::after {
+  content: "";
+  position: absolute;
+  left: 2%;
+  right: 2%;
+  top: 100%;
+  height: calc(var(--card-w) * 0.15);
+  margin-top: calc(var(--card-w) * 0.035);
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(0, 0, 0, 0.6) 0%, rgba(0, 0, 0, 0.28) 55%, rgba(0, 0, 0, 0) 100%);
+  pointer-events: none;
+}
+
+/* dimming with distance: a veil above the card, so cards never become see-through */
+.insp-gal__veil {
+  position: absolute;
+  inset: 0;
+  border-radius: calc(var(--card-w) * 0.075);
+  background: #04070b;
+  opacity: 0;
+  pointer-events: none;
+  will-change: opacity;
+}
+
+.insp-gal__info {
+  padding: 4px 12px 0;
+  text-align: center;
+  pointer-events: none;
+}
+
+.insp-gal__name {
+  font: 600 clamp(20px, 5.6vw, 27px) / 1.2 var(--font-display, Georgia, serif);
+  letter-spacing: 0.01em;
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.55);
+}
+
+.insp-gal__count {
+  margin-top: 3px;
+  font-size: 12px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-dim, rgba(246, 241, 228, 0.68));
+  font-variant-numeric: tabular-nums;
+}
+
+.insp-gal__count.is-selected {
+  color: var(--gold, #f3c969);
+}
+
+/* ---- scrubber: where in the deck we are; drag it to travel fast */
+.insp-gal__scrub {
+  position: relative;
+  width: min(100%, 440px);
+  height: 44px;
+  touch-action: none;
+  cursor: pointer;
+  outline: none;
+}
+
+.insp-gal__scrub-track {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: 50%;
+  height: 4px;
+  margin-top: -2px;
+  display: flex;
+  gap: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.16);
+  overflow: hidden;
+}
+
+.insp-gal__scrub-track i {
+  flex: 1 1 0;
+}
+
+/* all 52: four segments, one per suit (black, red, black, red) */
+.insp-gal__scrub[data-filter="all"] .insp-gal__scrub-track {
+  background: none;
+}
+
+.insp-gal__scrub[data-filter="all"] .insp-gal__scrub-track i {
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.insp-gal__scrub[data-filter="all"] .insp-gal__scrub-track i:nth-child(even) {
+  background: rgba(255, 125, 140, 0.5);
+}
+
+.insp-gal__scrub-thumb {
+  position: absolute;
+  left: 12px;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  border-radius: 50%;
+  background: var(--gold, #f3c969);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5), 0 0 0 5px rgba(243, 201, 105, 0.16);
+  will-change: transform;
+}
+
+.insp-gal__scrub:focus-visible .insp-gal__scrub-thumb {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5), 0 0 0 3px #fff;
+}
+
+/* ---- suit filter chips */
+.insp-gal__chips {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  width: min(100%, 320px);
+  padding: 2px 0 12px;
+}
+
+.insp-chip {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1 1 0;
+  min-width: 44px;
+  height: 48px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink, #f6f1e4);
+  font: 600 14px / 1 var(--font-ui, system-ui, sans-serif);
+  letter-spacing: 0.03em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform 140ms var(--ease-out, ease-out);
+}
+
+.insp-chip--red {
+  color: #ff7d8c;
+}
+
+.insp-chip:active {
+  transform: scale(0.92);
+}
+
+.insp-chip[aria-checked="true"] {
+  border-color: var(--gold, #f3c969);
+  background: rgba(243, 201, 105, 0.17);
+  box-shadow: inset 0 0 0 1px var(--gold, #f3c969);
+}
+
+/* ---- bottom bar: tabs + close */
+.insp-gal__bar {
+  grid-row: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.insp-gal__bar .insp-btn--close {
+  flex: none;
+  width: 56px;
+  height: 56px;
+  border-radius: 28px;
+  background: var(--panel, rgba(8, 16, 14, 0.62));
+  border: 1px solid var(--panel-border, rgba(255, 255, 255, 0.1));
+}
+
+.insp-gal__tabs {
+  position: relative;
+  flex: 0 1 300px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 4px;
+  border-radius: 28px;
+  background: var(--panel, rgba(8, 16, 14, 0.62));
+  border: 1px solid var(--panel-border, rgba(255, 255, 255, 0.1));
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+}
+
+.insp-gal__tabs-pill {
+  position: absolute;
+  left: 4px;
+  top: 4px;
+  bottom: 4px;
+  width: calc(50% - 4px);
+  border-radius: 24px;
+  background: rgba(243, 201, 105, 0.17);
+  box-shadow: inset 0 0 0 1px rgba(243, 201, 105, 0.6);
+  transition: transform 340ms var(--ease-out, ease-out);
+}
+
+.insp-gal__tabs[data-tab="backs"] .insp-gal__tabs-pill {
+  transform: translate3d(100%, 0, 0);
+}
+
+.insp-tab {
+  -webkit-appearance: none;
+  appearance: none;
+  position: relative;
+  height: 48px;
+  margin: 0;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 24px;
+  background: none;
+  color: var(--ink-dim, rgba(246, 241, 228, 0.68));
+  font: 600 14px / 1 var(--font-ui, system-ui, sans-serif);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.insp-tab[aria-selected="true"] {
+  color: var(--gold, #f3c969);
+}
+
+/* ---- card backs: six slowly turning 3D cards in a swipeable row */
+.insp-gal__row {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  touch-action: none;
+  cursor: grab;
+}
+
+.insp-back {
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  width: var(--card-w);
+  height: calc(var(--card-w) * 1.4 + 46px);
+  margin: calc(var(--card-w) * -0.7 - 14px) 0 0 calc(var(--card-w) * -0.5);
+  outline: none;
+  cursor: pointer;
+  will-change: transform;
+}
+
+.insp-back__scene {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--card-w);
+  height: calc(var(--card-w) * 1.4);
+  perspective: var(--insp-persp, 800px);
+}
+
+.insp-back__scene::after {
+  content: "";
+  position: absolute;
+  left: 6%;
+  right: 6%;
+  top: 100%;
+  height: calc(var(--card-w) * 0.16);
+  margin-top: calc(var(--card-w) * 0.03);
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(0, 0, 0, 0.62) 0%, rgba(0, 0, 0, 0.26) 55%, rgba(0, 0, 0, 0) 100%);
+  pointer-events: none;
+}
+
+/* the mark of the chosen back: a gold frame around its place in the row */
+.insp-back__ring {
+  position: absolute;
+  left: -10px;
+  right: -10px;
+  top: -10px;
+  height: calc(var(--card-w) * 1.4 + 20px);
+  border: 2px solid var(--gold, #f3c969);
+  border-radius: calc(var(--card-w) * 0.075 + 10px);
+  box-shadow: 0 0 24px rgba(243, 201, 105, 0.32), inset 0 0 20px rgba(243, 201, 105, 0.1);
+  opacity: 0;
+  transform: scale(0.93);
+  transition: opacity 240ms ease-out, transform 420ms var(--ease-back, ease-out);
+  pointer-events: none;
+}
+
+.insp-back.is-selected .insp-back__ring {
+  opacity: 1;
+  transform: none;
+}
+
+.insp-back:focus-visible .insp-back__ring {
+  opacity: 1;
+  transform: none;
+  border-color: #fff;
+}
+
+/* confirmation ring: inserted fresh on every selection, runs once */
+.insp-back__burst {
+  position: absolute;
+  left: 50%;
+  top: calc(var(--card-w) * 0.7);
+  width: calc(var(--card-w) * 1.7);
+  height: calc(var(--card-w) * 1.7);
+  margin: calc(var(--card-w) * -0.85) 0 0 calc(var(--card-w) * -0.85);
+  border: 3px solid var(--gold, #f3c969);
+  border-radius: 50%;
+  box-shadow: 0 0 26px rgba(243, 201, 105, 0.5);
+  opacity: 0;
+  pointer-events: none;
+  animation: insp-burst 720ms var(--ease-out, ease-out) both;
+}
+
+@keyframes insp-burst {
+  from { opacity: 0.95; transform: scale(0.4); }
+  to { opacity: 0; transform: scale(1.35); }
+}
+
+.insp-back__label {
+  position: absolute;
+  left: -24px;
+  right: -24px;
+  top: calc(var(--card-w) * 1.4 + 18px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.insp-back__name {
+  font: 600 15px / 1 var(--font-display, Georgia, serif);
+  letter-spacing: 0.03em;
+}
+
+.insp-back__tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--gold, #f3c969);
+  opacity: 0;
+  transform: translate3d(0, -5px, 0) scale(0.85);
+  transition: opacity 200ms ease-out, transform 360ms var(--ease-back, ease-out);
+}
+
+.insp-back__tag .insp-ic {
+  width: 13px;
+  height: 13px;
+  stroke-width: 3.2;
+}
+
+.insp-back.is-selected .insp-back__tag {
+  opacity: 1;
+  transform: none;
+}
+
+.insp-gal__dots {
+  display: flex;
+  gap: 9px;
+  padding: 12px 0 16px;
+}
+
+.insp-gal__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.24);
+  transition: transform 200ms var(--ease-out, ease-out);
+}
+
+.insp-gal__dot.is-selected {
+  background: var(--gold, #f3c969);
+}
+
+.insp-gal__dot.is-on {
+  transform: scale(1.5);
+}
+
+.insp-gal__row.is-fit ~ .insp-gal__dots {
+  visibility: hidden;                            /* all six are on screen: nothing to page through */
+}
+
+/* ==================================================================== short landscape (phones on their side) */
+@media (orientation: landscape) and (max-height: 540px) {
+  .insp-card {
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-areas: "frame bar" "caption bar";
+    column-gap: 10px;
+    padding-top: calc(var(--safe-t, 0px) + 6px);
+    padding-bottom: calc(var(--safe-b, 0px) + 6px);
+  }
+
+  /* two columns of three: reachable with the right thumb, short enough for any phone */
+  .insp-card__bar {
+    align-self: center;
+    width: auto;
+    display: grid;
+    grid-template-columns: repeat(2, 52px);
+    gap: 3px;
+    transform: translate3d(16px, 0, 0);
+  }
+
+  .insp-card__bar .insp-btn {
+    height: 50px;
+  }
+
+  .insp-card__bar .insp-btn--close {
+    margin-left: 0;
+  }
+
+  html[data-left-handed="true"] .insp-card {
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas: "bar frame" "bar caption";
+  }
+
+  .insp-card__caption {
+    padding: 0 8px 2px;
+  }
+
+  .insp-card__name {
+    display: inline;
+    font-size: 19px;
+  }
+
+  .insp-card__meta {
+    margin: 0 0 0 12px;
+  }
+
+  .insp-card__hint {
+    display: none;
+  }
+
+  .insp-gal {
+    padding-top: calc(var(--safe-t, 0px) + 6px);
+    padding-bottom: calc(var(--safe-b, 0px) + 6px);
+  }
+
+  .insp-gal__head {
+    display: none;
+  }
+
+  /* carousel on the left, name + filters in a side column */
+  .insp-gal__panel[data-panel="cards"] {
+    grid-template-columns: minmax(0, 1fr) 172px;
+    grid-template-rows: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .insp-gal__panel[data-panel="cards"] .insp-gal__ring {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    overflow: hidden;                            /* a card fading out at the end of the arc stays off the side column */
+  }
+
+  .insp-gal__panel[data-panel="cards"] .insp-gal__info {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: end;
+    padding-bottom: 10px;
+  }
+
+  .insp-gal__scrub {
+    display: none;
+  }
+
+  .insp-gal__chips {
+    grid-column: 2;
+    grid-row: 2;
+    align-self: start;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 0 0 6px;
+  }
+
+  .insp-gal__chips {
+    width: auto;
+  }
+
+  .insp-chip {
+    flex: 0 0 50px;
+  }
+
+  .insp-gal__dots {
+    padding: 4px 0 6px;
+  }
+
+  .insp-gal__bar .insp-btn--close {
+    width: 52px;
+    height: 52px;
+  }
+}
+
+/* ==================================================================== roomy screens (tablets, desktop) */
+@media (min-width: 700px) and (min-height: 541px) {
+  .insp-card__bar {
+    width: auto;
+    gap: 6px;
+    padding: 6px;
+  }
+
+  .insp-card__bar .insp-btn {
+    flex: none;
+    width: 62px;
+    height: 56px;
+  }
+
+  .insp-card__name {
+    font-size: 32px;
+  }
+
+  .insp-gal__name {
+    font-size: 30px;
+  }
+
+  .insp-gal__chips {
+    gap: 10px;
+    width: 340px;
+    padding-bottom: 16px;
+  }
+
+  .insp-gal__title {
+    font-size: 13px;
+  }
+}

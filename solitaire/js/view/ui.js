@@ -36,7 +36,8 @@
  * What it calls: SOL.Game.undo / hint / newGame / restartDeal / autoComplete / getStatus / pause('modal') /
  * resume('modal'); SOL.Settings.get / set / reset; SOL.Stats.summary / reset; SOL.Inspector.openGallery({ tab });
  * SOL.Cards.create / createBackOnly / setBack / suitSvg; SOL.Haptics.play; SOL.Audio.play;
- * SOL.App.addBackHandler; SOL.PWA.canInstall / install (optional). Every one of them is optional at run time.
+ * SOL.App.addBackHandler; SOL.Platform.isNativeApp / canHover; SOL.PWA.canInstall / promptInstall() and its
+ * 'pwa:change' event. Every one of them is optional at run time.
  *
  * Behaviour worth knowing
  * -----------------------
@@ -44,9 +45,13 @@
  *   restores focus when it closes, and closes on Esc / backdrop tap. SOL.Game.pause('modal') is called when
  *   the first one opens and resume('modal') when the last one starts to close (never nested).
  * - The win screen opens ~2.5 s after 'game:won' (SOL.Anim.wait, so it follows the speed setting and is
- *   immediate under reduced motion); a new game or an undo in between cancels it.
- * - The "no more moves" card is not modal: it docks over the toolbar, never takes focus, and goes away on
- *   the next 'game:change' / 'game:new'. "Keep looking" silences it until the next deal.
+ *   immediate under reduced motion), and at the latest 4 s of real time after it (SOL.Anim's clock runs slow
+ *   when frames are long); a new game or an undo in between cancels it.
+ * - The "no more moves" card is not modal: it docks over the toolbar, never takes focus, registers NO back
+ *   handler (see showStuck), and goes away on the next 'game:change' / 'game:new'. "Keep looking" silences
+ *   it until the next deal.
+ * - Settings shows a control for every key of SOL.Settings; 'fullscreen' only inside the Android app
+ *   (SOL.Platform.isNativeApp), where it has an effect.
  * - All JS motion runs through SOL.Anim; CSS motion is transform / opacity only (see ui.css).
  */
 (function (root) {
@@ -69,7 +74,8 @@
 
   // ------------------------------------------------------------------ constants
   const SHEET_QUERY = '(max-width: 639.98px)'; // below this the panels are bottom sheets (must match ui.css)
-  const WIN_DELAY_MS = 2500; // how long the celebration plays before the win screen comes up
+  const WIN_DELAY_MS = 2500; // how long the celebration plays before the win screen comes up (SOL.Anim time)
+  const WIN_DELAY_CAP_MS = 4000; // ...and the longest it may take in real time (see onWon)
   const TOAST_MAX = 3;
   const RING_R = 42;
   const RING_C = 2 * Math.PI * RING_R;
@@ -184,17 +190,38 @@
     if (root.console && typeof root.console.error === 'function') root.console.error('[SOL.UI] ' + what, err);
   }
 
-  /** Re-triggers a CSS animation without a forced reflow: alternates between two identical classes. */
-  function retrigger(el, base) {
-    const a = base + '-a';
-    const b = base + '-b';
-    if (el.classList.contains(a)) {
-      el.classList.remove(a);
-      el.classList.add(b);
-    } else {
-      el.classList.remove(b);
-      el.classList.add(a);
-    }
+  /** Progress of t through [a, b], clamped to 0..1. */
+  function seg(t, a, b) {
+    return clamp((t - a) / (b - a), 0, 1);
+  }
+
+  function easeOut3(x) {
+    return 1 - Math.pow(1 - x, 3);
+  }
+
+  /**
+   * A one-shot effect that can be fired again at any moment, any number of times per frame: the running one is
+   * cancelled and the new one starts from the beginning. render(t) gets linear time 0..1 and writes transform /
+   * opacity; reset() removes every inline style again (it also runs under reduced motion, where SOL.Anim jumps
+   * straight to the end, so nothing can be left half-shown).
+   *
+   * Why not CSS keyframes: re-adding a class with the same animation-name does not restart a finished CSS
+   * animation, and several score changes can arrive within one frame (auto-complete, cascades).
+   */
+  function createPulse(duration, render, reset) {
+    let handle = null;
+    return function fire() {
+      if (handle) handle.cancel();
+      handle = tween({
+        duration: duration,
+        ease: 'linear',
+        update: render,
+        done: () => {
+          handle = null;
+          reset();
+        },
+      });
+    };
   }
 
   // ------------------------------------------------------------------ the other modules (all optional)
@@ -219,6 +246,15 @@
       return SOL.Settings ? SOL.Settings.get(key) : fallback;
     } catch (err) {
       return fallback;
+    }
+  }
+
+  /** Whether this build of SOL.Settings knows the key (the schema grows: never offer a control for nothing). */
+  function hasSetting(key) {
+    try {
+      return !!SOL.Settings && Object.prototype.hasOwnProperty.call(SOL.Settings.defaults(), key);
+    } catch (err) {
+      return false;
     }
   }
 
@@ -305,15 +341,22 @@
   let haveStatus = false; // a real status has been seen
   let quietNext = false; // the next score change is not a player's move (new deal): no flash, no chip
 
-  const hud = { els: null, roller: null, score: null, moves: null, time: null, draw: null, liveTimer: 0 };
-  const tb = { btns: {}, auto: null, autoOn: false, autoT: 0, autoAnim: null };
+  const hud = {
+    els: null, roller: null, score: null, moves: null, time: null, draw: null, liveTimer: 0,
+    flash: null, chipFx: null, movesFx: null, badgeFx: null, // re-fireable one-shot effects (createPulse)
+  };
+  const tb = { box: null, btns: {}, auto: null, autoOn: false, autoT: 0, autoAnim: null };
   const layers = []; // open modal layers, bottom -> top
   let pauseDepth = 0;
   let uid = 0;
   const toasts = []; // visible toasts, oldest -> newest
-  const stuck = { el: null, muted: false, fresh: false, anim: null, removeBack: null };
+  const stuck = { el: null, muted: false, fresh: false, anim: null };
+  let dealPending = false; // a deal was requested and has not begun yet (startDeal)
+  let dealToken = 0;
+  let dealTimer = 0;
   let winToken = 0;
   let winWait = null;
+  let winCap = 0;
   let pendingWin = null;
 
   // ================================================================== HUD
@@ -377,13 +420,15 @@
   function buildHud() {
     const badge = h('div.ui-badge', { role: 'group' },
       h('span.ui-badge__icon', { 'aria-hidden': 'true' }),
-      h('span', { 'aria-hidden': 'true' }, 'Draw', h('span.ui-badge__n', null, '1')));
+      h('span', { 'aria-hidden': 'true' }, h('span.ui-badge__word', null, 'Draw'), h('span.ui-badge__n', null, '1')));
 
     const rollHost = h('span.ui-roll');
     const chip = h('span.ui-chip', { 'aria-hidden': 'true' });
-    const scoreValue = h('span.ui-stat__value.ui-score', { 'aria-hidden': 'true' }, rollHost);
+    const glow = h('span.ui-score__glow');
+    const caption = h('span.ui-stat__label-text', null, 'Score');
+    const scoreValue = h('span.ui-stat__value.ui-score', { 'aria-hidden': 'true' }, glow, rollHost);
     const score = h('div.ui-stat.ui-stat--score', { role: 'group' },
-      h('span.ui-stat__label', { 'aria-hidden': 'true' }, h('span.ui-stat__label-text', null, 'Score'), chip),
+      h('span.ui-stat__label', { 'aria-hidden': 'true' }, caption, chip),
       scoreValue);
 
     const timeValue = h('span.ui-stat__value', { 'aria-hidden': 'true' }, '00:00');
@@ -400,10 +445,50 @@
       h('div.ui-hud__left', null, badge), score, h('div.ui-hud__right', null, time, moves));
 
     hudRoot.textContent = '';
-    hudRoot.appendChild(bar);
+    hudRoot.appendChild(h('div.ui-hud-box', null, bar)); // the box is the container the bar's queries measure
     hudRoot.appendChild(live);
 
-    chip.addEventListener('animationend', () => score.classList.remove('has-chip'));
+    const pop = (el, amount) => [
+      (t) => {
+        el.style.transform = 'scale(' + (1 + amount * Math.sin(Math.PI * t)).toFixed(3) + ')';
+      },
+      () => {
+        el.style.transform = '';
+      },
+    ];
+
+    // gold flash: the glow spreads sideways (the bar is slim: it must stay inside it) while the digits pop
+    hud.flash = createPulse(760, (t) => {
+      const a = seg(t, 0, 0.22);
+      const b = easeOut3(seg(t, 0.22, 1));
+      glow.style.opacity = (t < 0.22 ? a : 1 - b).toFixed(3);
+      glow.style.transform = 'scale(' + (t < 0.22 ? 0.5 + 0.5 * a : 1 + 0.45 * b).toFixed(3) + ',' + (t < 0.22 ? 0.8 + 0.2 * a : 1).toFixed(3) + ')';
+      rollHost.style.transform = 'scale(' + (1 + 0.2 * Math.sin(Math.PI * seg(t, 0, 0.58))).toFixed(3) + ')';
+    }, () => {
+      glow.style.opacity = '';
+      glow.style.transform = '';
+      rollHost.style.transform = '';
+    });
+
+    // +10 / -15 chip: pops into the caption's place, holds, drifts up and away; the caption cross-fades with it
+    hud.chipFx = createPulse(1150, (t) => {
+      const rise = easeOut3(seg(t, 0, 0.13));
+      const settle = seg(t, 0.13, 0.24);
+      const leave = seg(t, 0.76, 1);
+      const opacity = t < 0.76 ? rise : 1 - leave;
+      const y = t < 0.76 ? 30 - 80 * rise : -50 - 100 * leave * leave;
+      const scale = t < 0.13 ? 0.6 + 0.56 * rise : t < 0.76 ? 1.16 - 0.16 * settle : 1 - 0.1 * leave;
+      chip.style.opacity = opacity.toFixed(3);
+      chip.style.transform = 'translate(-50%,' + y.toFixed(1) + '%) scale(' + scale.toFixed(3) + ')';
+      caption.style.opacity = (1 - opacity).toFixed(3);
+    }, () => {
+      chip.style.opacity = '';
+      chip.style.transform = '';
+      caption.style.opacity = '';
+    });
+
+    hud.movesFx = createPulse.apply(null, [320].concat(pop(movesValue, 0.2)));
+    hud.badgeFx = createPulse.apply(null, [420].concat(pop(badge, 0.14)));
 
     hud.els = { badge, score, scoreValue, chip, time, timeValue, moves, movesValue, live };
     hud.roller = createRoller(rollHost);
@@ -423,11 +508,10 @@
     e.score.setAttribute('aria-label', 'Score ' + value);
     if (animate && celebrate && prev !== null) {
       const delta = value - prev;
-      retrigger(e.scoreValue, 'is-flash');
       e.chip.textContent = (delta > 0 ? '+' : '−') + fmtInt(Math.abs(delta));
-      e.chip.className = 'ui-chip ' + (delta > 0 ? 'ui-chip--plus' : 'ui-chip--minus') +
-        (e.chip.classList.contains('is-show-a') ? ' is-show-b' : ' is-show-a');
-      e.score.classList.add('has-chip');
+      e.chip.className = 'ui-chip ' + (delta > 0 ? 'ui-chip--plus' : 'ui-chip--minus');
+      hud.flash();
+      hud.chipFx();
     }
     // Announce once the score has settled (a foundation cascade must not read out every step).
     if (prev !== null) {
@@ -444,7 +528,7 @@
     hud.moves = value;
     hud.els.movesValue.textContent = fmtInt(value);
     hud.els.moves.setAttribute('aria-label', 'Moves ' + value);
-    if (animate && !first) retrigger(hud.els.movesValue, 'is-bump');
+    if (animate && !first) hud.movesFx();
   }
 
   function renderTime(ms) {
@@ -464,7 +548,7 @@
     e.querySelector('.ui-badge__n').textContent = String(draw);
     e.querySelector('.ui-badge__icon').innerHTML = icon(draw === 3 ? 'cards3' : 'cards1');
     e.setAttribute('aria-label', 'Draw ' + draw);
-    if (!first) retrigger(e, 'is-bump');
+    if (!first) hud.badgeFx();
   }
 
   function renderTimerVisibility() {
@@ -502,8 +586,10 @@
     tb.autoT = 0;
 
     tbRoot.textContent = '';
-    tbRoot.appendChild(bar);
-    tbRoot.appendChild(h('div.ui-auto-wrap', null, auto));
+    // The box is the size container the toolbar's own queries measure: its width is what is left after the
+    // side insets, which is what decides whether labels and the pill fit next to each other.
+    tb.box = h('div.ui-tb-box', null, bar, h('div.ui-auto-wrap', null, auto));
+    tbRoot.appendChild(tb.box);
 
     tbRoot.addEventListener('click', (e) => {
       const btn = e.target.closest ? e.target.closest('[data-action]') : null;
@@ -544,8 +630,9 @@
     const busy = !!status.busy;
     b.undo.disabled = !status.canUndo || busy;
     b.hint.disabled = !status.canHint || busy;
-    // A finished game may always be followed by a new one, even while the celebration ("busy") still runs.
-    b.new.disabled = busy && !status.won;
+    // A finished game may always be followed by a new one, even while the celebration ("busy") still runs —
+    // but not twice: once a deal has been asked for, wait until it has begun (see startDeal).
+    b.new.disabled = dealPending || (busy && !status.won);
     setAuto(!!status.canAutoComplete && !busy && !status.won);
   }
 
@@ -565,12 +652,16 @@
     if (toastRoot) toastRoot.classList.toggle('has-auto', on);
     if (on) {
       btn.classList.add('is-on');
+      tb.box.classList.add('has-auto'); // short landscape: labels make room for the pill (ui.css)
       haptic('tick');
       tb.autoAnim = spring({ from: tb.autoT, to: 1, stiffness: 240, damping: 16, precision: 0.002, update: applyAutoT });
     } else {
       tb.autoAnim = tween({
         from: tb.autoT, to: 0, duration: 200, ease: 'inCubic', update: applyAutoT,
-        done: () => btn.classList.remove('is-on'),
+        done: () => {
+          btn.classList.remove('is-on');
+          tb.box.classList.remove('has-auto');
+        },
       });
     }
     layoutToasts();
@@ -862,7 +953,11 @@
 
     sheet.addEventListener('pointerup', (e) => end(e, false));
     sheet.addEventListener('pointercancel', (e) => end(e, true));
-    sheet.addEventListener('lostpointercapture', (e) => end(e, true));
+    // Only the capture taken above counts. A touch pointer is implicitly captured by the element it went down
+    // on; taking the capture over makes THAT element fire lostpointercapture, which bubbles through here.
+    sheet.addEventListener('lostpointercapture', (e) => {
+      if (e.target === sheet) end(e, true);
+    });
   }
 
   /**
@@ -1199,13 +1294,37 @@
     return false;
   }
 
+  /**
+   * Asks the controller for a deal ('newGame' or 'restartDeal') and keeps the New button disabled until that
+   * deal has begun. After a win the controller gathers the cards for a moment while its status still reads
+   * won + busy — the one state in which New stays enabled — so a second tap would restart the whole thing.
+   * Released by 'game:new', by the controller's promise settling either way, or after 10 s at the latest
+   * (a button that never comes back would be worse than a double deal).
+   */
+  function startDeal(method, opts) {
+    const token = ++dealToken;
+    const release = () => {
+      if (token !== dealToken || !dealPending) return;
+      dealPending = false;
+      root.clearTimeout(dealTimer);
+      renderToolbar();
+    };
+    dealPending = true;
+    root.clearTimeout(dealTimer);
+    dealTimer = root.setTimeout(release, 10000);
+    renderToolbar();
+    const out = callGame(method, opts);
+    if (out && typeof out.then === 'function') out.then(release, release);
+    else release(); // no controller (or a synchronous one): nothing to wait for
+  }
+
   /** The one "New game" flow. Asks only when a started, unfinished game would be abandoned. */
   function newGame(opts) {
     const go = function () {
       closeAll();
       hideStuck(false);
       cancelWin(true);
-      callGame('newGame', opts);
+      startDeal('newGame', opts);
       return true;
     };
     if (!(status.started && !status.won)) return Promise.resolve(go());
@@ -1222,7 +1341,7 @@
       closeAll();
       hideStuck(false);
       cancelWin(true);
-      callGame('restartDeal');
+      startDeal('restartDeal');
       return true;
     };
     if (!(status.started && !status.won)) return Promise.resolve(go());
@@ -1246,15 +1365,15 @@
     }
   }
 
+  /** Must run inside the tap handler: the browser only shows its install dialog on a user gesture. */
   function pwaInstall() {
     const p = SOL.PWA;
-    const fn = p && (p.install || p.promptInstall || p.prompt);
-    if (typeof fn !== 'function') return;
+    if (!p || typeof p.promptInstall !== 'function') return;
     try {
-      const out = fn.call(p);
-      if (out && typeof out.catch === 'function') out.catch((err) => report('SOL.PWA install rejected', err));
+      const out = p.promptInstall();
+      if (out && typeof out.catch === 'function') out.catch((err) => report('SOL.PWA.promptInstall rejected', err));
     } catch (err) {
-      report('SOL.PWA install threw', err);
+      report('SOL.PWA.promptInstall threw', err);
     }
   }
 
@@ -1280,8 +1399,8 @@
     }
     // left, right, then the centre card last so it paints on top
     const fan = [
-      { id: 25, x: -25, y: 5, rz: -15, ry: 24 }, // king of hearts
-      { id: 50, x: 25, y: 5, rz: 15, ry: -24 }, // queen of diamonds
+      { id: 25, x: -27, y: 6, rz: -17, ry: 22 }, // king of hearts
+      { id: 50, x: 27, y: 6, rz: 17, ry: -22 }, // queen of diamonds
       { id: 0, x: 0, y: -4, rz: 0, ry: 0 }, // ace of spades
     ];
     const els = [];
@@ -1405,7 +1524,7 @@
       sound.sync();
       if (miniCard && p && p.key === 'cardBack' && SOL.Cards.setBack) SOL.Cards.setBack(miniCard, p.value);
     });
-    for (const ev of ['pwa:change', 'pwa:installable', 'pwa:installed']) layer.on(ev, syncInstall);
+    layer.on('pwa:change', syncInstall);
   }
 
   // ================================================================== settings
@@ -1470,7 +1589,15 @@
       add(switchRow({
         key: 'showTimer', label: 'Show timer',
         get: () => sGet('showTimer', true) !== false, set: (v) => sSet('showTimer', v),
-      }))));
+      })),
+      // Only the Android app can hide the system bars (platform.js applies the setting through the shell);
+      // in a browser the setting does nothing, so it is not offered there.
+      hasSetting('fullscreen') && SOL.Platform && SOL.Platform.isNativeApp
+        ? add(switchRow({
+          key: 'fullscreen', label: 'Full screen', hint: 'Hide the status and navigation bars',
+          get: () => sGet('fullscreen', true) !== false, set: (v) => sSet('fullscreen', v),
+        }))
+        : null));
 
     // ---- table
     c.appendChild(h('h3.ui-sec', null, 'Table'));
@@ -1871,11 +1998,9 @@
       ['Turn the deck over (Draw 3, from the 4th pass)', '−20', 'is-minus'],
       ['Time bonus for a win', '700,000 ÷ seconds', 'is-gold'],
     ];
-    const table = h('table.ui-score-table');
-    const tbody = h('tbody');
-    for (const r of rows) tbody.appendChild(h('tr', null, h('td', null, r[0]), h('td' + (r[2] ? '.' + r[2] : ''), null, r[1])));
-    table.appendChild(tbody);
-    c.appendChild(h('div.ui-group', null, table));
+    const list = h('ul.ui-scores');
+    for (const r of rows) list.appendChild(h('li', null, h('span', null, r[0]), h('b' + (r[2] ? '.' + r[2] : ''), null, r[1])));
+    c.appendChild(h('div.ui-group', null, list));
 
     if (SOL.Platform ? SOL.Platform.canHover : mq('(hover: hover) and (pointer: fine)')) {
       c.appendChild(h('h3.ui-sec', null, 'Keyboard and mouse'));
@@ -1950,6 +2075,8 @@
 
   function cancelWin(closeOpen) {
     winToken++;
+    root.clearTimeout(winCap);
+    winCap = 0;
     if (winWait && typeof winWait.cancel === 'function') winWait.cancel();
     winWait = null;
     pendingWin = null;
@@ -1964,15 +2091,30 @@
     status.won = true;
     hideStuck(false);
     const token = winToken;
+    let shown = false;
+    const show = () => {
+      if (shown || token !== winToken) return; // already up, or a new game / an undo cancelled it
+      shown = true;
+      root.clearTimeout(winCap);
+      winCap = 0;
+      // Another panel is in the way (the player opened the menu during the celebration): show it afterwards.
+      if (layers.length) pendingWin = payload;
+      else showWin(payload);
+    };
+    // The normal path: SOL.Anim time, so the delay follows the speed setting and is immediate under reduced
+    // motion. SOL.Anim counts at most 50 ms per frame; when the celebration makes frames longer than that, its
+    // clock falls behind real time — the timer below is the upper bound (also scaled by the speed setting).
     const w = wait(WIN_DELAY_MS);
     winWait = w;
     w.then((ok) => {
       if (winWait === w) winWait = null;
-      if (ok === false || token !== winToken) return;
-      // Another panel is in the way (the player opened the menu during the celebration): show it afterwards.
-      if (layers.length) pendingWin = payload;
-      else showWin(payload);
+      if (ok !== false) show();
     });
+    const speed = SOL.Anim && SOL.Anim.speed > 0 ? SOL.Anim.speed : 1;
+    winCap = root.setTimeout(() => {
+      if (winWait === w && typeof w.cancel === 'function') w.cancel();
+      show();
+    }, WIN_DELAY_CAP_MS / speed);
   }
 
   function showWin(payload) {
@@ -2011,19 +2153,24 @@
         const fig = (label, value, key) =>
           h('div.ui-fig', null, h('span.ui-fig__label', null, label), h('span.ui-fig__value', { 'data-win': key }, value));
 
-        append(c, suits ? h('div.ui-win__suits', { html: suits, 'aria-hidden': 'true' }) : null);
-        c.appendChild(h('h2.ui-win__title', { id: ly.titleId }, 'You won!'));
-        c.appendChild(totalEl);
-        c.appendChild(h('div.ui-win__cap', { 'aria-hidden': 'true' }, 'Final score'));
-        c.appendChild(h('p.visually-hidden', null,
-          'Final score ' + total + (bonus > 0 ? ', including a time bonus of ' + bonus : '') + '.'));
-        append(c, bonus > 0 ? h('div.ui-win__sum', null, base, plus, bonusEl) : null);
-        c.appendChild(badges);
-        c.appendChild(h('div.ui-win__facts', null,
+        // Two blocks, so a phone on its side can put them next to each other (see ui.css).
+        const main = h('div.ui-win__main', null,
+          suits ? h('div.ui-win__suits', { html: suits, 'aria-hidden': 'true' }) : null,
+          h('h2.ui-win__title', { id: ly.titleId }, 'You won!'),
+          totalEl,
+          h('div.ui-win__cap', { 'aria-hidden': 'true' }, 'Final score'),
+          h('p.visually-hidden', null,
+            'Final score ' + total + (bonus > 0 ? ', including a time bonus of ' + bonus : '') + '.'),
+          bonus > 0 ? h('div.ui-win__sum', null, base, plus, bonusEl) : null,
+          badges);
+        const side = h('div.ui-win__side');
+        c.appendChild(main);
+        c.appendChild(side);
+        side.appendChild(h('div.ui-win__facts', null,
           fig('Time', fmtTime(p.elapsedMs), 'time'),
           fig('Moves', fmtInt(p.moves), 'moves'),
           fig('Mode', 'Draw ' + drawCount, 'mode')));
-        c.appendChild(h('div.ui-win__actions', null,
+        side.appendChild(h('div.ui-win__actions', null,
           h('button.ui-btn.ui-btn--primary.ui-press', {
             type: 'button', 'data-win': 'new',
             onclick: () => {
@@ -2124,6 +2271,18 @@
 
   // ================================================================== "no more moves" card
 
+  /**
+   * The card sits on top of the toolbar and offers Undo / New game itself. While it does, the toolbar below is
+   * inert (no focus, no taps through the card's rounded corners) and faded out, so nothing of it — a focus
+   * ring, a pressed state — shows around the card's edges.
+   */
+  function coverToolbar(covered) {
+    if (!tb.box) return;
+    tb.box.classList.toggle('is-covered', covered);
+    if (covered) tb.box.setAttribute('inert', '');
+    else tb.box.removeAttribute('inert');
+  }
+
   function applyStuckT(el, t) {
     el.style.opacity = String(clamp(t * 1.6, 0, 1));
     el.style.transform = 'translate3d(0,' + ((1 - t) * 70).toFixed(1) + 'px,0) scale(' + (0.94 + 0.06 * t).toFixed(3) + ')';
@@ -2153,7 +2312,7 @@
             // The card itself was the question: a stuck game is dealt over without another confirm.
             closeAll();
             cancelWin(true);
-            callGame('newGame');
+            startDeal('newGame');
           },
         }, 'New game'),
         h('button.ui-btn.ui-btn--quiet.ui-press', {
@@ -2169,16 +2328,14 @@
       stuck.fresh = false;
     });
     overlayRoot.insertBefore(el, overlayRoot.firstChild);
+    coverToolbar(true);
     if (toastRoot) toastRoot.classList.add('has-stuck');
     layoutToasts();
     applyStuckT(el, 0);
     stuck.anim = spring({ from: 0, to: 1, stiffness: 260, damping: 20, precision: 0.002, update: (v) => applyStuckT(el, v) });
-    if (SOL.App && typeof SOL.App.addBackHandler === 'function') {
-      stuck.removeBack = SOL.App.addBackHandler(() => {
-        hideStuck(false);
-        return true;
-      });
-    }
+    // No SOL.App back handler on purpose: the card is not modal and the player keeps dragging cards while it
+    // shows. platform.js drops the edge gesture-exclusion strips while any back handler is registered, so one
+    // here would hand every drag that starts at the screen edge to the system's Back gesture.
     haptic('thud');
   }
 
@@ -2188,9 +2345,8 @@
     const el = stuck.el;
     if (!el) return;
     stuck.el = null;
-    if (stuck.removeBack) stuck.removeBack();
-    stuck.removeBack = null;
     if (stuck.anim) stuck.anim.cancel();
+    coverToolbar(false);
     if (toastRoot) toastRoot.classList.remove('has-stuck');
     layoutToasts();
     el.style.pointerEvents = 'none';
@@ -2306,6 +2462,8 @@
     if (bus) {
       bus.on('game:status', (s) => applyStatus(s, false));
       bus.on('game:new', () => {
+        dealPending = false; // the deal that was asked for (if any) has begun
+        root.clearTimeout(dealTimer);
         quietNext = true;
         stuck.muted = false;
         hideStuck(false);

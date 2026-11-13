@@ -1,6 +1,7 @@
 name: Android
 
-# Tests the web game, lints the Android shell and builds a debug APK that bundles the game.
+# Tests the web game, lints and unit-tests the Android shell and builds a debug APK that bundles
+# the game.
 # The APK is attached to the run as the artifact "solitaire-debug-apk".
 
 on:
@@ -52,11 +53,13 @@ jobs:
 
       # chmod: a wrapper script committed through the GitHub web UI or API loses its executable
       # bit, and the build would then stop with "Permission denied".
-      - name: Lint and build the debug APK
+      # testDebugUnitTest: the JVM unit tests of the shell's own logic (app/src/test): the
+      # durable key/value store behind the saved game and the gesture exclusion rectangles.
+      - name: Lint, unit-test and build the debug APK
         working-directory: android
         run: |
           chmod +x gradlew
-          ./gradlew lint assembleDebug
+          ./gradlew lint testDebugUnitTest assembleDebug
 
       - name: Upload the debug APK
         uses: actions/upload-artifact@v7

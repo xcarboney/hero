@@ -37,10 +37,11 @@
  *   Board.clearHint()
  *   Board.shake(cardId)              "no": a quick shake of the card (and the run above it)
  *   Board.nudgeStock()               gentle "nothing to suggest" cue on the stock / waste
- *   Board.setStockInvite(bool)       the stock slot asks for a tap
+ *   Board.setStockInvite(bool)       the stock asks for a tap (a soft pulse on its top card / recycle symbol)
  *
  *   -- dragging (called by SOL.Input; client coordinates) --
- *   Board.cardAt(clientX, clientY, slop = 0) -> cardId | -1        topmost card as currently drawn
+ *   Board.cardAt(clientX, clientY, slop = 0) -> cardId | -1        topmost card as currently drawn (cards in
+ *                                                                   mid-flight are skipped)
  *   Board.pileAt(clientX, clientY, slop = 0) -> pileId | null      which pile's area the point is in
  *   Board.press(cardId) / Board.unpress()                           tiny "finger down" lift
  *   Board.dragStart(cardId, clientX, clientY) -> number             cards picked up (0 = cannot be picked up)
@@ -55,22 +56,35 @@
  *   -- testing hooks --
  *   Board.snapshot() -> [{ id, pile, index, x, y, z, faceUp,                     as currently drawn
  *                          target: { x, y, z, faceUp },                            the logical target
- *                          flip, lift, scale, rot, rx, ry, moving, held }]         one entry per card id 0..51
+ *                          flip, lift, scale, rot, rx, ry, moving, held, covered }]  one entry per card id 0..51
+ *                                    (covered: resting completely under other cards and not rendered)
  *   Board.isSettled() -> boolean     no drag, no choreography, every card at rest exactly on its target
  *
  *   -- for the celebration / animation director --
  *   Board.sprites                    the 52 Sprite objects, indexed by card id (see "SPRITES" below)
  *   Board.sprite(cardId) -> Sprite
- *   Board.layout() -> { w, h, left, top, cardW, cardH, gap, upFan, downFan, tableauY, bottom, leftHanded,
- *                       compact, piles: { pileId: { x, y } }, deck: { x, y, scale } }      table-space px (copy)
+ *   Board.layout() -> { w, h, left, top, cardW, cardH, gap, upFan, downFan, wasteFanX, wasteFanY, tableauY,
+ *                       bottom, leftHanded, compact, side, piles: { pileId: { x, y } },
+ *                       deck: { x, y, scale } }      table-space px (a copy). `side`: the wide / short
+ *                       arrangement is in use (foundations 2 x 2 beside the columns, waste under the stock)
  *   Board.toClient(x, y) -> { x, y } table space -> viewport px (centre of a card: add cardW / 2, cardH / 2)
- *   Board.hold(cardIds, tag = 'show')   the layout stops touching these cards (you animate them yourself)
+ *   Board.hold(cardIds, tag = 'show', { soft } = {})
+ *                                    the layout stops touching these cards (you animate them yourself).
+ *                                    cardIds null = all 52. `soft: true` (hover tilts, idle flourishes): the
+ *                                    hold ends by itself, and the card relaxes to rest, the moment the game
+ *                                    needs it — any Board.apply(), a drag start, a new deal.
  *   Board.release(tag = 'show', { how = 'fly', stagger = 0, ...flightOptions } = {}) -> Promise
  *                                    gives them back; they return to their logical places
  *   Board.sync(how = 'glide')        brings every free card whose place changed to its target
  *   Board.touch(sprite)              "I changed this sprite's values": schedules its style write
+ *   Board.flush()                    write the styles of touched sprites right now (normally once per frame)
+ *   Board.pulse(pileId, color?)      the slot's arrival ring
+ *   Board.scorePop(x, y, delta)      "+10" at a table-space point (canvas text, or a DOM label when FX is off)
+ *   Board.foundationArrive(sprite, { quiet })   the whole arrival effect (ring, particles, pitch, haptic)
  *   Board.TUNE                       every timing / distance constant (mutable: tune them live)
  *   Board.busyCount() -> number      sprites with a running animation
+ *   Board.isDeckMode() -> boolean    the cards are the shuffling deck (between gather() and deal())
+ *   Emits 'board:layout' <Board.layout()> on SOL.Bus after every re-layout.
  *
  * SPRITES
  * -------
@@ -90,14 +104,23 @@
  *       { x, y, duration, delay, arc (px the path bows towards the top of the screen), side (px sideways),
  *         spin (deg, peaks mid-flight), peakLift, peakScale (added mid-flight), rot / scale / lift (END pose,
  *         default 0 / 1 / 0), flip (END flip 0 | 180), flipFrom / flipTo (0..1 window of the flight),
- *         flipMode ('prop' | 'spin'), overshoot (px), z, trail (colour), onStart(s), onFrame(s, t), onLand(s) }
+ *         flipMode ('prop' | 'spin'), overshoot (px), z, trail (colour), liftSteps (coarser --lift steps for
+ *         crowded choreography; default TUNE.liftSteps), lazy (a covered card stays covered
+ *         until its delay is over), onStart(s), onFrame(s, t), onLand(s) }
  *   sprite.springTo(x, y, { stiffness, damping, velocity: { x, y } }) -> handle     position only; retargets a
  *                                    running spring instead of restarting it
  *   sprite.poseTo({ rot, rx, ry, scale, lift }, { duration, delay, ease }) -> handle
  *   sprite.flipTo(deg, { duration, delay, mode, hop }) -> handle        hop: px the card jumps while it turns
  *   sprite.wobble(fn(t, sprite), { duration, delay }) -> handle         drives ox / oy (they end at 0)
+ *   sprite.cover(bool)               takes a card out of rendering (content-visibility) / puts it back. Every
+ *                                    motion method uncovers; the board covers cards resting deep in the stock,
+ *                                    the waste and the foundations (TUNE.keep*), so only ~30 cards are live
  *   sprite.stop()                    cancels every handle, values stay where they are
  *   sprite.busy() -> boolean
+ * State classes the board keeps on its cards (board.css uses them to drop unused layers): .is-lifted while
+ * lift > 0 or the card turns (the lift shadow is rendered only then), .is-turning while --flip is between 0 and
+ * 180 (the flip shading), and .is-glare — NOT set by the board: add it to a card before you animate
+ * --glare-o / --glare-x / --glare-y on it, remove it afterwards (the glare planes are display: none without it).
  * Flip modes: 'prop' animates --flip (lighting + shadow react; ~0.16 ms per card per frame) — a handful of
  * cards. 'spin' rotates .card itself and swaps the face at 90deg (transform only) — mass choreography.
  * Stacking: z-index = index in the pile at rest; a flight raises its card (TUNE.flyZ + launch order) and puts
@@ -136,6 +159,7 @@
     // ---- layout
     maxCardW: 190,
     fanRoom: 2.3, // card heights of fan room below the first tableau card that the height cap guarantees
+    sideGain: 1.12, // the side arrangement is used when it makes the cards at least this much wider
     upCompact: 0.34, // face-up fan offset / card height, phone art (< 60px wide)
     upClassic: 0.3, // …classic art
     down: 0.125, // face-down fan offset / card height
@@ -143,7 +167,12 @@
     downMin: 0.045,
     wasteFanCompact: 0.44, // draw-3 waste fan offset / card width
     wasteFanClassic: 0.3,
+    liftSteps: 8, // distinct --lift values between 0 and 1 (see Sprite._write)
     // ---- stacking
+    keepStock: 3, // cards from the top of a pile that stay rendered (the rest is covered, see settlePile)
+    keepWaste: 3,
+    keepWaste3: 5, // draw 3: the fan plus what the next move can expose
+    keepFoundation: 2,
     flyZ: 200,
     dragZ: 2000,
     showZ: 3000,
@@ -165,6 +194,8 @@
     // ---- drag
     dragScale: 1.07,
     dragLag: 0.045, // s: time constant of each trailing card
+    dragStretchX: 0.4, // how far a trailing card may fall behind its neighbour / card width
+    dragStretchY: 0.26, // … / card height
     tiltZ: 0.007, // deg per px/s
     tiltY: 0.016,
     tiltX: 0.014,
@@ -180,6 +211,7 @@
     gatherSpan: 300,
     dealMs: 400,
     dealGap: 38,
+    dealAhead: 5, // cards kept rendered on top of the deck while dealing
     // ---- glide (layout changes, neighbours)
     glideStiffness: 230,
     glideDamping: 27,
@@ -215,6 +247,8 @@
   let hintState = null;
   let pulseFlip = false;
   let resizeObserver = null;
+  let inviteOn = false;
+  let inviteEl = null;
 
   // ------------------------------------------------------------------ small helpers
   function clamp(v, lo, hi) {
@@ -249,7 +283,12 @@
   }
   function haptic(kind) {
     try {
-      if (SOL.Haptics) SOL.Haptics.play(kind);
+      if (!SOL.Haptics) return;
+      // Before the first tap a browser refuses to vibrate and logs an intervention for every attempt
+      // (the opening deal runs without any gesture). The native shell has no such rule.
+      const ua = root.navigator && root.navigator.userActivation;
+      if (ua && !ua.hasBeenActive && !(SOL.Platform && SOL.Platform.isNativeApp)) return;
+      SOL.Haptics.play(kind);
     } catch (err) {
       /* ignore */
     }
@@ -299,6 +338,7 @@
       this.dy = 0;
       this.dflip = 180;
       this.held = null; // 'drag' | 'deck' | 'show' | …: the layout leaves a held sprite alone
+      this.soft = false; // a soft hold (press, hover…) ends by itself as soon as the game needs the card
       // handles
       this.hFlight = null;
       this.tracking = false; // the flight follows (tx, ty) live
@@ -306,6 +346,8 @@
       this.hPose = null;
       this.hFlip = null;
       this.hOff = null;
+      this.covered = false; // completely under other cards of its pile and not rendered (see cover())
+      this.liftQ = 0; // --lift quantisation of the running flight (0 = TUNE.liftSteps)
       // style cache
       this._dirty = false;
       this._wT = '';
@@ -313,10 +355,25 @@
       this._wFlip = '';
       this._wZ = -1;
       this._wDown = null;
+      this._wTurn = false;
+      this._wLifted = false;
     }
 
     busy() {
       return !!(this.hFlight || this.hPos || this.hPose || this.hFlip || this.hOff);
+    }
+
+    /**
+     * A card that lies completely under others (deep in the stock, the waste or a foundation) is not rendered
+     * at all: content-visibility: hidden drops its dozen compositor layers and costs next to nothing to
+     * toggle. Anything that animates a sprite uncovers it first; the board covers it again when it has
+     * settled deep in a pile (settlePile).
+     */
+    cover(on) {
+      if (this.covered === on) return;
+      this.covered = on;
+      if (on) this.el.style.setProperty('content-visibility', 'hidden');
+      else this.el.style.removeProperty('content-visibility');
     }
 
     /** Cancels every running animation of this sprite. Values stay where they are. */
@@ -365,6 +422,8 @@
       const s = this;
       s.stop();
       s._fold();
+      // (a covered card with a delayed flight may stay unrendered until it actually takes off)
+      if (!(o.lazy && s.covered && o.delay > 0)) s.cover(false);
       const tracking = o.x === undefined || o.y === undefined;
       const x0 = s.x;
       const y0 = s.y;
@@ -398,6 +457,7 @@
       let started = false;
 
       if (flip1 !== flip0) s.flipMode = o.flipMode === SPIN ? SPIN : PROP;
+      s.liftQ = o.liftSteps || 0;
       s.tracking = tracking;
       if (tracking) {
         s.dx = s.tx;
@@ -413,6 +473,7 @@
           if (s.hFlight !== h) return;
           if (!started) {
             started = true;
+            s.cover(false);
             s.z = o.z !== undefined ? o.z : nextFlyZ();
             if (o.onStart) o.onStart(s);
           }
@@ -430,6 +491,18 @@
           s.scale = sc0 + (sc1 - sc0) * e + peakScale * bell;
           s.lift = clamp(lift0 + (lift1 - lift0) * e + peakLift * bell, 0, 1);
           if (flip1 !== flip0) s.flip = flip0 + (flip1 - flip0) * inOutSine(clamp((t - fa) / (fb - fa), 0, 1));
+          if (tracking && L) {
+            // In-game flights stay on the table: a bowed, scaled-up card must not be cut by the screen edge
+            // or slide under the HUD.
+            const ex = (s.scale - 1) * L.cardW * 0.5;
+            const ey = (s.scale - 1) * L.cardH * 0.5;
+            const maxX = L.w - L.cardW - ex;
+            const maxY = L.h - L.cardH - ey;
+            if (s.x < ex) s.x = Math.min(ex, Math.max(x0, x1));
+            else if (s.x > maxX) s.x = Math.max(maxX, Math.min(x0, x1));
+            if (s.y < ey) s.y = Math.min(ey, Math.max(y0, y1));
+            else if (s.y > maxY) s.y = Math.max(maxY, Math.min(y0, y1));
+          }
           if (trail) trailAt(s, trail);
           if (o.onFrame) o.onFrame(s, t);
           touch(s);
@@ -438,6 +511,7 @@
           if (s.hFlight !== h) return;
           s.hFlight = null;
           s.tracking = false;
+          s.liftQ = 0;
           s.x = tracking ? s.tx : fx1;
           s.y = tracking ? s.ty : fy1;
           s.rot = rot1;
@@ -474,6 +548,8 @@
         s.hPos = null;
         p.cancel();
       }
+      // (a spring that has nowhere to go leaves a covered card covered: layout sync touches every card)
+      if (s.x !== x || s.y !== y) s.cover(false);
       const h = A().spring({
         from: { x: s.x, y: s.y },
         to: { x: x, y: y },
@@ -506,6 +582,7 @@
         s.hPose = null;
         p.cancel();
       }
+      s.cover(false);
       const from = { rot: s.rot, rx: s.rx, ry: s.ry, scale: s.scale, lift: s.lift };
       const to = {
         rot: target.rot === undefined ? s.rot : target.rot,
@@ -548,6 +625,7 @@
         s.hFlip = null;
         p.cancel();
       }
+      s.cover(false);
       const flip0 = s.flip;
       const hop = o.hop || 0;
       s.flipMode = o.mode === SPIN ? SPIN : PROP;
@@ -602,6 +680,7 @@
         s.hOff = null;
         p.cancel();
       }
+      s.cover(false);
       const h = A().tween({
         duration: o.duration === undefined ? 260 : o.duration,
         delay: o.delay || 0,
@@ -643,10 +722,7 @@
         relax(s);
         return;
       }
-      if (s.z !== s.tz) {
-        s.z = s.tz;
-        touch(s);
-      }
+      settlePile(s.pile);
     }
 
     /** Writes the styles (called by the board's frame subscriber for touched sprites). */
@@ -673,6 +749,18 @@
           s._wFlip = f;
         }
       }
+      // Decoration that is not in use is not rendered (board.css): the flip veil only while the card turns
+      // on --flip, the lift shadow only while it is off the table. Each is 2-3 compositor layers per card.
+      const turning = s.flipMode !== SPIN && flip !== 0 && flip !== 180;
+      if (turning !== s._wTurn) {
+        s._wTurn = turning;
+        s.el.classList.toggle('is-turning', turning);
+      }
+      const lifted = s.lift > 0 || turning;
+      if (lifted !== s._wLifted) {
+        s._wLifted = lifted;
+        s.el.classList.toggle('is-lifted', lifted);
+      }
       if (s._wDown !== down) {
         s._wDown = down;
         s.el.classList.toggle('is-face-down', down);
@@ -691,7 +779,10 @@
       }
 
       // ---- lift (shadow)
-      const lift = s.lift <= 0 ? '0' : String(Math.round(s.lift * 100) / 100);
+      // Quantised: the shadow cross-fade does not need 60 distinct values a second, and every write of an
+      // inherited custom property is a small restyle of the card.
+      const q = s.liftQ || TUNE.liftSteps;
+      const lift = s.lift <= 0 ? '0' : String(Math.round((Math.max(1, Math.round(s.lift * q)) / q) * 1000) / 1000);
       if (lift !== s._wLift) {
         st.setProperty('--lift', lift);
         s._wLift = lift;
@@ -703,6 +794,56 @@
         s._wZ = s.z;
       }
     }
+  }
+
+  /**
+   * Housekeeping for one pile, run whenever one of its cards lands and after every state change:
+   *
+   * 1. Resting z-index — from the bottom up, and only as far as the first card that is still in the air.
+   *    A run lands as several cards at slightly different times; if each one dropped to its resting z on its
+   *    own, a card that is still raised would cover the ones above it that have already landed. They keep
+   *    their raised (and correctly ordered) z until everything below them is down.
+   * 2. Covering — cards resting deep inside the stock, the waste or a foundation cannot be seen: they are
+   *    taken out of rendering (Sprite.cover). The top few stay: the next ones a move can expose.
+   */
+  function settlePile(pileId) {
+    const arr = state && !deckMode ? state.piles[pileId] : null;
+    if (!arr) return;
+    const n = arr.length;
+    const keep =
+      pileId === 'stock'
+        ? TUNE.keepStock
+        : pileId === 'waste'
+          ? L.draw3
+            ? TUNE.keepWaste3
+            : TUNE.keepWaste
+          : pileId.charAt(0) === 'f'
+            ? TUNE.keepFoundation
+            : -1;
+    let blocked = false;
+    let resting = 0;
+    for (let i = 0; i < n; i++) {
+      const c = sprites[arr[i]];
+      if (c.held) {
+        blocked = true;
+        c.cover(false);
+        continue;
+      }
+      if (c.busy()) {
+        if (c.z >= TUNE.flyZ) blocked = true;
+        c.cover(false);
+        continue;
+      }
+      if (!blocked && c.z !== c.tz) {
+        c.z = c.tz;
+        touch(c);
+      }
+      c.cover(keep >= 0 && i < n - keep);
+      resting++;
+    }
+    // The stock's slot doubles as the visible edge of the pile (css: .pile--stock.is-stacked): the top cards
+    // sit a few px up and to the left of it, the covered ones below are not drawn.
+    if (pileId === 'stock' && pileEls.stock) pileEls.stock.classList.toggle('is-stacked', resting > 0);
   }
 
   function nextFlyZ() {
@@ -801,13 +942,15 @@
     const padT = clamp(H * 0.012, 4, 14);
     const padB = clamp(H * 0.014, 5, 16);
     const availW = Math.max(60, W - padL - padR);
+    const availH = Math.max(60, H - padT - padB);
+    const rowK = 0.14;
 
+    // ---- arrangement A, "top row": foundations + waste + stock above seven columns that span the width.
+    // Height cap: the top row plus one tableau card plus `fanRoom` card heights of fan must fit.
     let gap = clamp(availW * 0.011, 3, 20);
     let cardW = (availW - 6 * gap) / 7;
-    // Height cap: the top row plus one tableau card plus `fanRoom` card heights of fan must fit.
-    const rowK = 0.14;
-    const byHeight = (H - padT - padB) / (2 + rowK + TUNE.fanRoom) / ASPECT;
     let capped = false;
+    const byHeight = availH / (2 + rowK + TUNE.fanRoom) / ASPECT;
     if (cardW > byHeight) {
       cardW = byHeight;
       capped = true;
@@ -816,34 +959,72 @@
       cardW = TUNE.maxCardW;
       capped = true;
     }
+
+    // ---- arrangement B, "side": on wide, short tables (a phone held sideways) the top row costs too much
+    // height. The foundations (2 x 2) go to one side of the columns, stock and waste to the other; the
+    // columns get the whole height and the cards come out about a third bigger.
+    const sideGapK = 0.15;
+    const sideCols = 10 + 11 * sideGapK; // 2 + 7 + 1 columns, 9 gaps, 2 slightly wider gaps between the groups
+    const sideW = Math.min(availW / sideCols, availH / (1 + TUNE.fanRoom) / ASPECT, TUNE.maxCardW);
+    const side = sideW >= cardW * TUNE.sideGain;
+    if (side) cardW = sideW;
+
     cardW = Math.max(22, cardW >= 60 ? Math.floor(cardW) : Math.floor(cardW * 2) / 2);
     const cardH = cardW * ASPECT;
-    gap = capped ? Math.min(clamp(cardW * 0.2, 6, 32), (availW - 7 * cardW) / 6) : (availW - 7 * cardW) / 6;
-    const total = 7 * cardW + 6 * gap;
-    const x0 = padL + (availW - total) / 2;
-    const rowGap = clamp(cardH * rowK, 7, 30);
-    const topY = padT;
-    const tableauY = topY + cardH + rowGap;
-    const bottom = H - padB;
     const compact = cardW < 60; // cards.css swaps to the phone art below 60px
-    const col = [];
-    for (let i = 0; i < 7; i++) col.push(Math.round(x0 + i * (cardW + gap)));
-
+    const rowGap = clamp(cardH * rowK, 7, 30);
+    const top = Math.round(padT);
+    const bottom = H - padB;
     const draw3 = !!(state && state.drawCount === 3);
-    const wasteFan = Math.round(cardW * (compact ? TUNE.wasteFanCompact : TUNE.wasteFanClassic));
     const piles = {};
-    const top = Math.round(topY);
-    if (leftHanded) {
-      piles.stock = { x: col[0], y: top };
-      piles.waste = { x: col[1], y: top };
-      for (let i = 0; i < 4; i++) piles[FOUNDATIONS[i]] = { x: col[3 + i], y: top };
+    const col = [];
+    let wasteFanX = 0;
+    let wasteFanY = 0;
+    let ty;
+
+    if (side) {
+      gap = Math.min(clamp(cardW * sideGapK * 1.25, 5, 30), (availW - 10 * cardW) / 11);
+      const sep = gap * 2; // between the side groups and the columns
+      const total = 10 * cardW + 7 * gap + 2 * sep;
+      const x0 = padL + (availW - total) / 2;
+      const step = cardW + gap;
+      ty = top;
+      const row2 = Math.round(top + cardH + rowGap);
+      wasteFanY = Math.round(cardH * (compact ? TUNE.upCompact : TUNE.upClassic) * 0.9);
+      let xT;
+      if (leftHanded) {
+        const xS = Math.round(x0);
+        xT = x0 + cardW + sep;
+        const xF = xT + 6 * step + cardW + sep;
+        piles.stock = { x: xS, y: top };
+        piles.waste = { x: xS, y: row2 };
+        for (let i = 0; i < 4; i++) piles[FOUNDATIONS[i]] = { x: Math.round(xF + (i % 2) * step), y: i < 2 ? top : row2 };
+      } else {
+        xT = x0 + 2 * cardW + gap + sep;
+        const xS = Math.round(xT + 6 * step + cardW + sep);
+        piles.stock = { x: xS, y: top };
+        piles.waste = { x: xS, y: row2 };
+        for (let i = 0; i < 4; i++) piles[FOUNDATIONS[i]] = { x: Math.round(x0 + (i % 2) * step), y: i < 2 ? top : row2 };
+      }
+      for (let i = 0; i < 7; i++) col.push(Math.round(xT + i * step));
     } else {
-      piles.stock = { x: col[6], y: top };
-      // draw 3: the fan grows towards the stock and its top card ends in column 5
-      piles.waste = { x: col[5] - (draw3 ? 2 * wasteFan : 0), y: top };
-      for (let i = 0; i < 4; i++) piles[FOUNDATIONS[i]] = { x: col[i], y: top };
+      gap = capped ? Math.min(clamp(cardW * 0.2, 6, 32), (availW - 7 * cardW) / 6) : (availW - 7 * cardW) / 6;
+      const total = 7 * cardW + 6 * gap;
+      const x0 = padL + (availW - total) / 2;
+      for (let i = 0; i < 7; i++) col.push(Math.round(x0 + i * (cardW + gap)));
+      ty = Math.round(top + cardH + rowGap);
+      wasteFanX = Math.round(cardW * (compact ? TUNE.wasteFanCompact : TUNE.wasteFanClassic));
+      if (leftHanded) {
+        piles.stock = { x: col[0], y: top };
+        piles.waste = { x: col[1], y: top };
+        for (let i = 0; i < 4; i++) piles[FOUNDATIONS[i]] = { x: col[3 + i], y: top };
+      } else {
+        piles.stock = { x: col[6], y: top };
+        // draw 3: the fan grows towards the stock and its top card ends in column 5
+        piles.waste = { x: col[5] - (draw3 ? 2 * wasteFanX : 0), y: top };
+        for (let i = 0; i < 4; i++) piles[FOUNDATIONS[i]] = { x: col[i], y: top };
+      }
     }
-    const ty = Math.round(tableauY);
     for (let i = 0; i < 7; i++) piles[TABLEAU[i]] = { x: col[i], y: ty };
 
     const deckScale = clamp(TUNE.deckScale, 1, Math.max(1, (W * 0.5) / (cardW * 2.4)));
@@ -860,15 +1041,18 @@
       tableauY: ty,
       bottom: bottom,
       compact: compact,
+      side: side,
       upFan: cardH * (compact ? TUNE.upCompact : TUNE.upClassic),
       downFan: cardH * TUNE.down,
-      wasteFan: wasteFan,
+      wasteFan: wasteFanX,
+      wasteFanX: wasteFanX,
+      wasteFanY: wasteFanY,
       draw3: draw3,
       leftHanded: leftHanded,
       piles: piles,
       deck: {
         x: Math.round((W - cardW) / 2),
-        y: Math.round(clamp((H - cardH) * 0.46, ty, Math.max(ty, H - cardH * 1.7))),
+        y: Math.round(clamp((H - cardH) * 0.46, Math.min(ty, H - cardH * 1.2), Math.max(ty, H - cardH * 1.7))),
         scale: deckScale,
       },
     };
@@ -878,6 +1062,7 @@
       L.h !== next.h ||
       L.cardW !== next.cardW ||
       L.gap !== next.gap ||
+      L.side !== next.side ||
       L.leftHanded !== next.leftHanded ||
       L.draw3 !== next.draw3 ||
       L.piles.stock.x !== next.piles.stock.x ||
@@ -983,8 +1168,8 @@
           const slot = Math.max(0, shown - 1 - fromTop);
           s.pile = id;
           s.index = i;
-          s.tx = origin.x + slot * L.wasteFan;
-          s.ty = origin.y;
+          s.tx = origin.x + slot * L.wasteFanX;
+          s.ty = origin.y + slot * L.wasteFanY;
           s.tz = i;
           s.faceUp = !!faces[arr[i]];
         }
@@ -1052,7 +1237,7 @@
     // glide
     o = o || EMPTY;
     const wasFlying = !!s.hFlight;
-    s._fold();
+    if (!s.hOff) s._fold(); // (a running wobble keeps driving the offset and ends at 0 by itself)
     const h = s.springTo(s.tx, s.ty, o);
     s.dx = s.tx;
     s.dy = s.ty;
@@ -1080,11 +1265,9 @@
         } else {
           place(s, how || 'glide', o);
         }
-      } else if (!s.busy() && s.z !== s.tz) {
-        s.z = s.tz;
-        touch(s);
       }
     }
+    if (state && !deckMode) for (let p = 0; p < PILE_IDS.length; p++) settlePile(PILE_IDS[p]);
   }
 
   // ------------------------------------------------------------------ DOM
@@ -1193,6 +1376,7 @@
     for (let i = 0; i < 52; i++) {
       const s = sprites[i];
       s.stop();
+      s.cover(false);
       s.held = 'deck';
       s.x = s.tx;
       s.y = s.ty;
@@ -1268,6 +1452,9 @@
       upFan: L.upFan,
       downFan: L.downFan,
       wasteFan: L.wasteFan,
+      wasteFanX: L.wasteFanX,
+      wasteFanY: L.wasteFanY,
+      side: L.side,
       tableauY: L.tableauY,
       bottom: L.bottom,
       leftHanded: L.leftHanded,
@@ -1297,6 +1484,7 @@
 
   function releaseSprite(s) {
     s.held = null;
+    s.soft = false;
     s.el.classList.remove('is-dragging');
   }
 
@@ -1315,7 +1503,12 @@
     resetTransient();
     setState(next);
     retarget();
-    for (let i = 0; i < 52; i++) place(sprites[i], 'instant');
+    for (let i = 0; i < 52; i++) {
+      sprites[i].cover(false);
+      place(sprites[i], 'instant');
+    }
+    for (let p = 0; p < PILE_IDS.length; p++) settlePile(PILE_IDS[p]);
+    refreshInvite();
     flush();
   }
 
@@ -1362,14 +1555,17 @@
 
   function scorePop(x, y, delta) {
     if (!delta || !L) return;
-    const text = (delta > 0 ? '+' : '−') + Math.abs(delta);
+    const text = (delta > 0 ? '+' : '\u2212') + Math.abs(delta); // a real minus sign
+    const rise = clamp(L.cardH * 0.6, 30, 70);
+    // Near the top of the table the label starts lower (on the card) so it never drifts over the HUD.
+    if (y - rise < L.cardH * 0.08) y += Math.min(L.cardH * 0.7, rise + L.cardH * 0.08);
     const f = fx();
     if (f) {
       const c = toClient(x + L.cardW / 2, y);
       f.floatText(c.x, c.y - 4, text, {
         color: delta > 0 ? GOLD : MINUS,
         size: clamp(L.cardW * 0.36, 15, 30),
-        rise: clamp(L.cardH * 0.6, 30, 70),
+        rise: rise,
         duration: 950,
       });
       return;
@@ -1476,7 +1672,7 @@
       return;
     }
     const dropped = takeDrag(); // sprites that were in the player's hand (or null)
-    unpress();
+    releaseSoft();
     clearHint();
     setState(next);
     retarget();
@@ -1523,7 +1719,9 @@
       place(s, 'fly', {
         duration: TUNE.drawMs * tempo,
         delay: i * TUNE.drawGap * tempo,
-        arc: -L.cardH * 0.1,
+        // a small dip towards the player (sideways when the waste sits under the stock)
+        arc: L.side ? 0 : -L.cardH * 0.1,
+        side: L.side ? (L.leftHanded ? -1 : 1) * (s.ty > s.y ? 1 : -1) * L.cardW * 0.14 : 0,
         spin: dir * 5,
         peakLift: 0.85,
         peakScale: 0.1,
@@ -1555,11 +1753,12 @@
       place(s, 'fly', {
         duration: TUNE.recycleMs * tempo,
         delay: i * gap,
-        arc: -L.cardH * (0.1 + 0.12 * ((i % 3) / 2)),
+        arc: L.side ? 0 : -L.cardH * (0.1 + 0.12 * ((i % 3) / 2)),
+        side: L.side ? (L.leftHanded ? -1 : 1) * (s.ty > s.y ? 1 : -1) * L.cardW * (0.1 + 0.1 * ((i % 3) / 2)) : 0,
         spin: dir * 7,
-        peakLift: 0.35,
+        peakLift: 0, // up to 24 cards at once: transform only — no shadow layers, no restyles
         peakScale: 0.05,
-        flipMode: SPIN, // up to 24 cards turn at once: transform only
+        flipMode: SPIN,
         flipFrom: 0.1,
         flipTo: 0.85,
         overshoot: 0,
@@ -1611,7 +1810,13 @@
       const baseMs = (auto ? clamp(flightMs(dist) * 0.82, 220, 400) : flightMs(dist) * (toFoundation ? 1.12 : 1)) * tempo;
       const want = L.cardH * (toFoundation ? TUNE.arcFoundation : TUNE.arc) * clamp(dist / (L.cardW * 3), 0.35, 1);
       const arc = arcFor(lead, want);
-      const side = toFoundation && !undo ? (lead.tx < lead.x ? 1 : -1) * Math.min(L.cardW * 0.5, dist * 0.12) : 0;
+      // foundation flights also bow sideways — always towards the middle of the table, never off its edge
+      let side = 0;
+      if (toFoundation && !undo && dist > 1) {
+        const nx = -(lead.ty - lead.y) / dist; // x of the normal to the right of the direction of travel
+        const inward = (lead.x + lead.tx) / 2 < (L.w - L.cardW) / 2 ? 1 : -1;
+        side = (nx * inward >= 0 ? 1 : -1) * Math.min(L.cardW * 0.5, dist * 0.12) * Math.min(1, Math.abs(nx) * 3);
+      }
       const spin = clamp((lead.tx - lead.x) / (L.cardW * 4), -1, 1) * (toFoundation ? 9 : 5);
       for (let i = 0; i < n; i++) {
         const s = sprites[transfers[i].card];
@@ -1623,6 +1828,7 @@
           side: side,
           spin: spin,
           peakLift: 0.9,
+          liftSteps: auto ? 3 : 0,
           peakScale: toFoundation ? 0.16 : 0.09,
           trail: auto ? SUIT_GLOW[suitOf(s.id)] : null,
           onStart:
@@ -1697,7 +1903,7 @@
   function gather() {
     if (!inited) return Promise.resolve();
     takeDrag();
-    unpress();
+    releaseSoft();
     clearHint();
     const gen = ++choreoGen;
     if (deckMode) {
@@ -1716,6 +1922,9 @@
     }
     deckMode = true;
     state = null;
+    inviteOn = false;
+    refreshInvite();
+    if (pileEls.stock) pileEls.stock.classList.remove('is-stacked', 'is-spent');
     for (let k = 0; k < 52; k++) sprites[order[k]].index = k;
     retarget();
     const gap = TUNE.gatherSpan / 52;
@@ -1742,7 +1951,7 @@
           delay: k * gap,
           arc: Math.min(L.cardH * 0.5, dist * 0.18),
           spin: ((k % 5) - 2) * 4,
-          peakLift: 0.4,
+          peakLift: 0, // 52 cards at once: transform only (no shadow layers, no --lift restyles)
           peakScale: 0.04,
           overshoot: 0,
           z: TUNE.flyZ + k,
@@ -1831,7 +2040,7 @@
                 duration: 150,
                 delay: j * 6.5,
                 arc: L.cardH * 0.1,
-                peakLift: 0.3,
+                peakLift: 0,
                 peakScale: 0.03,
                 overshoot: 0,
                 z: TUNE.flyZ + j,
@@ -1891,10 +2100,16 @@
       s.z = 60 + (order.length - k);
       touch(s);
     }
+    // Only the top of the deck is ever seen: the cards inside it are not rendered until their turn comes
+    // (far fewer live layers while the deal — the busiest animation of the game — runs).
+    const ahead = TUNE.dealAhead;
+    for (let k = ahead; k < order.length; k++) sprites[order[k]].cover(true);
+    for (let i = 0; i < stock.length - TUNE.keepStock; i++) sprites[stock[i]].cover(true);
 
     const speed = SOL.Anim.speed || 1;
     const dealt = A().stagger(order, TUNE.dealGap, function (id, k) {
       if (gen !== choreoGen) return null;
+      if (k + ahead < order.length) sprites[order[k + ahead]].cover(false);
       const s = sprites[id];
       if (s.held !== 'deck') return null;
       s.held = null;
@@ -1906,6 +2121,7 @@
         side: (s.tx < s.x ? -1 : 1) * Math.min(L.cardW * 0.4, dist * 0.08),
         spin: (s.tx < s.x ? -1 : 1) * (10 + (k % 4) * 3),
         peakLift: 0.9,
+        liftSteps: 3, // ten cards in the air at once: a handful of shadow steps each, not one per frame
         peakScale: 0.05,
         flipMode: PROP,
         flipFrom: 0.42,
@@ -1934,9 +2150,10 @@
         s.fly({
           duration: 420,
           delay: lastLaunch + 60 + i * 9,
+          lazy: true, // the covered ones stay unrendered until they take off
           arc: Math.min(L.cardH * 0.4, dist * 0.12),
           spin: 0,
-          peakLift: 0.5,
+          peakLift: 0,
           peakScale: 0,
           overshoot: L.cardW * 0.05,
           z: TUNE.flyZ + 1400 + i,
@@ -1969,6 +2186,11 @@
   }
 
   // ------------------------------------------------------------------ hit testing (model based, no DOM reads)
+  /**
+   * The topmost card drawn at a point. Cards in mid-flight are not there to be touched: when the player taps
+   * the stock or the waste again while the previous card is still leaving, the tap is meant for the pile, not
+   * for the card passing over it. (Gliding cards — springs — are hit where they are drawn.)
+   */
   function cardAt(cx, cy, slop) {
     if (!L) return -1;
     const x = cx - L.left;
@@ -1978,6 +2200,7 @@
     let bestZ = -1;
     for (let i = 0; i < 52; i++) {
       const s = sprites[i];
+      if (s.hFlight) continue;
       const sx = s.x + s.ox;
       const sy = s.y + s.oy;
       if (x < sx - pad || x > sx + L.cardW + pad || y < sy - pad || y > sy + L.cardH + pad) continue;
@@ -1998,8 +2221,8 @@
       return { x0: p.x - hx, y0: p.y - hy, x1: p.x + L.cardW + hx, y1: L.h };
     }
     if (id === 'waste') {
-      const fan = L.draw3 ? 2 * L.wasteFan : 0;
-      return { x0: p.x - hx, y0: p.y - hy, x1: p.x + L.cardW + fan + hx, y1: p.y + L.cardH + hy };
+      const n = L.draw3 ? 2 : 0;
+      return { x0: p.x - hx, y0: p.y - hy, x1: p.x + L.cardW + n * L.wasteFanX + hx, y1: p.y + L.cardH + n * L.wasteFanY + hy };
     }
     return { x0: p.x - hx, y0: p.y - hy, x1: p.x + L.cardW + hx, y1: p.y + L.cardH + hy };
   }
@@ -2033,7 +2256,9 @@
     const s = sprites[cardId];
     if (!s || s.held || s.hFlight || reduced() || deckMode) return;
     pressed = s;
-    s.held = 'press'; // (a free sprite would be relaxed back to rest as soon as the little lift ended)
+    // a (soft) hold: a free sprite would be relaxed back to rest as soon as the little lift ended
+    s.held = 'press';
+    s.soft = true;
     s.poseTo({ lift: 0.3, scale: 1.025 }, { duration: 110 });
   }
 
@@ -2042,8 +2267,24 @@
     pressed = null;
     if (!s || s.held !== 'press') return;
     s.held = null;
+    s.soft = false;
     if (s.lift !== 0 || s.scale !== 1 || s.hPose) s.poseTo({ lift: 0, scale: 1 }, { duration: 140 });
     else s._settled();
+  }
+
+  /**
+   * Ends every soft hold (press, a hover tilt, …): the game needs its cards. Called before anything that
+   * moves cards. The sprites relax back to rest unless the caller animates them right away.
+   */
+  function releaseSoft() {
+    pressed = null;
+    for (let i = 0; i < 52; i++) {
+      const s = sprites[i];
+      if (!s.held || !s.soft) continue;
+      s.held = null;
+      s.soft = false;
+      s._settled();
+    }
   }
 
   function markTargets(d, on) {
@@ -2085,10 +2326,7 @@
     if (!inited || !state || deckMode || drag || !L) return 0;
     const run = E().getRun(state, cardId);
     if (!run || run.length === 0) return 0;
-    if (pressed) {
-      if (pressed.held === 'press') pressed.held = null;
-      pressed = null;
-    }
+    releaseSoft();
     const spr = [];
     for (let i = 0; i < run.length; i++) {
       const s = sprites[run[i]];
@@ -2125,6 +2363,8 @@
       ryV: 0,
       rx: 0,
       rxV: 0,
+      // the run keeps the spacing it had in its column (a compressed column does not spring apart in the hand)
+      fan: spr.length > 1 ? clamp(spr[1].ty - spr[0].ty, 2, L.upFan) : L.upFan,
       legal: E().legalTargets(state, cardId),
       hover: null,
       released: false,
@@ -2187,14 +2427,17 @@
     touch(lead);
 
     // the rest of the run: each card chases the one below it
-    const fan = L.upFan;
+    const fan = d.fan;
     const a = still ? 1 : 1 - Math.exp(-h / TUNE.dragLag);
     const b = still ? 1 : 1 - Math.exp(-h / (TUNE.dragLag * 1.4));
+    // …but the run stays a run: however fast the hand moves, neighbours never stretch far apart
+    const maxX = L.cardW * TUNE.dragStretchX;
+    const maxY = L.cardH * TUNE.dragStretchY;
     for (let i = 1; i < d.sprites.length; i++) {
       const s = d.sprites[i];
       const prev = d.sprites[i - 1];
-      s.x += (prev.x - s.x) * a;
-      s.y += (prev.y + fan - s.y) * a;
+      s.x = clamp(s.x + (prev.x - s.x) * a, prev.x - maxX, prev.x + maxX);
+      s.y = clamp(s.y + (prev.y + fan - s.y) * a, prev.y + fan - maxY, prev.y + fan + maxY);
       s.rot += (prev.rot - s.rot) * b;
       s.rx += (prev.rx - s.rx) * b;
       s.ry += (prev.ry - s.ry) * b;
@@ -2432,19 +2675,41 @@
     pulse('stock', MINUS);
   }
 
+  /**
+   * "Tap me": a soft pulse on the stock — on its top card, or on the recycle symbol when it is empty.
+   * CSS only (no sprite values change), so it never disturbs the layout model or the testing hooks.
+   */
+  function refreshInvite() {
+    let el = null;
+    if (inviteOn && state && !deckMode) {
+      const st = state.piles.stock;
+      if (st.length > 0) el = sprites[st[st.length - 1]].el;
+    }
+    if (el !== inviteEl) {
+      if (inviteEl) inviteEl.classList.remove('is-inviting');
+      if (el) el.classList.add('is-inviting');
+      inviteEl = el;
+    }
+    if (pileEls.stock) pileEls.stock.classList.toggle('is-inviting', inviteOn && !deckMode);
+  }
+
   function setStockInvite(on) {
-    if (pileEls.stock) pileEls.stock.classList.toggle('is-inviting', !!on);
+    inviteOn = !!on;
+    refreshInvite();
   }
 
   // ------------------------------------------------------------------ holds (celebration / director)
-  function hold(ids, tag) {
+  function hold(ids, tag, o) {
     const out = [];
     if (!inited) return out;
     const list = ids || sprites.map((s) => s.id);
+    const soft = !!(o && o.soft);
     for (let i = 0; i < list.length; i++) {
       const s = sprites[list[i]];
       if (!s) continue;
       s.held = tag || 'show';
+      s.soft = soft;
+      s.cover(false);
       out.push(s);
     }
     return out;
@@ -2466,6 +2731,7 @@
     for (let i = 0; i < list.length; i++) {
       const s = list[i];
       s.held = null;
+      s.soft = false;
       if (deckMode || !state) continue;
       const opts = Object.assign({ delay: i * stagger }, o);
       delete opts.how;
@@ -2512,6 +2778,7 @@
         ry: s.ry,
         moving: s.busy(),
         held: s.held,
+        covered: s.covered,
       });
     }
     return out;

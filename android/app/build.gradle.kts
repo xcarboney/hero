@@ -73,6 +73,10 @@ dependencies {
     implementation(libs.androidx.activity)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.webkit)
+
+    // JVM unit tests (./gradlew testDebugUnitTest) of the logic that needs no Android classes:
+    // the storage rules and file store, and the gesture exclusion rectangles.
+    testImplementation(libs.junit)
 }
 
 // ---------------------------------------------------------------------------------------------

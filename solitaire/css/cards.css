@@ -19,6 +19,10 @@
  *
  * State classes (toggled by the board): .is-face-down .is-dragging .is-hint .is-target .is-dimmed .is-selectable
  * Modifiers (set by SOL.Cards): .card--thick (visible thickness, no table shadow) .card--back-only
+ *
+ * Also honoured: <html data-effects="low"> removes the glare planes of table cards (thick cards keep a simpler one).
+ * A front narrower than 60px shows the compact layout instead of the classic one (container query, no JS);
+ * data-layout="compact" | "classic" on .card pins one of them.
  */
 
 /*
@@ -256,7 +260,10 @@
   display: none;
 }
 
-/* Phone-sized cards: big rank + suit instead of pips (see compactMarkup() in cards.js). */
+/*
+ * Phone-sized cards: big rank + suit instead of pips (see compactMarkup() in cards.js). The 60px switch is
+ * published as SOL.Cards.COMPACT_BELOW and the board sizes its fans by it: change both together or not at all.
+ */
 @container sol-card (max-width: 59.9px) {
   .card__classic {
     display: none;
@@ -264,6 +271,19 @@
   .card__compact {
     display: inline;
   }
+}
+
+/*
+ * Optional override, for owners that show one card at two sizes (the inspector flying a table card up to
+ * full size): data-layout="compact" | "classic" on .card pins the layout whatever the rendered width.
+ */
+.card[data-layout="compact"] .card__classic,
+.card[data-layout="classic"] .card__compact {
+  display: none;
+}
+.card[data-layout="compact"] .card__compact,
+.card[data-layout="classic"] .card__classic {
+  display: inline;
 }
 
 /* ------------------------------------------------------------------ flip shading + glare */
@@ -353,6 +373,19 @@
 :root[data-effects="low"] .card:not(.card--thick) .card__glare {
   display: none;
 }
+/* …and the thick card's highlight drops to the hot spot alone: one gradient to repaint per frame instead of three */
+:root[data-effects="low"] .card--thick .card__glare::before,
+:root[data-effects="low"] .card--thick .card__glare::after {
+  background-image: radial-gradient(
+    circle calc(var(--card-w) * 1.05) at var(--glare-x, 50%) var(--glare-y, 0%),
+    rgba(255, 255, 255, 0.78) 0%,
+    rgba(255, 255, 255, 0.4) 10%,
+    rgba(255, 255, 255, 0.12) 30%,
+    rgba(255, 255, 255, 0) 66%
+  );
+  background-size: 100% 100%;
+  background-position: 0 0;
+}
 
 /*
  * Lighting that needs trigonometry (guarded: a var()-containing declaration with an unknown function would
@@ -400,9 +433,9 @@
  * to the other, so the lighting turns the corner smoothly). Across its width every strip gets the same
  * profile: slightly darker where it meets the faces and a faint seam down the middle, like laminated stock.
  *
- * Walls are deliberately double-sided. The solid is convex, so the inside of a far wall can only ever be
- * seen through an anti-aliasing seam between two near surfaces — where it shows paper instead of whatever is
- * behind the card.
+ * The four straight walls are culled from behind. The short corner strips are double-sided on purpose: the
+ * solid is convex, so the inside of a far strip can only ever be seen through an anti-aliasing seam between two
+ * near ones — which is exactly where it is wanted, showing paper instead of the backdrop.
  */
 .card__edge {
   --_len: calc(var(--card-w) * var(--l));
@@ -413,6 +446,8 @@
   height: var(--_len);
   margin: calc(var(--_len) / -2) 0 0 calc(var(--card-t) / -2);
   transform: translate3d(calc(var(--card-w) * var(--x)), calc(var(--card-w) * var(--y)), 0) rotateZ(var(--a)) rotateY(90deg);
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
   background-image:
     linear-gradient(
       90deg,
@@ -425,6 +460,11 @@
       rgba(70, 58, 36, 0.2) 100%
     ),
     linear-gradient(180deg, var(--c0), var(--c1));
+}
+
+.card__edge--corner {
+  -webkit-backface-visibility: visible;
+  backface-visibility: visible;
 }
 
 @supports (width: round(1.5px, 1px)) {

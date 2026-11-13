@@ -43,8 +43,11 @@
  *   'game:status'  getStatus()               whenever a field may have changed
  *   'game:tick'    { elapsedMs }             once a second while the clock runs
  *   'game:won'     { score, bonus, total, moves, elapsedMs, seed, drawCount, isBestScore, isBestTime }
- *                                            emitted when the win celebration has finished or was skipped
- *                                            (immediately under reduced motion) — the win screen follows the show
+ *                                            emitted at once. The celebration (SOL.Celebrate.play) starts as
+ *                                            soon as the winning card has landed; Game.isBusy() is true from
+ *                                            the win until the show is over or skipped. When the last 'modal'
+ *                                            pause ends on a won table (the win screen's "Watch the cards"),
+ *                                            the celebration plays an encore (at most twice per win).
  *   'game:stuck'   {}                        once per stuck episode, a moment after the move that caused it
  *   'game:busy'    { busy }
  *
@@ -72,6 +75,8 @@
   const AUTO_GAP_START = 125;
   const AUTO_GAP_END = 42;
   const HURRY = 3;
+  const ENCORE_DELAY_MS = 320;
+  const LANDING_LIMIT_MS = 1200;
 
   let state = null;
   let version = 0; // bumped on every state change: cache key for hints / stuck
@@ -90,6 +95,8 @@
   let dealToken = 0;
   let autoToken = 0;
   let winToken = 0;
+  let encoreTimer = 0;
+  let encoresLeft = 0; // per win: closing dialogs on a won table must not turn into an endless party
   let hurried = false;
 
   const hintCache = { v: -1, list: [] };
@@ -443,28 +450,61 @@
       log('stats failed', err);
     }
     saveNow();
-    if (SOL.App && SOL.App.keepScreenOn) SOL.App.keepScreenOn(false);
 
-    const wonState = state;
+    encoresLeft = 2;
+    celebrate(result);
+    // Emitted right away: the UI lets the show run for a moment before it brings up the win screen.
+    emit('game:won', result);
+  }
+
+  /** Resolves when no card is moving any more (or after `maxMs`): lets the last card land before the show. */
+  function whenLanded(maxMs) {
+    return new Promise(function (resolve) {
+      const t0 = now();
+      (function poll() {
+        const b = board();
+        if (!b || b.busyCount() === 0 || now() - t0 >= maxMs) resolve();
+        else root.setTimeout(poll, 40); // waiting for a state, not sequencing an animation
+      })();
+    });
+  }
+
+  /**
+   * Runs the win celebration (SOL.Celebrate) and keeps the table busy while it plays. Also used for the
+   * encore when the player dismisses the win screen to look at the cards.
+   */
+  function celebrate(result) {
+    if (!state || !state.won || busy.has('celebrate')) return false;
+    if (!SOL.Celebrate || typeof SOL.Celebrate.play !== 'function') return false;
     const token = ++winToken;
     setBusy('celebrate', true);
-    let show;
-    try {
-      show = SOL.Celebrate && SOL.Celebrate.play ? SOL.Celebrate.play(result) : null;
-    } catch (err) {
-      log('celebration failed', err);
-      show = null;
-    }
     const done = function () {
       if (token !== winToken) return; // a new game / loadState took over meanwhile
       setBusy('celebrate', false);
-      // the win screen follows the show — unless the player already moved on
-      if (state === wonState && state.won) emit('game:won', result);
     };
-    Promise.resolve(show).then(done, function (err) {
-      log('celebration failed', err);
-      done();
-    });
+    // The winning card finishes its flight (and gets its landing burst) before the foundations erupt.
+    whenLanded(LANDING_LIMIT_MS)
+      .then(function () {
+        if (token !== winToken || !state || !state.won) return null;
+        return SOL.Celebrate.play(result);
+      })
+      .then(done, function (err) {
+        log('celebration failed', err);
+        done();
+      });
+    return true;
+  }
+
+  /** The last dialog closed on a won table ("Watch the cards"): the cards take another bow. */
+  function scheduleEncore() {
+    if (encoreTimer) root.clearTimeout(encoreTimer);
+    // A beat later: "New game" on the win screen also closes the dialog first, and must not trigger a show.
+    encoreTimer = root.setTimeout(function () {
+      encoreTimer = 0;
+      if (!state || !state.won || hidden || pauses.size > 0 || busy.size > 0 || encoresLeft <= 0) return;
+      encoresLeft--;
+      celebrate();
+    }, ENCORE_DELAY_MS);
   }
 
   // ------------------------------------------------------------------ new game / restore
@@ -472,6 +512,10 @@
     dealToken++;
     autoToken++;
     winToken++;
+    if (encoreTimer) {
+      root.clearTimeout(encoreTimer);
+      encoreTimer = 0;
+    }
     if (stuckTimer) {
       root.clearTimeout(stuckTimer);
       stuckTimer = 0;
@@ -675,8 +719,8 @@
       next = null;
     }
     if (!next) return false;
-    cancelRunning();
     const wasBusy = busy.size > 0;
+    cancelRunning();
     busy.clear();
     state = next;
     resetForNewState();
@@ -723,6 +767,7 @@
     if (n <= 1) pauses.delete(key);
     else pauses.set(key, n - 1);
     updateClock();
+    if (key === 'modal' && pauses.size === 0 && state && state.won) scheduleEncore();
   }
 
   // ------------------------------------------------------------------ settings + lifecycle

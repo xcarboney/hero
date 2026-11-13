@@ -2,11 +2,13 @@ package io.github.xcarboney.solitaire
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.graphics.Rect
 import android.os.Build
 import android.view.View
 import android.webkit.WebSettings
 import android.webkit.WebView
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
 
 /**
  * The one WebView of the app: locked down so that it can show the bundled game and nothing else,
@@ -14,6 +16,12 @@ import androidx.core.content.ContextCompat
  * platform long-press).
  */
 internal class GameWebView(context: Context) : WebView(context) {
+
+    /** What the page last asked to keep free of the system's Back gesture, in CSS px. */
+    private var gestureExclusion: List<CssRect> = emptyList()
+
+    /** The same in this view's physical px, as last handed to the system. */
+    private var appliedExclusion: List<PxRect> = emptyList()
 
     init {
         applySettings()
@@ -32,6 +40,35 @@ internal class GameWebView(context: Context) : WebView(context) {
         // Hardware keyboards work in the game too: let key events reach the page.
         isFocusable = true
         isFocusableInTouchMode = true
+
+        // The exclusion rectangles are in this view's physical px: convert them again whenever
+        // the view is laid out (rotation, split screen, a density change), without waiting for
+        // the page to send its next list.
+        addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> applyGestureExclusion() }
+    }
+
+    /**
+     * Areas where a swipe that starts at the screen edge belongs to the game (a card is being
+     * dragged) and must not be taken as the system's Back gesture. [rects] are CSS px relative
+     * to the page's viewport, which is this view. An empty list gives the edges back.
+     *
+     * Takes effect on Android 10+ (API 29, where gesture navigation appeared); below that there
+     * is no such gesture and the compat call does nothing. The system takes at most 200dp of
+     * height per screen edge into account (AOSP keeps the bottom-most 200dp of a taller
+     * request), except while the navigation bar is hidden in the "swipe to show" full-screen
+     * mode, where the limit does not apply (documented at View.setSystemGestureExclusionRects).
+     * The page sizes its rectangles accordingly.
+     */
+    fun setGestureExclusion(rects: List<CssRect>) {
+        gestureExclusion = rects
+        applyGestureExclusion()
+    }
+
+    private fun applyGestureExclusion() {
+        val px = GestureRects.toDevicePx(gestureExclusion, resources.displayMetrics.density, width, height)
+        if (px == appliedExclusion) return // layout passes are frequent, changes are not
+        appliedExclusion = px
+        ViewCompat.setSystemGestureExclusionRects(this, px.map { Rect(it.left, it.top, it.right, it.bottom) })
     }
 
     /**

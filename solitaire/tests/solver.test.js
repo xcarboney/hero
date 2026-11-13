@@ -1,0 +1,1172 @@
+/*
+ * Tests for SOL.Solver (js/core/solver.js).
+ *
+ * Run with:   node --test "/home/user/hero/solitaire/tests/*.test.js"
+ *
+ * What is covered:
+ *   - soundness: every solution solve() returns, on 2 x 150 fresh deals, on positions in the
+ *     middle of a game (after draws, along a winning line, after random play) and on hand-made
+ *     endgames, is replayed action by action through Engine.apply and must end in a won state;
+ *   - small hand-made positions against a brute-force search over engine states;
+ *   - solve() never mutates its input (also checked on deep-frozen states);
+ *   - both limits: maxNodes is never exceeded, a tiny maxNodes or maxMs returns at once, bad
+ *     limits mean the defaults; results are deterministic and do not depend on what ran before;
+ *   - bad input never throws;
+ *   - findWinnableSeed: certified seeds really are winnable, the seed sequence, the budget;
+ *   - findWinnableSeedAsync: resolves, yields between slices (slice lengths are measured), a
+ *     search paused across slices gives exactly the result of the uninterrupted one, never rejects;
+ *   - the file loads as a classic script (no require / module), as index.html loads it.
+ *
+ * The measurements quoted in the solver's header come from the last test. It is skipped unless
+ * asked for:   SOLVER_BENCH=1 node --test "/home/user/hero/solitaire/tests/solver.test.js"
+ * (SOLVER_BENCH=1000 sets the number of deals; the default is 400 per draw mode).
+ */
+'use strict';
+
+const { test, describe } = require('node:test');
+const assert = require('node:assert/strict');
+const path = require('node:path');
+const fs = require('node:fs');
+const vm = require('node:vm');
+
+const CORE = path.join(__dirname, '..', 'js', 'core');
+const RNG = require(path.join(CORE, 'rng.js'));
+const Engine = require(path.join(CORE, 'engine.js'));
+const Solver = require(path.join(CORE, 'solver.js'));
+
+// ------------------------------------------------------------------------------------- helpers
+/** Limits under which only the node count decides: results are exactly reproducible. */
+function nodesOnly(maxNodes) {
+  return { maxNodes: maxNodes, maxMs: 600000 };
+}
+
+function deal(seed, drawCount) {
+  return Engine.newGame({ seed: seed, drawCount: drawCount, id: 'test' });
+}
+
+/**
+ * Replays `moves` on a fresh clone of `state` through the engine and insists on a win: every
+ * action is a legal draw or move, and the game is won exactly at the last one.
+ */
+function assertWins(state, moves, label) {
+  assert.ok(Array.isArray(moves), label + ': moves is an array');
+  const copy = Engine.clone(state);
+  for (let i = 0; i < moves.length; i++) {
+    const m = moves[i];
+    assert.ok(m && (m.type === 'draw' || m.type === 'move'), label + ': action ' + i + ' is a draw or a move');
+    if (m.type === 'move') {
+      assert.ok(Number.isInteger(m.card) && m.card >= 0 && m.card <= 51, label + ': action ' + i + ' has a card id');
+      assert.ok(Engine.PILE_IDS.includes(m.to), label + ': action ' + i + ' has a pile id');
+    }
+    const record = Engine.apply(copy, m);
+    assert.ok(record, label + ': action ' + i + ' ' + JSON.stringify(m) + ' is legal');
+    assert.equal(record.won, i === moves.length - 1, label + ': the game is won by the last action only');
+  }
+  assert.equal(Engine.isWon(copy), true, label + ': the replay ends in a won state');
+  if (moves.length > 0) assert.equal(copy.won, true, label + ': state.won is set');
+  for (const f of Engine.FOUNDATIONS) assert.equal(copy.piles[f].length, 13, label + ': ' + f + ' is complete');
+  return copy;
+}
+
+const REASONS = ['solved', 'nodes', 'time', 'exhausted', 'invalid'];
+
+/** The shape every solve() result must have. */
+function assertResultShape(r, maxNodes) {
+  assert.equal(typeof r, 'object');
+  assert.equal(typeof r.solved, 'boolean');
+  assert.ok(Number.isInteger(r.nodes) && r.nodes >= 0, 'nodes is a count');
+  assert.ok(r.nodes <= maxNodes, 'nodes ' + r.nodes + ' <= maxNodes ' + maxNodes);
+  assert.ok(typeof r.ms === 'number' && r.ms >= 0 && isFinite(r.ms), 'ms is a duration');
+  assert.ok(REASONS.includes(r.reason), 'reason ' + r.reason);
+  assert.equal(r.solved, r.reason === 'solved');
+  if (r.solved) assert.ok(Array.isArray(r.moves));
+  else assert.equal('moves' in r, false, 'no moves without a solution');
+}
+
+function deepFreeze(o) {
+  if (o && typeof o === 'object' && !Object.isFrozen(o)) {
+    Object.freeze(o);
+    for (const k of Object.keys(o)) deepFreeze(o[k]);
+  }
+  return o;
+}
+
+/** Plays up to `steps` random legal actions (draws included) on `state`. */
+function randomPlay(state, rng, steps) {
+  for (let i = 0; i < steps && !state.won; i++) {
+    const ms = Engine.legalMoves(state);
+    if (Engine.canDraw(state)) ms.push({ type: 'draw' }, { type: 'draw' });
+    if (ms.length === 0) break;
+    assert.ok(Engine.apply(state, ms[rng.int(ms.length)]));
+  }
+  return state;
+}
+
+const hardSeeds = {};
+/** A deal that is neither solved nor exhausted within 200000 nodes: hundreds of ms of search. */
+function hardSeed(drawCount) {
+  if (!hardSeeds[drawCount]) {
+    hardSeeds[drawCount] = findSeed(drawCount, 20000, (r, st) => r.reason === 'nodes' && Solver.solve(st, nodesOnly(200000)).reason === 'nodes');
+  }
+  return hardSeeds[drawCount];
+}
+
+/** First seed >= from whose deal satisfies pred(result, state) under the given node limit. */
+function findSeed(drawCount, maxNodes, pred, from) {
+  for (let seed = from || 1; seed < (from || 1) + 3000; seed++) {
+    const st = deal(seed, drawCount);
+    if (pred(Solver.solve(st, nodesOnly(maxNodes)), st)) return seed;
+  }
+  throw new Error('no seed found');
+}
+
+/** A hand-made engine state: `spec` gives the piles; everything not listed goes nowhere. */
+function makeState(spec, drawCount) {
+  const piles = { stock: [], waste: [], f0: [], f1: [], f2: [], f3: [], t0: [], t1: [], t2: [], t3: [], t4: [], t5: [], t6: [] };
+  const faceUp = new Array(52).fill(false);
+  for (const id of Object.keys(spec.piles)) piles[id] = spec.piles[id].slice();
+  for (const c of spec.faceUp) faceUp[c] = true;
+  return {
+    v: 1,
+    id: 'hand-made',
+    seed: 0,
+    drawCount: drawCount || 1,
+    piles: piles,
+    faceUp: faceUp,
+    score: 0,
+    moves: 0,
+    undos: 0,
+    recycles: 0,
+    elapsedMs: 0,
+    won: false,
+    history: [],
+  };
+}
+
+/** card id from suit (0 spades, 1 hearts, 2 clubs, 3 diamonds) and rank 1..13 */
+function card(suit, rank) {
+  return suit * 13 + rank - 1;
+}
+
+/**
+ * Ground truth for small positions: exhaustive search over engine states, every legal move and
+ * the draw (positions that differ only in the order of the columns count as one). true / false,
+ * or null when the position is too big for it.
+ */
+function bruteForceWinnable(start, maxStates) {
+  const s = Engine.clone(start);
+  s.history = [];
+  if (Engine.isWon(s)) return true;
+  const key = function () {
+    const p = s.piles;
+    const cols = [];
+    for (const t of Engine.TABLEAU) {
+      const col = p[t];
+      let d = 0;
+      while (d < col.length && !s.faceUp[col[d]]) d++;
+      cols.push(d + ':' + col.join(','));
+    }
+    return p.stock.join(',') + '|' + p.waste.join(',') + '|' + cols.sort().join('|');
+  };
+  const movesHere = function () {
+    const ms = Engine.legalMoves(s);
+    if (Engine.canDraw(s)) ms.push({ type: 'draw' });
+    return ms;
+  };
+  const seen = new Set([key()]);
+  const stack = [{ ms: movesHere(), i: 0 }];
+  while (stack.length > 0) {
+    const top = stack[stack.length - 1];
+    if (top.i >= top.ms.length) {
+      stack.pop();
+      if (stack.length > 0) Engine.apply(s, { type: 'undo' });
+      continue;
+    }
+    const record = Engine.apply(s, top.ms[top.i++]);
+    if (record.won) return true;
+    const k = key();
+    if (seen.has(k)) {
+      Engine.apply(s, { type: 'undo' });
+      continue;
+    }
+    seen.add(k);
+    if (seen.size > maxStates) return null;
+    stack.push({ ms: movesHere(), i: 0 });
+  }
+  return false;
+}
+
+/**
+ * A small position: every card up to `baseRank` is on its foundation, the rest is shuffled into
+ * a stock and seven columns of random height with only the top card face-up.
+ */
+function miniDeal(seed, baseRank, drawCount) {
+  const rng = RNG.create(seed);
+  const piles = { stock: [], waste: [], f0: [], f1: [], f2: [], f3: [], t0: [], t1: [], t2: [], t3: [], t4: [], t5: [], t6: [] };
+  const faceUp = [];
+  const rest = [];
+  for (let c = 0; c < 52; c++) {
+    if ((c % 13) + 1 <= baseRank) piles['f' + Math.floor(c / 13)].push(c);
+    else rest.push(c);
+    faceUp.push((c % 13) + 1 <= baseRank);
+  }
+  RNG.shuffle(rest, rng);
+  const nStock = Math.min(rest.length - 1, rng.int(Math.floor(rest.length / 2) + 1));
+  for (let i = 0; i < nStock; i++) piles.stock.push(rest.pop());
+  while (rest.length > 0) piles['t' + rng.int(7)].push(rest.pop());
+  for (const t of Engine.TABLEAU) {
+    const col = piles[t];
+    if (col.length > 0) faceUp[col[col.length - 1]] = true;
+  }
+  const st = makeState({ piles: piles, faceUp: [] }, drawCount);
+  st.faceUp = faceUp;
+  return st;
+}
+
+// ------------------------------------------------------------------------------------- module
+describe('module', () => {
+  test('exposes the contract API on SOL.Solver', () => {
+    assert.equal(typeof Solver.solve, 'function');
+    assert.equal(typeof Solver.findWinnableSeed, 'function');
+    assert.equal(typeof Solver.findWinnableSeedAsync, 'function');
+    assert.equal(globalThis.SOL.Solver, Solver);
+    assert.ok(Object.isFrozen(Solver.DEFAULTS));
+    for (const k of ['maxNodes', 'maxMs', 'seedMaxNodes', 'budgetMs', 'asyncBudgetMs', 'sliceMs']) {
+      assert.ok(Solver.DEFAULTS[k] > 0, k);
+    }
+    assert.equal(Solver.DEFAULTS.budgetMs, 250);
+    assert.equal(Solver.DEFAULTS.asyncBudgetMs, 1500);
+    assert.equal(Solver.DEFAULTS.sliceMs, 12);
+  });
+
+  test('loads as a classic script (no require, no module), like index.html loads it', () => {
+    const ctx = vm.createContext({ console: console, performance: performance, setTimeout: setTimeout });
+    vm.runInContext('var window = this;', ctx);
+    for (const f of ['rng.js', 'engine.js', 'solver.js']) {
+      vm.runInContext(fs.readFileSync(path.join(CORE, f), 'utf8'), ctx, { filename: f });
+    }
+    const S = ctx.SOL;
+    assert.equal(typeof S.Solver.solve, 'function');
+    // the same deal, the same answer as the require()d copy
+    const here = Solver.solve(deal(12, 3), nodesOnly(5000));
+    const there = S.Solver.solve(S.Engine.newGame({ seed: 12, drawCount: 3, id: 'x' }), { maxNodes: 5000, maxMs: 600000 });
+    assert.equal(there.solved, here.solved);
+    assert.equal(there.nodes, here.nodes);
+    assert.equal(JSON.stringify(there.moves), JSON.stringify(here.moves));
+    const found = S.Solver.findWinnableSeed({ drawCount: 1, startSeed: 1, budgetMs: 20000 });
+    assert.equal(found.certified, true);
+  });
+
+  test('solver.js is pure logic: no DOM, and setTimeout is its only timer', () => {
+    const src = fs.readFileSync(path.join(CORE, 'solver.js'), 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    for (const word of ['document', 'requestAnimationFrame', 'setInterval', 'localStorage', 'fetch(', 'Worker', 'import ', 'export ']) {
+      assert.equal(src.includes(word), false, 'solver.js must not use ' + word);
+    }
+  });
+});
+
+// ------------------------------------------------------------------------------------- soundness
+describe('solve: every solution replays to a win through the engine', () => {
+  for (const drawCount of [1, 3]) {
+    test('150 fresh deals, draw ' + drawCount, () => {
+      let solved = 0;
+      let actions = 0;
+      for (let seed = 1; seed <= 150; seed++) {
+        const st = deal(seed, drawCount);
+        const r = Solver.solve(st, nodesOnly(6000));
+        assertResultShape(r, 6000);
+        if (r.solved) {
+          solved++;
+          actions += r.moves.length;
+          assert.ok(r.moves.length >= 52, 'a win takes at least 52 actions');
+          assertWins(st, r.moves, 'seed ' + seed + ' draw ' + drawCount);
+        }
+      }
+      // Regression guard on strength. Deterministic (fixed seeds, node limit only): today it is
+      // 127 of these 150 draw-1 deals and 101 of the draw-3 deals (on random deals about 86% and
+      // 75% at this limit; some 90% / 82% are winnable at all).
+      assert.ok(solved >= (drawCount === 1 ? 120 : 95), 'certified ' + solved + ' of 150 draw-' + drawCount + ' deals');
+      assert.ok(actions / solved < 260, 'solutions stay reasonably short');
+    });
+  }
+
+  test('default limits, both draw modes', () => {
+    for (let seed = 200; seed < 230; seed++) {
+      for (const drawCount of [1, 3]) {
+        const st = deal(seed, drawCount);
+        const r = Solver.solve(st);
+        assertResultShape(r, Solver.DEFAULTS.maxNodes);
+        if (r.solved) assertWins(st, r.moves, 'seed ' + seed);
+        const again = Solver.solve(st, {});
+        assertResultShape(again, Solver.DEFAULTS.maxNodes);
+      }
+    }
+  });
+
+  test('a deal that takes a long search still replays', () => {
+    for (const drawCount of [1, 3]) {
+      const seed = findSeed(drawCount, 60000, (r) => r.solved && r.nodes > 15000);
+      const st = deal(seed, drawCount);
+      const r = Solver.solve(st, nodesOnly(60000));
+      assert.equal(r.solved, true);
+      assertWins(st, r.moves, 'long search, seed ' + seed);
+    }
+  });
+
+  test('positions after draws: the waste is not empty and (draw 3) not on a multiple of three', () => {
+    let solved = 0;
+    let total = 0;
+    for (const drawCount of [1, 3]) {
+      for (let seed = 1; seed <= 12; seed++) {
+        for (const draws of [1, 2, 5, 9, 13, 26]) {
+          const st = deal(seed, drawCount);
+          for (let i = 0; i < draws; i++) assert.ok(Engine.apply(st, { type: 'draw' }));
+          total++;
+          const r = Solver.solve(st, nodesOnly(6000));
+          assertResultShape(r, 6000);
+          if (r.solved) {
+            solved++;
+            assertWins(st, r.moves, 'seed ' + seed + ' after ' + draws + ' draws');
+          }
+        }
+      }
+    }
+    assert.ok(solved / total > 0.6, solved + ' of ' + total + ' solved');
+  });
+
+  test('positions along a winning line stay solvable, with history on the state', () => {
+    let solved = 0;
+    let total = 0;
+    for (const drawCount of [1, 3]) {
+      let found = 0;
+      for (let seed = 300; found < 12; seed++) {
+        const st = deal(seed, drawCount);
+        const line = Solver.solve(st, nodesOnly(6000));
+        if (!line.solved) continue;
+        found++;
+        for (const fraction of [0.2, 0.5, 0.8, 0.97]) {
+          const mid = Engine.clone(st);
+          const k = Math.floor(line.moves.length * fraction);
+          for (let i = 0; i < k; i++) assert.ok(Engine.apply(mid, line.moves[i]));
+          assert.equal(mid.history.length, k);
+          total++;
+          const r = Solver.solve(mid, nodesOnly(20000));
+          if (r.solved) {
+            solved++;
+            assertWins(mid, r.moves, 'seed ' + seed + ' at ' + fraction);
+          }
+        }
+      }
+    }
+    // these positions are all winnable; the solver is not complete, but it should miss very few
+    assert.ok(solved / total >= 0.9, solved + ' of ' + total + ' solved');
+  });
+
+  test('positions after random play (cards on foundations, runs, empty columns)', () => {
+    let solved = 0;
+    let total = 0;
+    for (const drawCount of [1, 3]) {
+      for (let seed = 1; seed <= 60; seed++) {
+        const rng = RNG.create(seed * 977 + drawCount);
+        const st = randomPlay(deal(seed, drawCount), rng, 10 + rng.int(120));
+        if (st.won) continue;
+        total++;
+        const before = Engine.serialize(st);
+        const r = Solver.solve(st, nodesOnly(4000));
+        assertResultShape(r, 4000);
+        assert.notEqual(r.reason, 'invalid', 'a state the engine produced is always readable');
+        assert.equal(Engine.serialize(st), before);
+        if (r.solved) {
+          solved++;
+          assertWins(st, r.moves, 'random play, seed ' + seed);
+        }
+      }
+    }
+    assert.ok(solved > 10, solved + ' of ' + total + ' solved');
+  });
+
+  test('an already won state: solved with no moves', () => {
+    const st = deal(findSeed(1, 6000, (r) => r.solved), 1);
+    const line = Solver.solve(st, nodesOnly(6000));
+    const won = assertWins(st, line.moves, 'line');
+    const r = Solver.solve(won);
+    assert.equal(r.solved, true);
+    assert.deepEqual(r.moves, []);
+    assert.equal(r.nodes, 0);
+    assert.equal(r.reason, 'solved');
+
+    // one action before the end
+    const almost = Engine.clone(st);
+    for (let i = 0; i < line.moves.length - 1; i++) Engine.apply(almost, line.moves[i]);
+    const last = Solver.solve(almost);
+    assert.equal(last.solved, true);
+    assert.equal(last.moves.length, 1);
+    assertWins(almost, last.moves, 'last move');
+  });
+
+  test('hand-made endgames', () => {
+    // Everything home but the four Kings, each alone in a column.
+    const fu = [];
+    const piles = { t1: [card(0, 13)], t2: [card(1, 13)], t4: [card(2, 13)], t6: [card(3, 13)] };
+    for (let s = 0; s < 4; s++) {
+      piles['f' + s] = [];
+      for (let r = 1; r <= 12; r++) {
+        piles['f' + s].push(card(s, r));
+        fu.push(card(s, r));
+      }
+      fu.push(card(s, 13));
+    }
+    const kings = makeState({ piles: piles, faceUp: fu });
+    const r = Solver.solve(kings);
+    assert.equal(r.solved, true);
+    assert.equal(r.moves.length, 4);
+    assertWins(kings, r.moves, 'four kings');
+
+    // The last three spades are the stock, in the wrong order (Q on top, then K, then J): it
+    // takes draws, a recycle and — in draw 3 — parking the King on an empty column.
+    for (const drawCount of [1, 3]) {
+      const p2 = { stock: [card(0, 11), card(0, 13), card(0, 12)] };
+      const fu2 = [];
+      for (let s = 0; s < 4; s++) {
+        p2['f' + s] = [];
+        for (let r2 = 1; r2 <= (s === 0 ? 10 : 13); r2++) {
+          p2['f' + s].push(card(s, r2));
+          fu2.push(card(s, r2));
+        }
+      }
+      const buried = makeState({ piles: p2, faceUp: fu2 }, drawCount);
+      const truth = bruteForceWinnable(buried, 100000);
+      const r2 = Solver.solve(buried);
+      assert.equal(r2.solved, truth, 'draw ' + drawCount + ': solver and brute force agree');
+      if (r2.solved) assertWins(buried, r2.moves, 'buried spades, draw ' + drawCount);
+      else assert.equal(r2.reason, 'exhausted');
+    }
+  });
+
+  test('small positions: agrees with a brute-force search over engine states', () => {
+    // The solver prunes moves, so it is not complete by construction; on positions small enough
+    // to search exhaustively it has to give the true answer all the same, wins and losses.
+    let winnable = 0;
+    let lost = 0;
+    for (const drawCount of [1, 3]) {
+      for (const baseRank of [8, 3]) {
+        for (let seed = 1; seed <= 20; seed++) {
+          const st = miniDeal(seed * 31 + baseRank, baseRank, drawCount);
+          const truth = bruteForceWinnable(st, 5000);
+          if (truth === null) continue; // too big to search exhaustively
+          const label = 'mini deal ' + seed + ' base ' + baseRank + ' draw ' + drawCount;
+          const r = Solver.solve(st, nodesOnly(500000));
+          assertResultShape(r, 500000);
+          if (truth) winnable++;
+          else lost++;
+          assert.equal(r.solved, truth, label + ': brute force says ' + truth + ', the solver says ' + r.reason);
+          if (r.solved) assertWins(st, r.moves, label);
+          else assert.equal(r.reason, 'exhausted', label);
+        }
+      }
+    }
+    // today: 53 winnable and 12 lost positions are compared (the others are too big for brute force)
+    assert.ok(winnable >= 40, 'enough winnable positions were compared (' + winnable + ')');
+    assert.ok(lost >= 8, 'enough lost positions were compared (' + lost + ')');
+  });
+
+  test('a dead position is reported as exhausted, not as solved', () => {
+    // Seven black tops, no ace among them, nothing in the stock: no legal action at all.
+    const tops = [card(0, 13), card(0, 12), card(0, 11), card(0, 10), card(0, 9), card(0, 8), card(0, 7)];
+    const piles = {};
+    const others = [];
+    for (let c = 0; c < 52; c++) if (!tops.includes(c)) others.push(c);
+    for (let t = 0; t < 7; t++) piles['t' + t] = others.splice(0, t === 6 ? others.length : 6).concat([tops[t]]);
+    const dead = makeState({ piles: piles, faceUp: tops }, 3);
+    assert.deepEqual(Engine.legalMoves(dead), []);
+    assert.equal(Engine.canDraw(dead), false);
+    const r = Solver.solve(dead);
+    assertResultShape(r, 0);
+    assert.equal(r.solved, false);
+    assert.equal(r.reason, 'exhausted');
+
+    // and a real deal the solver searches to the end
+    const seed = findSeed(3, 20000, (res) => res.reason === 'exhausted');
+    const res = Solver.solve(deal(seed, 3), nodesOnly(20000));
+    assertResultShape(res, 20000);
+    assert.equal(res.solved, false);
+    assert.ok(res.nodes > 0);
+  });
+});
+
+// ------------------------------------------------------------------------------------- purity
+describe('solve: never mutates its input', () => {
+  test('fresh deals, mid-game states with history, solved or not', () => {
+    for (const drawCount of [1, 3]) {
+      for (let seed = 1; seed <= 25; seed++) {
+        const st = deal(seed, drawCount);
+        if (seed % 2 === 0) randomPlay(st, RNG.create(seed), 40);
+        const text = Engine.serialize(st);
+        const snapshot = structuredClone(st);
+        const r = Solver.solve(st, nodesOnly(3000));
+        assert.equal(Engine.serialize(st), text, 'seed ' + seed);
+        assert.deepStrictEqual(st, snapshot);
+        // the moves handed out are not tied to the state either
+        if (r.solved) {
+          r.moves.length = 0;
+          assert.equal(Engine.serialize(st), text);
+        }
+      }
+    }
+  });
+
+  test('works on a deep-frozen state (any write would throw)', () => {
+    let solved = 0;
+    for (const drawCount of [1, 3]) {
+      for (let seed = 1; seed <= 20; seed++) {
+        const st = deal(seed, drawCount);
+        if (seed > 10) for (let i = 0; i < 4; i++) Engine.apply(st, { type: 'draw' });
+        const expected = Solver.solve(st, nodesOnly(3000));
+        const frozen = deepFreeze(Engine.clone(st));
+        const r = Solver.solve(frozen, nodesOnly(3000));
+        assert.equal(r.reason, expected.reason, 'seed ' + seed);
+        assert.equal(r.nodes, expected.nodes);
+        assert.deepEqual(r.moves, expected.moves);
+        if (r.solved) solved++;
+      }
+    }
+    assert.ok(solved >= 20, 'frozen states were really solved (' + solved + ')');
+  });
+});
+
+// ------------------------------------------------------------------------------------- limits
+describe('solve: limits', () => {
+  test('a tiny maxNodes returns at once with solved: false', () => {
+    for (const drawCount of [1, 3]) {
+      for (const maxNodes of [0, 1, 2, 10, 51]) {
+        for (let seed = 1; seed <= 20; seed++) {
+          const t0 = performance.now();
+          const r = Solver.solve(deal(seed, drawCount), { maxNodes: maxNodes });
+          const took = performance.now() - t0;
+          assertResultShape(r, maxNodes);
+          assert.equal(r.solved, false, 'a win takes at least 52 nodes');
+          assert.equal(r.reason, 'nodes');
+          assert.equal(r.nodes, maxNodes);
+          assert.ok(took < 50, 'returned quickly (' + took.toFixed(2) + ' ms)');
+        }
+      }
+    }
+  });
+
+  test('maxNodes is never exceeded, and a larger limit only continues the same search', () => {
+    for (const drawCount of [1, 3]) {
+      for (let seed = 1; seed <= 30; seed++) {
+        const st = deal(seed, drawCount);
+        let previous = null;
+        for (const maxNodes of [60, 150, 400, 1000, 3000]) {
+          const r = Solver.solve(st, nodesOnly(maxNodes));
+          assertResultShape(r, maxNodes);
+          if (previous && previous.solved) {
+            // already solved within fewer nodes: exactly the same answer
+            assert.equal(r.solved, true);
+            assert.equal(r.nodes, previous.nodes);
+            assert.deepEqual(r.moves, previous.moves);
+          } else if (previous && previous.reason === 'nodes') {
+            assert.ok(r.nodes >= previous.nodes);
+          }
+          if (!r.solved && r.reason === 'nodes') assert.equal(r.nodes, maxNodes);
+          previous = r;
+        }
+      }
+    }
+  });
+
+  test('maxMs: 0 returns without searching', () => {
+    for (const drawCount of [1, 3]) {
+      const r = Solver.solve(deal(5, drawCount), { maxMs: 0, maxNodes: 1e9 });
+      assertResultShape(r, 1e9);
+      assert.equal(r.solved, false);
+      assert.equal(r.reason, 'time');
+      assert.equal(r.nodes, 0);
+    }
+  });
+
+  test('a small maxMs stops a search that would take much longer', () => {
+    for (const drawCount of [1, 3]) {
+      const st = deal(hardSeed(drawCount), drawCount);
+      for (const maxMs of [2, 10, 30]) {
+        const t0 = performance.now();
+        const r = Solver.solve(st, { maxNodes: 1e9, maxMs: maxMs });
+        const took = performance.now() - t0;
+        assert.equal(r.solved, false);
+        assert.equal(r.reason, 'time');
+        assert.ok(r.ms >= maxMs - 0.001, 'it used its time (' + r.ms.toFixed(2) + ' of ' + maxMs + ' ms)');
+        // (generous: the machine running the tests may be busy; the solver itself checks the
+        //  clock every 16 search steps)
+        assert.ok(took < maxMs + 150, 'stopped near the limit: ' + took.toFixed(1) + ' ms for maxMs ' + maxMs);
+        assert.ok(r.nodes < 200000);
+      }
+    }
+  });
+
+  test('the default limits bound a call without options', () => {
+    const seed = findSeed(3, 20000, (r) => r.reason === 'nodes');
+    const t0 = performance.now();
+    const r = Solver.solve(deal(seed, 3));
+    const took = performance.now() - t0;
+    assertResultShape(r, Solver.DEFAULTS.maxNodes);
+    assert.equal(r.solved, false);
+    assert.ok(r.reason === 'nodes' || r.reason === 'time');
+    assert.ok(took < Solver.DEFAULTS.maxMs + 150, took.toFixed(1) + ' ms');
+  });
+
+  test('limits that are not finite numbers mean the defaults; negative ones mean zero', () => {
+    const seed = findSeed(1, 20000, (r) => r.reason === 'nodes');
+    const st = deal(seed, 1);
+    for (const bad of [undefined, null, NaN, Infinity, -Infinity, '100', {}, true]) {
+      const r = Solver.solve(st, { maxNodes: bad, maxMs: bad });
+      assertResultShape(r, Solver.DEFAULTS.maxNodes);
+      assert.equal(r.solved, false);
+      assert.ok(r.nodes > 100, 'it searched');
+      assert.ok(r.ms < Solver.DEFAULTS.maxMs + 150);
+      // one bad limit does not switch the other one off
+      assert.equal(Solver.solve(st, { maxNodes: 300, maxMs: bad }).nodes, 300);
+      assert.equal(Solver.solve(st, { maxNodes: bad, maxMs: 0 }).reason, 'time');
+    }
+    // "no time left" (a deadline that has passed) must not start a search
+    assert.deepEqual(
+      [Solver.solve(st, { maxMs: -3 }).reason, Solver.solve(st, { maxMs: -3 }).nodes, Solver.solve(st, { maxNodes: -1 }).reason, Solver.solve(st, { maxNodes: -1 }).nodes],
+      ['time', 0, 'nodes', 0]
+    );
+    for (const opts of [undefined, null, 5, 'x']) {
+      assertResultShape(Solver.solve(st, opts), Solver.DEFAULTS.maxNodes);
+    }
+  });
+
+  test('the same state and limits always give the same nodes and moves', () => {
+    for (const drawCount of [1, 3]) {
+      const first = [];
+      for (let seed = 1; seed <= 40; seed++) first.push(Solver.solve(deal(seed, drawCount), nodesOnly(2500)));
+      // again in reverse order, on states that went through serialize / deserialize, with
+      // unrelated searches in between
+      for (let seed = 40; seed >= 1; seed--) {
+        Solver.solve(deal(seed + 1000, 4 - drawCount), nodesOnly(700));
+        const st = Engine.deserialize(Engine.serialize(deal(seed, drawCount)));
+        const r = Solver.solve(st, nodesOnly(2500));
+        const f = first[seed - 1];
+        assert.equal(r.solved, f.solved, 'seed ' + seed);
+        assert.equal(r.nodes, f.nodes, 'seed ' + seed);
+        assert.equal(r.reason, f.reason);
+        assert.deepEqual(r.moves, f.moves);
+      }
+    }
+  });
+});
+
+// ------------------------------------------------------------------------------------- bad input
+describe('solve: bad input never throws', () => {
+  test('things that are not states', () => {
+    for (const bad of [undefined, null, 0, 42, 'state', [], {}, { piles: {} }, { piles: null, faceUp: [] }, () => {}]) {
+      const r = Solver.solve(bad);
+      assertResultShape(r, 0);
+      assert.equal(r.solved, false);
+      assert.equal(r.reason, 'invalid');
+    }
+  });
+
+  test('broken states', () => {
+    const variants = {
+      'duplicate card': (s) => {
+        s.piles.t0[0] = s.piles.t1[0];
+      },
+      'missing card': (s) => {
+        s.piles.stock.pop();
+      },
+      'card id out of range': (s) => {
+        s.piles.stock[0] = 52;
+      },
+      'negative card id': (s) => {
+        s.piles.stock[0] = -1;
+      },
+      'fractional card id': (s) => {
+        s.piles.stock[3] = 2.5;
+      },
+      'card id as text': (s) => {
+        s.piles.stock[3] = String(s.piles.stock[3]);
+      },
+      'missing pile': (s) => {
+        delete s.piles.t3;
+      },
+      'pile is not an array': (s) => {
+        s.piles.waste = 'none';
+      },
+      'faceUp too short': (s) => {
+        s.faceUp.length = 51;
+      },
+      'faceUp missing': (s) => {
+        delete s.faceUp;
+      },
+      'a column that ends face-down': (s) => {
+        s.faceUp[s.piles.t6[6]] = false;
+      },
+      'face-down above face-up': (s) => {
+        s.faceUp[s.piles.t6[2]] = true;
+      },
+      'a foundation out of order': (s) => {
+        s.piles.f0.push(s.piles.stock.pop() === 0 ? 1 : 5);
+      },
+    };
+    for (const name of Object.keys(variants)) {
+      const s = deal(3, 1);
+      variants[name](s);
+      const text = JSON.stringify(s);
+      let r;
+      assert.doesNotThrow(() => {
+        r = Solver.solve(s);
+      }, name);
+      assert.equal(r.solved, false, name);
+      assert.equal(r.reason, 'invalid', name);
+      assert.equal(r.nodes, 0, name);
+      assert.equal(JSON.stringify(s), text, name + ': input untouched');
+    }
+  });
+
+  test('a state the engine refuses to play is never called solved', () => {
+    // The piles say "one move from the end", but the state claims to be won already: the engine
+    // accepts no action on it, so no line can be replayed to a win.
+    const st = deal(findSeed(1, 6000, (r) => r.solved), 1);
+    const line = Solver.solve(st, nodesOnly(6000));
+    const almost = Engine.clone(st);
+    for (let i = 0; i < line.moves.length - 1; i++) Engine.apply(almost, line.moves[i]);
+    almost.won = true;
+    const r = Solver.solve(almost);
+    assert.equal(r.solved, false);
+    assert.equal('moves' in r, false);
+  });
+});
+
+// ------------------------------------------------------------------------------------- seeds
+describe('findWinnableSeed', () => {
+  function assertSeedResult(r, drawCount) {
+    assert.ok(Number.isInteger(r.seed) && r.seed >= 0 && r.seed <= 0xffffffff, 'seed is a uint32');
+    assert.equal(typeof r.certified, 'boolean');
+    assert.ok(Number.isInteger(r.tried) && r.tried >= 0);
+    if (r.certified) {
+      assert.ok(r.tried >= 1);
+      const st = Engine.newGame({ seed: r.seed, drawCount: drawCount });
+      // the line that came with the seed wins the deal ...
+      assertWins(st, r.moves, 'certified seed ' + r.seed);
+      // ... and solve() certifies the same deal again on its own
+      const again = Solver.solve(st, nodesOnly(Solver.DEFAULTS.seedMaxNodes));
+      assert.equal(again.solved, true);
+      assert.deepEqual(again.moves, r.moves);
+    } else {
+      assert.equal('moves' in r, false);
+    }
+  }
+
+  test('returns certified seeds whose solutions replay (random seeds, both draw modes)', () => {
+    for (const drawCount of [1, 3]) {
+      for (let i = 0; i < 25; i++) {
+        const r = Solver.findWinnableSeed({ drawCount: drawCount, budgetMs: 20000 });
+        assert.equal(r.certified, true);
+        assertSeedResult(r, drawCount);
+      }
+    }
+  });
+
+  test('default options: certified well within the default budget', () => {
+    let certified = 0;
+    for (let i = 0; i < 20; i++) {
+      const t0 = performance.now();
+      const r = Solver.findWinnableSeed();
+      const took = performance.now() - t0;
+      assertSeedResult(r, 1);
+      assert.ok(took < Solver.DEFAULTS.budgetMs + 150, took.toFixed(1) + ' ms');
+      if (r.certified) certified++;
+    }
+    assert.ok(certified >= 18, certified + ' of 20 certified');
+    const r3 = Solver.findWinnableSeed({ drawCount: 3 });
+    assertSeedResult(r3, 3);
+  });
+
+  test('startSeed: tried first, then a fixed walk; the same call gives the same answer', () => {
+    for (const drawCount of [1, 3]) {
+      // a start seed that is certified itself
+      const good = findSeed(drawCount, Solver.DEFAULTS.seedMaxNodes, (r) => r.solved);
+      const a = Solver.findWinnableSeed({ drawCount: drawCount, startSeed: good, budgetMs: 20000 });
+      assert.deepEqual({ seed: a.seed, certified: a.certified, tried: a.tried }, { seed: good, certified: true, tried: 1 });
+      assertSeedResult(a, drawCount);
+
+      // a start seed that is not: the walk is startSeed + k * 0x9E3779B9
+      const hard = findSeed(drawCount, Solver.DEFAULTS.seedMaxNodes, (r) => !r.solved);
+      const b = Solver.findWinnableSeed({ drawCount: drawCount, startSeed: hard, budgetMs: 20000 });
+      assert.equal(b.certified, true);
+      assert.ok(b.tried >= 2);
+      assert.equal(b.seed, (hard + (b.tried - 1) * 0x9e3779b9) >>> 0);
+      assertSeedResult(b, drawCount);
+      const c = Solver.findWinnableSeed({ drawCount: drawCount, startSeed: hard, budgetMs: 20000 });
+      assert.deepEqual(c, b);
+    }
+    // any seed value the engine accepts is accepted here, and read the same way
+    const text = Solver.findWinnableSeed({ startSeed: 'daily-2026-11-13', budgetMs: 0 });
+    assert.equal(text.seed, RNG.normalizeSeed('daily-2026-11-13'));
+    assert.equal(text.seed, Engine.newGame({ seed: 'daily-2026-11-13' }).seed);
+  });
+
+  test('rng: seeds come from rng.next()', () => {
+    for (const drawCount of [1, 3]) {
+      const calls = [];
+      const inner = RNG.create(4242 + drawCount);
+      const rng = {
+        next: function () {
+          const v = inner.next();
+          calls.push(Math.floor(v * 4294967296) >>> 0);
+          return v;
+        },
+      };
+      const r = Solver.findWinnableSeed({ drawCount: drawCount, rng: rng, budgetMs: 20000 });
+      assert.equal(r.certified, true);
+      assert.equal(calls.length, r.tried);
+      assert.equal(r.seed, calls[calls.length - 1]);
+      assertSeedResult(r, drawCount);
+      // startSeed + rng: the start seed first, the rng after it
+      const hard = findSeed(drawCount, Solver.DEFAULTS.seedMaxNodes, (res) => !res.solved);
+      const r2 = Solver.findWinnableSeed({ drawCount: drawCount, startSeed: hard, rng: RNG.create(99), budgetMs: 20000 });
+      assert.equal(r2.certified, true);
+      assert.ok(r2.tried >= 2);
+      const sequence = RNG.create(99);
+      let expected = hard;
+      for (let i = 1; i < r2.tried; i++) expected = Math.floor(sequence.next() * 4294967296) >>> 0;
+      assert.equal(r2.seed, expected);
+      assertSeedResult(r2, drawCount);
+    }
+  });
+
+  test('budgetMs: 0 tries nothing and still returns a seed', () => {
+    const r = Solver.findWinnableSeed({ budgetMs: 0 });
+    assertSeedResult(r, 1);
+    assert.equal(r.certified, false);
+    assert.equal(r.tried, 0);
+    const s = Solver.findWinnableSeed({ budgetMs: 0, startSeed: 123456, drawCount: 3 });
+    assert.deepEqual(s, { seed: 123456, certified: false, tried: 0 });
+    assert.deepEqual(Solver.findWinnableSeed({ budgetMs: -5, startSeed: 7 }), { seed: 7, certified: false, tried: 0 });
+    // a budget that is not a finite number means the default one
+    for (const bad of [NaN, Infinity, '50', null]) {
+      const t0 = performance.now();
+      const r2 = Solver.findWinnableSeed({ budgetMs: bad, startSeed: 7, maxNodes: 10 });
+      const took = performance.now() - t0;
+      assert.equal(r2.certified, false);
+      assert.ok(took >= Solver.DEFAULTS.budgetMs - 1 && took < Solver.DEFAULTS.budgetMs + 150, took.toFixed(1) + ' ms');
+    }
+  });
+
+  test('never throws', () => {
+    const boom = {
+      next: function () {
+        throw new Error('boom');
+      },
+    };
+    for (const opts of [undefined, null, 7, 'x', { rng: boom }, { drawCount: {}, startSeed: [], maxNodes: 'many', rng: 5 }]) {
+      const r = Solver.findWinnableSeed(opts);
+      assert.equal(typeof r.certified, 'boolean');
+      assert.ok(Number.isInteger(r.seed) && r.seed >= 0 && r.seed <= 0xffffffff);
+    }
+    assert.equal(Solver.findWinnableSeed({ rng: boom }).certified, false);
+  });
+
+  test('when the budget runs out: certified false, on time, and the seed is one it has not examined', () => {
+    for (const drawCount of [1, 3]) {
+      // no deal can be certified with 10 nodes
+      const t0 = performance.now();
+      const r = Solver.findWinnableSeed({ drawCount: drawCount, budgetMs: 40, maxNodes: 10, startSeed: 1000 });
+      const took = performance.now() - t0;
+      assertSeedResult(r, drawCount);
+      assert.equal(r.certified, false);
+      assert.ok(r.tried > 10, 'it kept trying (' + r.tried + ' deals)');
+      assert.ok(took >= 39 && took < 40 + 150, took.toFixed(1) + ' ms for a 40 ms budget');
+      assert.equal(r.seed, (1000 + r.tried * 0x9e3779b9) >>> 0, 'the seed after the last one examined');
+
+      // one deal that takes longer than the whole budget
+      const hard = hardSeed(drawCount);
+      const t1 = performance.now();
+      const h = Solver.findWinnableSeed({ drawCount: drawCount, budgetMs: 25, maxNodes: 1e9, startSeed: hard });
+      const took1 = performance.now() - t1;
+      assert.equal(h.certified, false);
+      assert.equal(h.tried, 1);
+      assert.notEqual(h.seed, hard, 'a deal the solver gave up on is not handed back');
+      assert.ok(took1 < 25 + 150, took1.toFixed(1) + ' ms for a 25 ms budget');
+    }
+  });
+
+  test('drawCount: anything but 3 is draw 1, as in the engine', () => {
+    for (const dc of [undefined, 1, 2, '3', null]) {
+      const r = Solver.findWinnableSeed({ drawCount: dc, startSeed: 77, budgetMs: 20000 });
+      assert.equal(r.certified, true);
+      assertWins(Engine.newGame({ seed: r.seed, drawCount: 1 }), r.moves, 'draw 1');
+    }
+  });
+});
+
+// ------------------------------------------------------------------------------------- async
+describe('findWinnableSeedAsync', () => {
+  /**
+   * Runs fn() with setTimeout wrapped: counts the zero-delay timers (the solver's yields) and
+   * measures every slice (from a timer firing to the next yield, or to `stop()`).
+   */
+  async function watchTimers(fn) {
+    const real = globalThis.setTimeout;
+    const watch = { yields: 0, slices: [], sliceStart: -1 };
+    globalThis.setTimeout = function (cb, ms, ...rest) {
+      if (ms !== 0) return real(cb, ms, ...rest);
+      if (watch.sliceStart >= 0) watch.slices.push(performance.now() - watch.sliceStart);
+      watch.sliceStart = -1;
+      watch.yields++;
+      return real(function () {
+        watch.sliceStart = performance.now();
+        cb();
+      }, 0);
+    };
+    try {
+      watch.result = await fn();
+      if (watch.sliceStart >= 0) watch.slices.push(performance.now() - watch.sliceStart);
+    } finally {
+      globalThis.setTimeout = real;
+    }
+    return watch;
+  }
+
+  test('returns a promise that resolves with a certified seed whose solution replays', async () => {
+    for (const drawCount of [1, 3]) {
+      for (let i = 0; i < 8; i++) {
+        const p = Solver.findWinnableSeedAsync({ drawCount: drawCount, budgetMs: 20000 });
+        assert.ok(p instanceof Promise);
+        const r = await p;
+        assert.equal(r.certified, true);
+        assert.ok(Number.isInteger(r.seed) && r.seed >= 0 && r.seed <= 0xffffffff);
+        assert.ok(r.tried >= 1);
+        assertWins(Engine.newGame({ seed: r.seed, drawCount: drawCount }), r.moves, 'async seed ' + r.seed);
+      }
+    }
+    const r = await Solver.findWinnableSeedAsync();
+    assert.equal(typeof r.certified, 'boolean');
+    assert.ok(Number.isInteger(r.seed));
+  });
+
+  test('gives the same answer as the synchronous search', async () => {
+    for (const drawCount of [1, 3]) {
+      for (const startSeed of [1, 500, 90210]) {
+        const sync = Solver.findWinnableSeed({ drawCount: drawCount, startSeed: startSeed, budgetMs: 20000 });
+        const async_ = await Solver.findWinnableSeedAsync({ drawCount: drawCount, startSeed: startSeed, budgetMs: 20000, sliceMs: 1 });
+        assert.deepEqual(async_, sync);
+      }
+    }
+  });
+
+  test('does no work inside the call itself: the first slice runs from a timer', async () => {
+    const realNewGame = Engine.newGame;
+    let deals = 0;
+    Engine.newGame = function (o) {
+      deals++;
+      return realNewGame.call(Engine, o);
+    };
+    try {
+      const t0 = performance.now();
+      const p = Solver.findWinnableSeedAsync({ drawCount: 3, budgetMs: 20000 });
+      const took = performance.now() - t0;
+      assert.equal(deals, 0, 'nothing dealt yet');
+      assert.ok(took < 20, 'the call returned at once (' + took.toFixed(2) + ' ms)');
+      let settled = false;
+      p.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      assert.equal(settled, false);
+      const r = await p;
+      assert.equal(deals, r.tried);
+    } finally {
+      Engine.newGame = realNewGame;
+    }
+  });
+
+  test('a search paused across many slices gives exactly the uninterrupted result', async () => {
+    for (const drawCount of [1, 3]) {
+      // a deal that needs several thousand nodes: many 1 ms slices
+      const seed = findSeed(drawCount, Solver.DEFAULTS.seedMaxNodes, (r) => r.solved && r.nodes > 7000);
+      const expected = Solver.solve(deal(seed, drawCount), nodesOnly(Solver.DEFAULTS.seedMaxNodes));
+      const watch = await watchTimers(() => Solver.findWinnableSeedAsync({ drawCount: drawCount, startSeed: seed, sliceMs: 1, budgetMs: 20000 }));
+      const r = watch.result;
+      assert.deepEqual({ seed: r.seed, certified: r.certified, tried: r.tried }, { seed: seed, certified: true, tried: 1 });
+      assert.deepEqual(r.moves, expected.moves);
+      assert.ok(watch.yields >= 3, 'it yielded while searching one deal (' + watch.yields + ' timers)');
+      assertWins(deal(seed, drawCount), r.moves, 'sliced search');
+    }
+  });
+
+  test('yields between slices: slices stay near sliceMs and the event loop keeps turning', async () => {
+    // One deal that would take much longer than the budget of 300 ms, in 5 ms slices. The bounds
+    // are generous for a busy test machine; a search that did not yield would show one single
+    // slice of 300 ms and no heartbeat at all.
+    const hard = hardSeed(3);
+    let beats = 0;
+    let lastBeat = performance.now();
+    let longestGap = 0;
+    let running = true;
+    (function beat() {
+      const t = performance.now();
+      if (t - lastBeat > longestGap) longestGap = t - lastBeat;
+      lastBeat = t;
+      beats++;
+      if (running) setImmediate(beat);
+    })();
+    const t0 = performance.now();
+    const watch = await watchTimers(() => Solver.findWinnableSeedAsync({ drawCount: 3, startSeed: hard, budgetMs: 300, sliceMs: 5, maxNodes: 1e9 }));
+    const took = performance.now() - t0;
+    running = false;
+    const r = watch.result;
+    assert.equal(r.certified, false);
+    assert.equal(r.tried, 1);
+    assert.notEqual(r.seed, hard);
+    assert.ok(took >= 299 && took < 300 + 200, 'resolved when the budget ran out (' + took.toFixed(1) + ' ms)');
+    assert.ok(watch.yields >= 6, 'many slices (' + watch.yields + ')');
+    assert.equal(watch.slices.length, watch.yields);
+    const sorted = watch.slices.slice().sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    assert.ok(median <= 5 + 3, 'a typical slice is sliceMs long (median ' + median.toFixed(2) + ' ms)');
+    assert.ok(sorted[sorted.length - 1] < 150, 'no slice overran (longest ' + sorted[sorted.length - 1].toFixed(2) + ' ms)');
+    assert.ok(beats >= watch.yields, 'other work ran between the slices (' + beats + ' beats)');
+    assert.ok(longestGap < 150, 'the event loop was never blocked for long (' + longestGap.toFixed(2) + ' ms)');
+  });
+
+  test('the budget is wall-clock time; budgetMs: 0 resolves at the first slice', async () => {
+    // deal after deal fails at once (10 nodes are never enough): the slices still end on time
+    const t0 = performance.now();
+    const watch = await watchTimers(() => Solver.findWinnableSeedAsync({ budgetMs: 60, maxNodes: 10, startSeed: 5, sliceMs: 4 }));
+    const took = performance.now() - t0;
+    const r = watch.result;
+    assert.ok(watch.yields >= 3, 'it yielded between deals (' + watch.yields + ' timers)');
+    assert.equal(r.certified, false);
+    assert.ok(r.tried > 10);
+    assert.equal(r.seed, (5 + r.tried * 0x9e3779b9) >>> 0);
+    assert.ok(took >= 59 && took < 60 + 150, took.toFixed(1) + ' ms for a 60 ms budget');
+
+    const z = await Solver.findWinnableSeedAsync({ budgetMs: 0, startSeed: 31337 });
+    assert.deepEqual(z, { seed: 31337, certified: false, tried: 0 });
+  });
+
+  test('never rejects, whatever the options', async () => {
+    for (const opts of [undefined, null, 7, 'x', { drawCount: 'three', budgetMs: NaN, sliceMs: -4, startSeed: {}, rng: 5, maxNodes: 'many' }]) {
+      const r = await Solver.findWinnableSeedAsync(opts);
+      assert.equal(typeof r.certified, 'boolean');
+      assert.ok(Number.isInteger(r.seed) && r.seed >= 0 && r.seed <= 0xffffffff);
+    }
+    // an rng that throws: resolved, not certified
+    const r = await Solver.findWinnableSeedAsync({
+      startSeed: findSeed(1, Solver.DEFAULTS.seedMaxNodes, (res) => !res.solved),
+      rng: {
+        next: function () {
+          throw new Error('boom');
+        },
+      },
+    });
+    assert.equal(r.certified, false);
+    assert.ok(Number.isInteger(r.seed));
+  });
+
+  test('searches running at the same time do not disturb each other', async () => {
+    const hard = hardSeed(3);
+    const seedA = findSeed(3, Solver.DEFAULTS.seedMaxNodes, (r) => r.solved && r.nodes > 7000);
+    const seedB = findSeed(1, Solver.DEFAULTS.seedMaxNodes, (r) => r.solved && r.nodes > 7000);
+    const expectedA = Solver.findWinnableSeed({ drawCount: 3, startSeed: seedA, budgetMs: 20000 });
+    const expectedB = Solver.findWinnableSeed({ drawCount: 1, startSeed: seedB, budgetMs: 20000 });
+    const expectedSolve = Solver.solve(deal(8, 3), nodesOnly(3000));
+
+    const blocker = Solver.findWinnableSeedAsync({ drawCount: 3, startSeed: hard, budgetMs: 120, sliceMs: 1, maxNodes: 1e9 });
+    const a = Solver.findWinnableSeedAsync({ drawCount: 3, startSeed: seedA, budgetMs: 20000, sliceMs: 1 });
+    const b = Solver.findWinnableSeedAsync({ drawCount: 1, startSeed: seedB, budgetMs: 20000, sliceMs: 1 });
+    // synchronous searches in between the slices of the three
+    const between = [];
+    for (let i = 0; i < 5; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      between.push(Solver.solve(deal(8, 3), nodesOnly(3000)));
+      Solver.findWinnableSeed({ drawCount: 1, startSeed: 40 + i, budgetMs: 20000 });
+    }
+    assert.deepEqual(await a, expectedA);
+    assert.deepEqual(await b, expectedB);
+    for (const r of between) {
+      assert.equal(r.nodes, expectedSolve.nodes);
+      assert.deepEqual(r.moves, expectedSolve.moves);
+    }
+    const blocked = await blocker;
+    assert.equal(blocked.certified, false);
+    assert.equal(blocked.tried, 1);
+  });
+});
+
+// ------------------------------------------------------------------------------------- measurements
+describe('measurements (SOLVER_BENCH=1)', () => {
+  const N = Number(process.env.SOLVER_BENCH) > 1 ? Number(process.env.SOLVER_BENCH) : 400;
+
+  function summary(values) {
+    const s = values.slice().sort((a, b) => a - b);
+    return {
+      mean: s.reduce((a, b) => a + b, 0) / s.length,
+      median: s[Math.floor(s.length / 2)],
+      p95: s[Math.floor(s.length * 0.95)],
+      max: s[s.length - 1],
+    };
+  }
+
+  test('certification rate and time per deal at the default limits', { skip: !process.env.SOLVER_BENCH }, async () => {
+    for (let i = 0; i < 300; i++) Solver.solve(deal(i, (i & 1) === 0 ? 1 : 3)); // warm up the JIT
+    const lines = ['', 'defaults ' + JSON.stringify(Solver.DEFAULTS)];
+    for (const drawCount of [1, 3]) {
+      const ms = [];
+      let solved = 0;
+      const reasons = {};
+      for (let i = 0; i < N; i++) {
+        const st = Engine.newGame({ seed: RNG.randomSeed(), drawCount: drawCount });
+        const r = Solver.solve(st);
+        ms.push(r.ms);
+        reasons[r.reason] = (reasons[r.reason] || 0) + 1;
+        if (r.solved) {
+          solved++;
+          assertWins(st, r.moves, 'bench');
+        }
+      }
+      const t = summary(ms);
+      lines.push(
+        'solve() draw ' + drawCount + ': ' + N + ' random deals, certified ' + ((100 * solved) / N).toFixed(1) + '%, ms/deal mean ' +
+          t.mean.toFixed(2) + ' median ' + t.median.toFixed(2) + ' p95 ' + t.p95.toFixed(2) + ' max ' + t.max.toFixed(2) + '  ' + JSON.stringify(reasons)
+      );
+    }
+    for (const drawCount of [1, 3]) {
+      const ms = [];
+      let certified = 0;
+      let tried = 0;
+      for (let i = 0; i < N; i++) {
+        const t0 = performance.now();
+        const r = Solver.findWinnableSeed({ drawCount: drawCount });
+        ms.push(performance.now() - t0);
+        tried += r.tried;
+        if (r.certified) certified++;
+      }
+      const t = summary(ms);
+      lines.push(
+        'findWinnableSeed draw ' + drawCount + ': ' + N + ' calls, certified ' + ((100 * certified) / N).toFixed(1) + '%, ms/call mean ' +
+          t.mean.toFixed(2) + ' median ' + t.median.toFixed(2) + ' p95 ' + t.p95.toFixed(2) + ' max ' + t.max.toFixed(2) + ', deals tried mean ' + (tried / N).toFixed(2)
+      );
+    }
+    for (const drawCount of [1, 3]) {
+      const ms = [];
+      let certified = 0;
+      for (let i = 0; i < Math.min(N, 60); i++) {
+        const t0 = performance.now();
+        const r = await Solver.findWinnableSeedAsync({ drawCount: drawCount });
+        ms.push(performance.now() - t0);
+        if (r.certified) certified++;
+      }
+      const t = summary(ms);
+      lines.push(
+        'findWinnableSeedAsync draw ' + drawCount + ': ' + ms.length + ' calls, certified ' + certified + ', wall ms/call mean ' +
+          t.mean.toFixed(2) + ' median ' + t.median.toFixed(2) + ' p95 ' + t.p95.toFixed(2) + ' max ' + t.max.toFixed(2)
+      );
+    }
+    console.log(lines.join('\n'));
+  });
+});

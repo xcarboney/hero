@@ -1,15 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
     Backup and device-to-device transfer rules for Android 12+ (android:dataExtractionRules).
-    Same content as backup_rules.xml: the saved game, statistics and settings in the WebView's
-    localStorage travel with the user, WebView caches do not.
+    Same content as backup_rules.xml: the saved game, statistics and settings travel with the
+    user (the app's own files in files/store/ and the copy in the WebView's localStorage),
+    WebView caches do not.
 -->
 <data-extraction-rules>
     <cloud-backup>
+        <include domain="file" path="store" />
         <include domain="root" path="app_webview/Default/Local Storage" />
         <include domain="root" path="app_webview/Local Storage" />
     </cloud-backup>
     <device-transfer>
+        <include domain="file" path="store" />
         <include domain="root" path="app_webview/Default/Local Storage" />
         <include domain="root" path="app_webview/Local Storage" />
     </device-transfer>

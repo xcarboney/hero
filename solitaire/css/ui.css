@@ -82,7 +82,10 @@
 
 .ui-hud {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  /* The score is centred while both sides fit in equal columns. A side that needs more than its half (an
+     hour-long timer next to a six-digit score on a 320px phone) keeps its full width and the score gives way:
+     nothing ever overlaps, wraps or scrolls. */
+  grid-template-columns: minmax(max-content, 1fr) auto minmax(max-content, 1fr);
   align-items: center;
   column-gap: 8px;
   height: var(--ui-hud-h);
@@ -91,6 +94,13 @@
   padding: 0 12px;
   white-space: nowrap;
   overflow: hidden;                              /* belt and braces: the bar can never grow or wrap */
+  overflow: clip;                                /* ...and is not a scroll container (nothing can scroll it) */
+}
+
+/* The HUD adapts to the width it really has (side insets included), not to the viewport. */
+.ui-hud-box {
+  container-type: inline-size;
+  container-name: ui-hud;
 }
 
 .ui-hud__left {
@@ -137,10 +147,6 @@
   font-weight: 800;
   letter-spacing: 0;
 }
-.ui-badge.is-bump-a,
-.ui-badge.is-bump-b {
-  animation: ui-pop 420ms var(--ease-back);
-}
 
 .ui-stat {
   display: flex;
@@ -162,7 +168,6 @@
 }
 .ui-stat__label-text {
   display: block;
-  transition: opacity 160ms linear;
 }
 .ui-stat__value {
   height: 19px;
@@ -170,10 +175,6 @@
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum";
   color: var(--ink);
-}
-.ui-stat__value.is-bump-a,
-.ui-stat__value.is-bump-b {
-  animation: ui-pop 320ms var(--ease-out);
 }
 
 .ui-stat--score {
@@ -188,26 +189,17 @@
   color: var(--gold);
 }
 
-/* gold flash behind the score: a static glow whose opacity / scale animate */
-.ui-score::before {
-  content: "";
+/* gold flash behind the score: a static glow; ui.js animates its opacity / scale (SOL.Anim) on every change */
+.ui-score__glow {
   position: absolute;
   left: -22px;
   right: -22px;
-  top: -9px;
-  bottom: -9px;
+  top: -14px;
+  bottom: -3px;                                  /* stays inside the bar: the HUD has no overflow at all */
   border-radius: 50%;
   background: radial-gradient(closest-side, rgba(243, 201, 105, 0.6), rgba(243, 201, 105, 0));
   opacity: 0;
   pointer-events: none;
-}
-.ui-score.is-flash-a::before,
-.ui-score.is-flash-b::before {
-  animation: ui-flash 760ms ease-out;
-}
-.ui-score.is-flash-a .ui-roll,
-.ui-score.is-flash-b .ui-roll {
-  animation: ui-pop 440ms var(--ease-back);
 }
 
 /* rolling digits: one clipped window per digit, a strip of 0-9 that slides */
@@ -248,7 +240,7 @@
   opacity: 0.8;
 }
 
-/* the +10 / -15 chip takes the place of the "Score" caption for a moment */
+/* the +10 / -15 chip takes the place of the "Score" caption for a moment (driven from ui.js, SOL.Anim) */
 .ui-chip {
   position: absolute;
   left: 50%;
@@ -270,19 +262,7 @@
   color: #330909;
   background: var(--danger);
 }
-.ui-chip.is-show-a,
-.ui-chip.is-show-b {
-  animation: ui-chip 1150ms var(--ease-out) both;
-}
-.ui-stat--score.has-chip .ui-stat__label-text {
-  opacity: 0;
-}
 
-@keyframes ui-pop {
-  0% { transform: scale(1); }
-  35% { transform: scale(1.2); }
-  100% { transform: scale(1); }
-}
 @keyframes ui-flash {
   0% { opacity: 0; transform: scale(0.55); }
   22% { opacity: 1; transform: scale(1); }
@@ -291,13 +271,6 @@
 @keyframes ui-roll-in {
   from { opacity: 0; transform: translate3d(0, 45%, 0); }
   to { opacity: 1; transform: none; }
-}
-@keyframes ui-chip {
-  0% { opacity: 0; transform: translate(-50%, 30%) scale(0.6); }
-  13% { opacity: 1; transform: translate(-50%, -50%) scale(1.16); }
-  24% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-  76% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-  100% { opacity: 0; transform: translate(-50%, -150%) scale(0.9); }
 }
 
 :root[data-left-handed="true"] .ui-hud__left {
@@ -343,6 +316,21 @@
 .toolbar {
   background: linear-gradient(0deg, rgba(0, 0, 0, 0.6) 0%, rgba(0, 0, 0, 0.42) 60%, rgba(0, 0, 0, 0.3) 100%);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 -8px 18px -10px rgba(0, 0, 0, 0.6);
+}
+
+/* size container: the queries below ask how wide the toolbar really is (side insets already taken off) */
+.ui-tb-box {
+  position: relative;
+  container-type: inline-size;
+  container-name: ui-tb;
+}
+
+/* covered by the "no more moves" card (which has Undo / New game itself): faded out, and inert from ui.js */
+.ui-tb-box {
+  transition: opacity 180ms linear;
+}
+.ui-tb-box.is-covered {
+  opacity: 0;
 }
 
 .ui-tb {
@@ -421,6 +409,7 @@
   position: relative;
   font: 600 10.5px/12px var(--font-ui);
   letter-spacing: 0.03em;
+  white-space: nowrap;
   color: var(--ink-dim);
 }
 .ui-tb__btn--accent .ui-tb__icon {
@@ -501,9 +490,9 @@
 }
 .ui-auto__glow {
   position: absolute;
-  inset: -3px;
-  border-radius: 28px;
-  box-shadow: 0 0 0 2px rgba(255, 231, 166, 0.55), 0 0 26px 8px rgba(243, 201, 105, 0.8);
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: 0 0 0 4px rgba(243, 201, 105, 0.32), 0 0 28px 8px rgba(243, 201, 105, 0.75);
   opacity: 0.55;
   pointer-events: none;
 }
@@ -582,14 +571,14 @@
   }
   .ui-auto-wrap {
     left: auto;
-    right: calc(var(--safe-r) + 10px);
+    right: 10px;
     top: 0;
-    bottom: var(--safe-b);
+    bottom: 0;
     align-items: center;
   }
   :root[data-left-handed="true"] .ui-auto-wrap {
     right: auto;
-    left: calc(var(--safe-l) + 10px);
+    left: 10px;
   }
   .ui-auto {
     height: 44px;
@@ -597,21 +586,41 @@
     font-size: 14px;
   }
 }
-@media (orientation: landscape) and (max-height: 500px) and (max-width: 759px) {
-  .ui-tb__btn {
-    min-width: 48px;
-    padding: 0 6px;
+@media (orientation: landscape) and (max-height: 500px) {
+  /* Labelled buttons need 473px, icons 248px; the pill 165px (92px as "Auto"). The buttons are centred and the
+     pill sits at one end, so both fit when the box is at least buttons + 2 * (pill + 18px). */
+
+  /* too narrow for labels at all */
+  @container ui-tb (max-width: 499px) {
+    .ui-tb__btn {
+      min-width: 48px;
+      padding: 0 6px;
+    }
+    .ui-tb__label {
+      display: none;
+    }
+    .ui-tb {
+      gap: 2px;
+    }
   }
-  .ui-tb__label {
-    display: none;
+  /* room for labels, but not next to the pill: the labels step aside while the pill is showing */
+  @container ui-tb (max-width: 847px) {
+    .ui-tb-box.has-auto .ui-tb__btn {
+      min-width: 48px;
+      padding: 0 6px;
+    }
+    .ui-tb-box.has-auto .ui-tb__label {
+      display: none;
+    }
+    .ui-tb-box.has-auto .ui-tb {
+      gap: 2px;
+    }
   }
-  .ui-tb {
-    gap: 2px;
-  }
-}
-@media (orientation: landscape) and (max-height: 500px) and (max-width: 619px) {
-  .ui-auto__rest {
-    display: none;
+  /* even the icons need the pill to shorten its label */
+  @container ui-tb (max-width: 621px) {
+    .ui-auto__rest {
+      display: none;
+    }
   }
 }
 
@@ -800,6 +809,9 @@
   }
   .ui-sheet--win {
     width: min(460px, 100%);
+  }
+  .ui-sheet--win .ui-sheet__content {
+    padding-top: 22px;
   }
 }
 
@@ -1018,7 +1030,7 @@ button.ui-row:active {
   justify-content: space-between;
   gap: 10px;
   min-height: 44px;
-  margin-top: 8px;
+  margin: 6px 0 -8px;
   font: 500 12.5px/1.35 var(--font-ui);
   color: var(--ink-dim);
 }
@@ -1677,30 +1689,35 @@ button.ui-row:active {
 .ui-gest--hero .ui-gest__text b {
   color: var(--gold);
 }
-.ui-score-table {
-  width: 100%;
-  border-collapse: collapse;
-  font: 400 14px/1.3 var(--font-ui);
+.ui-scores {
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
-.ui-score-table td {
-  padding: 9px 14px;
+.ui-scores li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 44px;
+  padding: 8px 14px;
+  font: 400 14px/1.3 var(--font-ui);
   color: var(--ink);
 }
-.ui-score-table tr + tr td {
+.ui-scores li + li {
   box-shadow: inset 0 1px 0 var(--ui-line);
 }
-.ui-score-table td:last-child {
-  width: 1%;
+.ui-scores b {
+  flex: none;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
-  text-align: right;
   white-space: nowrap;
   color: var(--ok);
 }
-.ui-score-table td.is-minus {
+.ui-scores b.is-minus {
   color: #ff9a94;
 }
-.ui-score-table td.is-gold {
+.ui-scores b.is-gold {
   color: var(--gold);
 }
 .ui-keys {
@@ -1740,11 +1757,11 @@ button.ui-row:active {
 
 .ui-sheet--win {
   border-top-color: rgba(243, 201, 105, 0.55);
-  background: linear-gradient(180deg, rgba(22, 32, 29, 0.66) 0%, rgba(9, 14, 13, 0.84) 100%);
+  background: linear-gradient(180deg, rgba(20, 30, 27, 0.78) 0%, rgba(13, 20, 18, 0.9) 34%, rgba(9, 14, 13, 0.95) 100%);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
 }
 .ui-sheet--win::after {
-  background: rgba(9, 14, 13, 0.84);
+  background: rgba(9, 14, 13, 0.95);
 }
 .ui-sheet--win .ui-btn {
   text-shadow: none;
@@ -1754,6 +1771,14 @@ button.ui-row:active {
   flex-direction: column;
   align-items: center;
   text-align: center;
+}
+.ui-win__main,
+.ui-win__side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
 }
 .ui-win__suits {
   display: flex;
@@ -2065,4 +2090,130 @@ button.ui-row:active {
   0% { transform: scale(1); }
   40% { transform: scale(1.06); }
   100% { transform: scale(1); }
+}
+
+/* ================================================================== small phones (<= 350px wide) */
+
+@media (max-width: 350px) {
+  .ui-hero {
+    gap: 8px;
+    padding-right: 8px;
+  }
+  .ui-hero__stage {
+    --card-w: 42px;
+    width: 92px;
+  }
+  .ui-hero__stage .card {
+    left: 25px;
+    top: 9px;
+  }
+  .ui-hero__title {
+    font-size: 17px;
+  }
+  .ui-hero__sub {
+    font-size: 12px;
+  }
+  .ui-tile {
+    gap: 8px;
+    padding: 8px 8px 8px 10px;
+    font-size: 13.5px;
+  }
+  .ui-tile__icon,
+  .ui-tile__mini {
+    width: 32px;
+    height: 32px;
+  }
+  .ui-tile__mini {
+    --card-w: 22px;
+  }
+  .ui-win__total {
+    font-size: 48px;
+  }
+  .ui-win__actions .ui-btn {
+    font-size: 14px;
+  }
+  .ui-win__part {
+    padding: 6px 9px;
+  }
+  .ui-win__badge {
+    padding: 0 9px 0 7px;
+    letter-spacing: 0.05em;
+  }
+}
+
+/* ================================================================== phones on their side */
+
+@media (orientation: landscape) and (max-height: 500px) {
+  /* the win screen puts the result and the buttons side by side so nothing has to scroll */
+  .ui-sheet--win {
+    width: min(720px, 100%);
+  }
+  .ui-sheet--win .ui-sheet__content {
+    padding-top: 14px;
+    padding-bottom: 14px;
+  }
+  .ui-win {
+    flex-direction: row;
+    align-items: center;
+    gap: 22px;
+  }
+  .ui-win__main,
+  .ui-win__side {
+    flex: 1 1 0;
+  }
+  .ui-win__title {
+    margin-top: 4px;
+    font-size: 24px;
+  }
+  .ui-win__total {
+    margin-top: 4px;
+    font-size: 44px;
+  }
+  .ui-win__sum,
+  .ui-win__badges {
+    margin-top: 8px;
+  }
+  .ui-win__facts {
+    margin-top: 0;
+  }
+  .ui-win__actions {
+    margin-top: 10px;
+  }
+  .ui-win__actions .ui-btn--primary {
+    min-height: 48px;
+  }
+
+  /* the "no more moves" card fits inside the toolbar's own height */
+  .ui-stuck {
+    bottom: calc(var(--safe-b) + 2px);
+    max-width: 640px;
+    padding: 1px 4px 1px 12px;
+    border-radius: 16px;
+  }
+}
+
+/* little room: less air in the HUD, so even extreme values keep clear of each other */
+@container ui-hud (max-width: 340px) {
+  .ui-hud {
+    column-gap: 6px;
+    padding: 0 10px;
+  }
+  .ui-hud__right {
+    gap: 10px;
+  }
+  .ui-badge {
+    gap: 5px;
+    padding: 0 8px 0 6px;
+    letter-spacing: 0.08em;
+  }
+}
+/* very little room (a small phone with side insets): the badge keeps its icon and number, drops the word */
+@container ui-hud (max-width: 300px) {
+  .ui-badge__word {
+    display: none;
+  }
+  .ui-badge {
+    gap: 3px;
+    padding: 0 7px 0 5px;
+  }
 }

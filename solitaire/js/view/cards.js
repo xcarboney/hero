@@ -6,6 +6,7 @@
  *   Cards.BACKS            -> [{ id, name }]  ('royal', 'aurora', 'ember', 'lattice', 'petal', 'mono' — in this order)
  *   Cards.DEFAULT_BACK     -> 'royal'
  *   Cards.SUITS            -> ['spades', 'hearts', 'clubs', 'diamonds']
+ *   Cards.COMPACT_BELOW    -> 60   card widths (CSS px) below this show the compact front layout (see "Art notes")
  *   Cards.create(cardId, { back, thick } = {})      -> HTMLElement  full card, face-up (--flip unset = 0deg)
  *   Cards.createBackOnly(backId, { thick } = {})    -> HTMLElement  the same back on both sides (gallery previews)
  *   Cards.setBack(el, backId)                       -> el           unknown ids fall back to DEFAULT_BACK
@@ -32,7 +33,8 @@
  *       <div class="card__flip">
  *         <div class="card__face card__front"><svg class="card__art">…two <use> into the sprite…</svg></div>
  *         <div class="card__face card__back"></div>            (the design is a CSS background chosen by data-back)
- *         <div class="card__edges">…</div>                     (only with { thick: true }: 4 walls + rounded corners)
+ *         <div class="card__edges">…</div>                     (only with { thick: true }: 4 walls + 7 strips per rounded
+ *                                                                corner, each an <i class="card__edge">, lit from the top-left)
  *         <div class="card__glare"></div>
  *       </div>
  *     </div>
@@ -49,6 +51,16 @@
  * shows one of them. The six backs are procedurally generated SVG documents handed to CSS as data: URIs, so a
  * face-down card costs no extra DOM. Everything is original: suits, numerals, court figures and backs are drawn
  * from scratch below. A card is 10 DOM nodes (43 with { thick: true }).
+ *
+ * Optional attribute: data-layout="compact" | "classic" on the .card element pins the front layout whatever the
+ * card's size (unset = automatic). Nothing in here sets it.
+ *
+ * Layout numbers other modules may lean on (fractions of the card height, measured from the top edge): the
+ * corner index ends at 0.26 in the classic layout (rank alone: 0.17) and at 0.27 in the compact one, so a
+ * tableau fan step of 0.27-0.28 keeps rank and suit of every covered card readable at any size. Sideways
+ * (fractions of the card width from the left edge): the classic index needs 0.22; the compact rank needs 0.24
+ * (0.33 for the 10) and the compact suit sits top-RIGHT, so a sideways fan of compact cards shows rank and
+ * colour only.
  */
 (function (root) {
   'use strict';
@@ -70,6 +82,7 @@
     { id: 'mono', name: 'Mono' },
   ];
   const DEFAULT_BACK = 'royal';
+  const COMPACT_BELOW = 60; // must match the container query in cards.css (max-width: 59.9px)
 
   function checkId(cardId) {
     if (!Number.isInteger(cardId) || cardId < 0 || cardId > 51) {
@@ -251,10 +264,24 @@
   }
 
   /**
-   * The ornamental ace: a large suit with an engraved inline inside a fine sunburst. The inline is a true inset
-   * (two strokes clipped to the suit's own outline), so its width is the same all the way round and the outer
-   * tips stay sharp — a scaled copy of the shape would pinch at the tips and gape at the lobes.
+   * A suit centred on (cx, cy) with an engraved inline: `rim` of ink, then `band` of paper, then solid ink
+   * (both in suit units, 1/100 of `size`). The inline is a true inset — two strokes clipped to the suit's own
+   * outline — so its width is the same all the way round and the outer tips stay sharp; a scaled copy of the
+   * shape would pinch at the tips and gape at the lobes.
    */
+  function inlineSuit(suit, cx, cy, size, rim, band) {
+    const d = SUIT_PATHS[suit];
+    return (
+      '<g transform="translate(' + n(cx - size / 2) + ' ' + n(cy - size / 2) + ') scale(' + n(size / 100) +
+      ')" clip-path="url(#sol-suit-clip-' + suit + ')">' +
+      '<path d="' + d + '"/>' +
+      '<path d="' + d + '" fill="none" stroke="' + PAPER + '" stroke-width="' + n(2 * (rim + band)) + '" stroke-linejoin="round"/>' +
+      '<path d="' + d + '" fill="none" stroke="currentColor" stroke-width="' + n(2 * rim) + '" stroke-linejoin="round"/>' +
+      '</g>'
+    );
+  }
+
+  /** The ornamental ace: a large inlined suit inside a fine sunburst with four small jewels. */
   function aceMarkup(suit) {
     const cx = 125;
     const cy = 175;
@@ -279,19 +306,13 @@
     }
     const size = [118, 110, 112, 118][suit];
     const dy = [-2.5, 1.5, -2, 0][suit]; // optical centring: stems pull spades and clubs down, the heart's cleft pulls it up
-    const d = SUIT_PATHS[suit];
     return (
       '<path d="' + rays + '" fill="none" stroke="' + GOLD + '" stroke-width="1.7" stroke-linecap="round"/>' +
       '<g fill="' + GOLD + '">' + dots + '</g>' +
       '<circle cx="125" cy="175" r="72.5" fill="none" stroke="' + GOLD + '" stroke-width="1.5"/>' +
       '<circle cx="125" cy="175" r="68.5" fill="none" stroke="currentColor" stroke-width=".9" opacity=".45"/>' +
       gems +
-      '<g transform="translate(' + n(cx - size / 2) + ' ' + n(cy - size / 2 + dy) + ') scale(' + n(size / 100) +
-      ')" clip-path="url(#sol-suit-clip-' + suit + ')">' +
-      '<path d="' + d + '"/>' +
-      '<path d="' + d + '" fill="none" stroke="' + PAPER + '" stroke-width="11.6" stroke-linejoin="round"/>' +
-      '<path d="' + d + '" fill="none" stroke="currentColor" stroke-width="6.4" stroke-linejoin="round"/>' +
-      '</g>'
+      inlineSuit(suit, cx, cy + dy, size, 3.2, 2.6)
     );
   }
 
@@ -408,7 +429,7 @@
     // the flower she holds blooms into her own suit
     s += L('M176 152V74', GOLD_D, 2.4, ' stroke-linecap="round"');
     s += P('M176 118Q166 116 163 105Q174 107 176 118Z', pal.tint) + P('M176 132Q186 130 189 119Q178 121 176 132Z', pal.tint);
-    s += pip(suit, 176, 58, 30, 0, ' fill="' + INK + '"');
+    s += pip(suit, 176, 59, 26, 0, ' fill="' + INK + '"');
     s += R(168.5, 146, 15, 12, 5.5, SKIN) + L('M172.2 150H179.8M172.2 153.8H179.8', SKIN_D, 1.1);
     s += pip(suit, 77, 52, 21, 0, ' fill="' + INK + '" opacity=".9"');
     return s;
@@ -488,14 +509,17 @@
   // ------------------------------------------------------------------ fronts: compact layout (cards < 60px wide)
   /*
    * At phone sizes pips are noise, so the compact face is: a large rank top-left, its suit top-right and one big
-   * suit (or an enlarged single bust for J/Q/K) below. CSS swaps the two layouts with a container query.
+   * suit (inlined on the ace; an enlarged single bust for J/Q/K) below. CSS swaps the two layouts with a
+   * container query.
    */
   function compactMarkup(cardId) {
     const c = info(cardId);
     const g = GLYPHS[c.rank];
     const h = 80;
     let s = use('sol-rank-' + c.rank, 14, 14, (g.w * h) / 100, h) + use('sol-suit-' + c.suit, 168, 19, 68, 68);
-    if (c.rank <= 10) {
+    if (c.rank === 1) {
+      s += inlineSuit(c.suit, 125, 224, 166, 3.6, 3); // the ace keeps its engraved suit at every size
+    } else if (c.rank <= 10) {
       s += pip(c.suit, 125, 224, 160, 0);
     } else {
       const pal = COURT_PAL[c.suit];
@@ -561,7 +585,8 @@
     const defs =
       '<radialGradient id="a" cx=".5" cy=".5" r=".8"><stop offset="0" stop-color="#3559cc"/>' +
       '<stop offset=".55" stop-color="#1f3b98"/><stop offset="1" stop-color="#101d58"/></radialGradient>' +
-      '<pattern id="p" x="5" y="15" width="20" height="20" patternUnits="userSpaceOnUse">' +
+      // phased so the 200 x 300 field holds whole diamonds on every side (10 x 15 of them)
+      '<pattern id="p" x="5" y="5" width="20" height="20" patternUnits="userSpaceOnUse">' +
       '<path d="M10 0L20 10L10 20L0 10Z" fill="none" stroke="' + gold + '" stroke-width=".9" opacity=".5"/>' +
       '<circle cx="10" cy="10" r="1.6" fill="' + gold + '" opacity=".85"/>' +
       '<path d="M0 -2.2L2.2 0L0 2.2L-2.2 0ZM20 -2.2L22.2 0L20 2.2L17.8 0ZM0 17.8L2.2 20L0 22.2L-2.2 20Z' +
@@ -665,7 +690,7 @@
     }
     s += '<g clip-path="url(#panel)"><path d="' + rays + '" fill="#ffe7a8" opacity=".13"/>' +
       '<g fill="#ffe0a0">' + sparks + '</g></g>';
-    // the sun: flame-tipped star, rings, a dark core with a single flame
+    // the sun: flame-tipped star, rings, a dark core with a pinwheel of four flames
     s += '<circle cx="125" cy="175" r="72" fill="none" stroke="#ffe2a0" stroke-width=".9" opacity=".7"/>';
     s += '<circle cx="125" cy="175" r="66" fill="none" stroke="#ffe2a0" stroke-width="2" opacity=".85"/>';
     let star = '';
@@ -675,9 +700,11 @@
     }
     s += '<path d="' + star + 'Z" fill="#fff0c2"/>';
     s += '<circle cx="125" cy="175" r="29" fill="#8f1d1f"/><circle cx="125" cy="175" r="29" fill="none" stroke="#ffd27a" stroke-width="1.6"/>';
-    const flame = 'M125 153C137 166 140 175 125 175C110 175 113 166 125 153Z';
-    s += '<path d="' + flame + '" fill="#ffd27a"/><path d="' + flame + '" fill="#ffd27a" transform="rotate(180 125 175)"/>';
-    s += '<circle cx="125" cy="175" r="4.2" fill="#8f1d1f"/>';
+    const flame = 'M125 175C123.5 163 130 155.5 142 153C141.5 163.5 136.5 172 125 175Z';
+    for (let i = 0; i < 4; i++) {
+      s += '<path d="' + flame + '" fill="#ffd27a" transform="rotate(' + i * 90 + ' 125 175)"/>';
+    }
+    s += '<circle cx="125" cy="175" r="4.6" fill="#8f1d1f"/><circle cx="125" cy="175" r="2" fill="#ffd27a"/>';
     s += '<rect x="17.5" y="17.5" width="215" height="315" rx="5.5" fill="none" stroke="#ffd98a" stroke-width="2.2"/>';
     s += '<rect x="22.5" y="22.5" width="205" height="305" rx="3" fill="none" stroke="#ffd98a" stroke-width=".8" opacity=".75"/>';
     return backDoc(defs, s);
@@ -887,7 +914,8 @@
     let html = '';
     strips.forEach((sp) => {
       // the strip's own top edge is its lower-angle end (see the rotateZ in cards.css)
-      html += '<i class="card__edge" style="--x:' + f4(sp[0]) + ';--y:' + f4(sp[1]) + ';--l:' + f4(sp[2]) + ';--a:' +
+      html += '<i class="card__edge' + (sp[4] ? ' card__edge--corner' : '') + '" style="--x:' + f4(sp[0]) + ';--y:' +
+        f4(sp[1]) + ';--l:' + f4(sp[2]) + ';--a:' +
         n(sp[3]) + 'deg;--c0:' + shade(sp[3] - sp[4]) + ';--c1:' + shade(sp[3] + sp[4]) + '"></i>';
     });
     edgesCache = '<div class="card__edges">' + html + '</div>';
@@ -978,6 +1006,7 @@
     BACKS: BACKS.map((b) => ({ id: b.id, name: b.name })),
     DEFAULT_BACK: DEFAULT_BACK,
     SUITS: SUITS.slice(),
+    COMPACT_BELOW: COMPACT_BELOW,
     create: create,
     createBackOnly: createBackOnly,
     setBack: setBack,

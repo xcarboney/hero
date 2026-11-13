@@ -1,5 +1,6 @@
 package io.github.xcarboney.solitaire
 
+import android.content.SharedPreferences
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -27,9 +28,12 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.annotation.RequiresApi
 import androidx.annotation.StringRes
+import androidx.core.content.edit
 import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewCompat
@@ -44,7 +48,14 @@ import java.util.Locale
  * Contract with the page (see solitaire/js/core/platform.js):
  *  - native -> page: `SOL.App.setInsets({top,right,bottom,left})` in CSS px, after every page
  *    load and whenever the insets change; `SOL.App.onBack()` for the back button.
- *  - page -> native: the `SolitaireNative` JavaScript interface ([NativeBridge]).
+ *  - page -> native: the `SolitaireNative` JavaScript interface ([NativeBridge]): haptics,
+ *    keep-screen-on, full screen, gesture exclusion, the durable key/value store, exit.
+ *
+ * Full screen (the page's 'fullscreen' setting, on by default): the status and navigation bars
+ * are hidden and a swipe from the edge only shows them for a moment. That is what keeps a card
+ * drag that starts at the screen edge from being taken as the system's Back gesture: while the
+ * navigation bar is hidden, system gestures need that reveal swipe first. With the setting off
+ * the app is edge to edge under visible, transparent bars.
  */
 class MainActivity : ComponentActivity() {
 
@@ -52,6 +63,21 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var container: FrameLayout
     private lateinit var assetLoader: WebViewAssetLoader
+
+    /** The saved game, statistics and settings ([GameStorage]); shared by every WebView. */
+    private lateinit var storage: KeyValueFileStore
+
+    /** The shell's own few bits of state. Not the game's data: that is in [storage]. */
+    private lateinit var shellPrefs: SharedPreferences
+
+    /**
+     * What the page asked for with SolitaireNative.setFullscreen. Remembered in [shellPrefs] so
+     * that the next launch starts in the right mode instead of switching after the page loaded.
+     */
+    private var fullscreen = true
+
+    /** True once the insets showed the bars hidden; see [watchForBarsComingBack]. */
+    private var barsSeenHidden = false
 
     /** Null before onStart, and between a renderer loss and the WebView being rebuilt. */
     private var webView: GameWebView? = null
@@ -68,6 +94,9 @@ class MainActivity : ComponentActivity() {
 
     /** uptimeMillis of the back press that showed the exit hint, 0 if none is pending. */
     private var exitHintShownAt = 0L
+
+    /** How long after [exitHintShownAt] a second back press still closes the app. */
+    private var exitHintWindowMs = EXIT_CONFIRM_WINDOW_MS
     private var exitHint: Toast? = null
 
     private var rendererLossWindowStart = 0L
@@ -83,6 +112,12 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
         drawUnderDisplayCutouts()
+
+        // Starts reading the stored values on its own thread; they are in memory long before
+        // the page asks for them.
+        storage = GameStorage.get(this)
+        shellPrefs = getSharedPreferences(SHELL_PREFS, MODE_PRIVATE)
+        fullscreen = shellPrefs.getBoolean(PREF_FULLSCREEN, true)
 
         // The game only plays short sound effects. Before Android 9 the volume keys change the
         // ringer volume unless media is audible at that very moment, so point them at the
@@ -106,6 +141,11 @@ class MainActivity : ComponentActivity() {
             windowInsets
         }
 
+        applySystemBars()
+        // Split screen and freeform windows cannot be immersive; follow the window in and out.
+        addOnMultiWindowModeChangedListener { applySystemBars() }
+        watchLegacySystemUiFlags()
+
         onBackPressedDispatcher.addCallback(this, backCallback)
     }
 
@@ -123,7 +163,25 @@ class MainActivity : ComponentActivity() {
     override fun onPause() {
         // Makes the page hidden (visibilitychange): it stops its clock, saves and suspends audio.
         webView?.onPause()
+        // Every move is handed to the storage thread as it is made and written at once; this
+        // only waits, briefly, for a write that is still under way.
+        storage.flush(FLUSH_ON_PAUSE_MS)
         super.onPause()
+    }
+
+    override fun onStop() {
+        // From here on the process may be killed without another callback (swiped away from
+        // Recents, memory pressure). The page saved when it became hidden; make sure that, and
+        // every move before it, is on disk before this returns.
+        storage.flush(FLUSH_ON_STOP_MS)
+        super.onStop()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // The documented companion of immersive mode: whatever had the focus in between (a
+        // dialog, the notification shade, Recents) may have left the bars showing. Ask again.
+        if (hasFocus && fullscreen) applySystemBars()
     }
 
     override fun onDestroy() {
@@ -142,7 +200,9 @@ class MainActivity : ComponentActivity() {
         super.onConfigurationChanged(newConfig)
         // The page gets its insets in CSS px (px / density), so a density change alters them even
         // if the px values stay the same: ask for a fresh dispatch, onWindowInsets compares both.
-        ViewCompat.requestApplyInsets(container)
+        // applySystemBars does that, and repeats the bar request, which costs nothing while it
+        // is still in force and puts it back if the new configuration dropped it.
+        applySystemBars()
     }
 
     // -------------------------------------------------------------------------------- window
@@ -159,7 +219,55 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Shows or hides the status and navigation bars for the current [fullscreen] choice. Safe to
+     * call again at any time: it only repeats what is already requested.
+     *
+     * Hidden means BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE ("sticky immersive"): a swipe from the
+     * edge shows translucent bars over the game for a few seconds and the system hides them
+     * again by itself. Those transient bars are not part of the window insets, so the page is
+     * not laid out again for them. The display cutout mode is untouched: the window keeps
+     * drawing into the cutout either way.
+     *
+     * The caption bar of a freeform window is left alone, and a window that shares the screen
+     * (split screen, freeform, picture in picture) is never immersive: the system does not hide
+     * the bars for it, and before Android 11 the insets would nevertheless claim they are gone.
+     */
+    private fun applySystemBars() {
+        mainThread.removeCallbacks(hideBarsAgain)
+        val controller = WindowCompat.getInsetsController(window, window.decorView)
+        val bars = WindowInsetsCompat.Type.statusBars() or WindowInsetsCompat.Type.navigationBars()
+        if (fullscreen && !isInMultiWindowMode) {
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(bars)
+        } else {
+            controller.show(bars)
+            controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_DEFAULT
+        }
+        // Before Android 11 hiding a bar does not change the (stable) insets the system sends,
+        // so nothing is dispatched by itself; the compat insets do take the request into account.
+        ViewCompat.requestApplyInsets(container)
+    }
+
+    /**
+     * Android 7-10 only: the system can drop the hide flags on its own (it does so for a window
+     * that is not in the sticky mode, and some devices do it after a system dialog). The stable
+     * insets do not change then, so ask for a dispatch; [onWindowInsets] sees the bars as visible
+     * again, tells the page and schedules [hideBarsAgain].
+     */
+    @Suppress("DEPRECATION") // the replacement (WindowInsets visibility) exists from API 30
+    private fun watchLegacySystemUiFlags() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) return
+        window.decorView.setOnSystemUiVisibilityChangeListener { ViewCompat.requestApplyInsets(container) }
+    }
+
+    /**
+     * What the page has to keep clear, in physical px: display cutouts always, system bars only
+     * while they are laid out as visible. getInsets() is zero for a hidden bar and is not
+     * affected by the transient bars of the full-screen mode, so neither moves the board.
+     */
     private fun onWindowInsets(windowInsets: WindowInsetsCompat) {
+        watchForBarsComingBack(windowInsets)
         val px = windowInsets.getInsets(
             WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
         )
@@ -168,6 +276,31 @@ class MainActivity : ComponentActivity() {
         insetsPx = px
         insetsDensity = density
         publishInsets()
+    }
+
+    /**
+     * In full-screen mode the bars should only ever appear as transient overlays, which the
+     * insets do not report. If the insets do report a bar that was hidden before, something put
+     * it back for real (a device that does not honour the sticky mode, a system dialog): give
+     * the player a moment to use it, then hide it again. One attempt per reappearance, so a
+     * window whose bars cannot be hidden is left in peace.
+     */
+    private fun watchForBarsComingBack(windowInsets: WindowInsetsCompat) {
+        val visible = windowInsets.isVisible(WindowInsetsCompat.Type.statusBars()) ||
+            windowInsets.isVisible(WindowInsetsCompat.Type.navigationBars())
+        if (!visible) {
+            barsSeenHidden = true
+            mainThread.removeCallbacks(hideBarsAgain)
+        } else if (fullscreen && barsSeenHidden && !isInMultiWindowMode) {
+            barsSeenHidden = false
+            mainThread.removeCallbacks(hideBarsAgain)
+            mainThread.postDelayed(hideBarsAgain, HIDE_BARS_AGAIN_DELAY_MS)
+        }
+    }
+
+    private val hideBarsAgain = Runnable {
+        // Without focus something is on top of the game; onWindowFocusChanged hides the bars later.
+        if (fullscreen && hasWindowFocus() && !isFinishing) applySystemBars()
     }
 
     /**
@@ -205,7 +338,7 @@ class MainActivity : ComponentActivity() {
         }
         if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
 
-        val nativeBridge = NativeBridge(bridgeHost)
+        val nativeBridge = NativeBridge(bridgeHost, storage)
         view.webViewClient = GameClient()
         view.addJavascriptInterface(nativeBridge, JS_INTERFACE_NAME)
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
@@ -295,7 +428,14 @@ class MainActivity : ComponentActivity() {
         }
 
         override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
-            if (view === webView) pageReady = false
+            if (view !== webView) return
+            pageReady = false
+            // The storage methods of the bridge answer off the UI thread and cannot look at the
+            // WebView's URL themselves: tell them whether this is still the game. An empty
+            // document is not a foreign page (it has no content of its own), and treating it as
+            // one could make the game's very first read miss if it were reported just before
+            // the game: the page would then take its older localStorage copy for the latest.
+            bridge?.pageTrusted = url == null || url == BLANK_URL || GameSite.owns(url)
         }
 
         override fun onPageFinished(view: WebView, url: String?) {
@@ -364,12 +504,19 @@ class MainActivity : ComponentActivity() {
         if (isFinishing || isDestroyed) return
         val now = SystemClock.uptimeMillis()
         exitHint?.cancel()
-        if (exitHintShownAt != 0L && now - exitHintShownAt <= EXIT_CONFIRM_WINDOW_MS) {
+        if (exitHintShownAt != 0L && now - exitHintShownAt <= exitHintWindowMs) {
             finish()
             return
         }
+        // With the bars hidden a back press is two gestures, not one: a swipe that shows the bars
+        // and then Back itself. With gesture navigation the system hides the bars again right
+        // after the first Back, so the second one needs both gestures once more. Two seconds are
+        // not enough for that; give the hint (and the player) the long toast's time instead.
+        val barsHidden = fullscreen && !isInMultiWindowMode
+        exitHintWindowMs = if (barsHidden) EXIT_CONFIRM_WINDOW_FULLSCREEN_MS else EXIT_CONFIRM_WINDOW_MS
         exitHintShownAt = now
-        exitHint = Toast.makeText(this, R.string.back_again_to_exit, Toast.LENGTH_SHORT).also { it.show() }
+        val duration = if (barsHidden) Toast.LENGTH_LONG else Toast.LENGTH_SHORT
+        exitHint = Toast.makeText(this, R.string.back_again_to_exit, duration).also { it.show() }
     }
 
     // --------------------------------------------------------------------------------- bridge
@@ -391,6 +538,18 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        override fun setFullscreen(on: Boolean) {
+            if (trustedWebView() == null || on == fullscreen) return
+            fullscreen = on
+            shellPrefs.edit { putBoolean(PREF_FULLSCREEN, on) }
+            barsSeenHidden = false
+            applySystemBars()
+        }
+
+        override fun setGestureExclusion(rects: List<CssRect>) {
+            trustedWebView()?.setGestureExclusion(rects)
+        }
+
         override fun exitApp() {
             if (trustedWebView() == null) return
             finish()
@@ -406,11 +565,32 @@ class MainActivity : ComponentActivity() {
         /** The name the page looks for: `window.SolitaireNative`. */
         const val JS_INTERFACE_NAME = "SolitaireNative"
 
+        /** As long as the hint is on screen: Toast.LENGTH_SHORT is 2 s, Toast.LENGTH_LONG 3.5 s. */
         const val EXIT_CONFIRM_WINDOW_MS = 2_000L
+        const val EXIT_CONFIRM_WINDOW_FULLSCREEN_MS = 3_500L
         const val BACK_ANSWER_TIMEOUT_MS = 1_000L
+
+        /** SharedPreferences file of the shell (not backed up: the page's setting is, and wins). */
+        const val SHELL_PREFS = "shell"
+        const val PREF_FULLSCREEN = "fullscreen"
+
+        /** How long bars that came back in full-screen mode stay before they are hidden again. */
+        const val HIDE_BARS_AGAIN_DELAY_MS = 3_000L
+
+        /**
+         * Upper bounds for waiting on the storage thread in onPause / onStop. A write takes a
+         * few milliseconds, so normally there is nothing to wait for; the bounds only matter on
+         * a device whose storage is stalling. onPause has to stay brief (the next screen waits
+         * for it), onStop is where the platform expects saving to finish.
+         */
+        const val FLUSH_ON_PAUSE_MS = 100L
+        const val FLUSH_ON_STOP_MS = 500L
 
         const val RENDERER_LOSS_WINDOW_MS = 60_000L
         const val MAX_RENDERER_LOSSES_IN_WINDOW = 3
+
+        /** The empty document a WebView shows before its first load. */
+        const val BLANK_URL = "about:blank"
 
         const val INSETS_PLACEHOLDER = "__INSETS__"
 

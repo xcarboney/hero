@@ -41,7 +41,9 @@
  *       in that order) are the stock. So the n-th card dealt is piles['t' + c][r], rows first.
  *   clone(state) -> deep copy: piles, faces and every history record are copied, nothing is shared.
  *       Its cost grows with the history (0.3 us + about 0.2 us per record): a search should clone
- *       ONCE and then walk the tree with apply() + apply({ type: 'undo' }) on that one copy.
+ *       ONCE and then walk the tree with apply() + apply({ type: 'undo' }) on that one copy. If it
+ *       must keep many copies, empty the history of the first one (copy.history = []): copies of
+ *       it are then cheap, and undo simply stops at that point.
  *   serialize(state) -> string
  *   deserialize(string) -> state | null     null (never a throw) unless the text is a fully
  *       consistent state: known fields with the right types, 52 unique cards over the 13 piles, the
@@ -147,7 +149,7 @@
  *   - cardInfo, pileKind and foundationFor return null for an unknown id. legalMoves is an extra.
  *
  * COST (for the solver; measured on random and hint-led playouts, one desktop core):
- *   apply + undo       about 4.5 million operations per second (0.2 us each), no allocation but the record
+ *   apply + undo       about 5 million operations per second (0.2 us each), no allocation but the record
  *   legalMoves         about 1 us for the whole position
  *   clone              0.3 us + 0.2 us per history record  -> clone once, then apply / undo
  *   hints, isStuck     2-3 us in open positions — but in a blocked position (no ordinary move left)

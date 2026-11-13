@@ -128,27 +128,42 @@ test('tween: a missing from is 0 and a missing to is 1', async () => {
   near(b, 3, 1e-9);
 });
 
-test('tween: objects of numbers — one reused output object, union of keys, exact end', async () => {
-  const objs = new Set();
-  let lastCopy;
-  Anim.tween({
-    from: { x: 0, y: 100, keep: 7 },
-    to: { x: 200, y: 0, extra: 3 },
-    duration: 100,
-    ease: 'linear',
-    update: (o) => {
-      objs.add(o);
-      lastCopy = Object.assign({}, o);
-    },
-  });
+test('tween: objects of numbers — a fresh object per update, union of keys, exact end', async () => {
+  const kept = [];
+  const from = { x: 0, y: 100, keep: 7 };
+  const to = { x: 200, y: 0, extra: 3 };
+  Anim.tween({ from: from, to: to, duration: 100, ease: 'linear', update: (o) => kept.push(o) });
+  // the caller may reuse or change its own objects right away
+  from.x = 999;
+  to.x = -999;
   await advance(30);
-  near(lastCopy.x, 60, 1e-9);
-  near(lastCopy.y, 70, 1e-9);
-  assert.strictEqual(lastCopy.keep, 7);
-  assert.strictEqual(lastCopy.extra, 3);
+  const third = kept[2];
+  near(third.x, 60, 1e-9);
+  near(third.y, 70, 1e-9);
+  assert.strictEqual(third.keep, 7);
+  assert.strictEqual(third.extra, 3);
+  third.x = 12345; // a callback scribbling on its value must not disturb the tween
   await advance(70);
-  assert.deepStrictEqual(lastCopy, { x: 200, y: 0, extra: 3, keep: 7 });
-  assert.strictEqual(objs.size, 1, 'the same object must be handed to every update');
+  assert.deepStrictEqual(kept[kept.length - 1], { x: 200, y: 0, extra: 3, keep: 7 });
+  assert.strictEqual(new Set(kept).size, kept.length, 'every update gets its own object');
+  // values a callback kept are snapshots: later frames do not change them
+  near(kept[0].x, 20, 1e-9);
+  near(kept[1].x, 40, 1e-9);
+  assert.strictEqual(kept[2].x, 12345);
+  assert.notStrictEqual(kept[kept.length - 1], to);
+});
+
+test('tween: non-finite from/to values are treated as absent (never NaN in update)', async () => {
+  const seen = [];
+  Anim.tween({ from: { x: 0, y: NaN, z: 5 }, to: { x: 10, y: 4, z: Infinity }, duration: 20, update: (o) => seen.push(o) });
+  const nums = [];
+  Anim.tween({ from: NaN, to: 8, duration: 20, ease: 'linear', update: (v) => nums.push(v) });
+  Anim.tween({ from: 3, to: NaN, duration: 20, update: (v) => nums.push(v) });
+  await advance(40);
+  for (const o of seen) for (const k of Object.keys(o)) assert.ok(Number.isFinite(o[k]), k + ' = ' + o[k]);
+  assert.deepStrictEqual(seen[seen.length - 1], { x: 10, y: 4, z: 5 });
+  assert.ok(nums.every(Number.isFinite), String(nums));
+  assert.deepStrictEqual(nums.slice(-2).sort(), [3, 8]);
 });
 
 test('tween: delay — nothing is called while it runs, then the full duration follows', async () => {
@@ -668,31 +683,89 @@ test('spring: setTarget on a spring at rest starts a new run (fresh finished pro
   assert.strictEqual(await dead.finished, false);
 });
 
-test('spring: objects of numbers, partial retarget, reused output objects', async () => {
-  const outs = new Set();
-  let last;
-  let lastVel;
+test('spring: objects of numbers, partial retarget, a fresh value/velocity object per update', async () => {
+  const outs = [];
+  const vels = [];
   const s = Anim.spring({
     from: { x: 0, y: 0, r: 10 },
     to: { x: 100, y: -40 },
     velocity: { x: 500 },
     update: (o, vel) => {
-      outs.add(o);
-      last = Object.assign({}, o);
-      lastVel = Object.assign({}, vel);
+      outs.push(o);
+      vels.push(vel);
     },
   });
   await advance(64, 16);
+  let last = outs[outs.length - 1];
   assert.ok(last.x > 0 && last.y < 0);
   assert.strictEqual(last.r, 10, 'a key without a target stays put');
-  assert.ok(lastVel.x > 0);
+  assert.ok(vels[vels.length - 1].x > 0);
+  const early = outs[0].x;
   s.setTarget({ y: 200 });
   assert.deepStrictEqual(s.target, { x: 100, y: 200, r: 10 });
   await advance(3000, 16);
+  last = outs[outs.length - 1];
   assert.deepStrictEqual(last, { x: 100, y: 200, r: 10 });
-  assert.deepStrictEqual(lastVel, { x: 0, y: 0, r: 0 });
-  assert.strictEqual(outs.size, 1);
-  assert.deepStrictEqual(Object.assign({}, s.value), { x: 100, y: 200, r: 10 });
+  assert.deepStrictEqual(vels[vels.length - 1], { x: 0, y: 0, r: 0 });
+  assert.strictEqual(new Set(outs).size, outs.length, 'every update gets its own value object');
+  assert.strictEqual(new Set(vels).size, vels.length, 'every update gets its own velocity object');
+  assert.strictEqual(outs[0].x, early, 'kept values are snapshots');
+  assert.ok(outs[0].x < 100);
+  assert.deepStrictEqual(s.value, { x: 100, y: 200, r: 10 });
+  assert.notStrictEqual(s.value, s.value, 'value is a snapshot too');
+  assert.deepStrictEqual(s.velocity, { x: 0, y: 0, r: 0 });
+});
+
+test('spring: done() may retarget — the finished promise of the run that ended still resolves', async () => {
+  let dones = 0;
+  let first = 'pending';
+  const s = Anim.spring({
+    from: 0,
+    to: 10,
+    done: () => {
+      if (dones++ === 0) s.setTarget(20);
+    },
+  });
+  const p = s.finished;
+  p.then((v) => (first = v));
+  await advance(120, 16);
+  assert.strictEqual(first, 'pending');
+  let frames = 0;
+  while (dones === 0 && frames++ < 400) await advance(16, 16);
+  assert.strictEqual(dones, 1);
+  assert.strictEqual(first, true, 'the first run ended: its promise resolved');
+  assert.strictEqual(s.running, true, 'done() started a second run');
+  assert.notStrictEqual(s.finished, p);
+  assert.strictEqual(Anim.activeCount(), 1);
+  assert.strictEqual(await Promise.race([s.finished, advance(4000, 16).then(() => 'timeout')]), true);
+  assert.strictEqual(dones, 2);
+  assert.strictEqual(s.value, 20);
+  assert.strictEqual(Anim.activeCount(), 0);
+});
+
+test('spring: non-finite from / to / velocity / targets never reach update()', async () => {
+  const seen = [];
+  const push = (v, vel) => {
+    if (typeof v === 'number') seen.push(v, vel);
+    else for (const k of Object.keys(v)) seen.push(v[k], vel[k]);
+  };
+  const a = Anim.spring({ from: 0, to: 50, velocity: -Infinity, update: push });
+  const b = Anim.spring({ from: NaN, to: 50, velocity: NaN, update: push });
+  const c = Anim.spring({ from: { x: 0, y: NaN }, to: { x: 30, y: 5, z: Infinity }, velocity: { x: Infinity }, update: push });
+  const d = Anim.spring({ from: 0, to: 10, velocity: 1e300, stiffness: 1e6, update: push });
+  await advance(64, 16);
+  a.setTarget(Infinity);
+  a.setTarget(NaN);
+  a.nudge(Infinity);
+  c.setTarget({ x: NaN, y: -Infinity });
+  c.nudge({ x: NaN });
+  await advance(3000, 16);
+  assert.ok(seen.every(Number.isFinite), 'non-finite value handed to update');
+  for (const h of [a, b, c, d]) assert.strictEqual(h.running, false);
+  assert.strictEqual(a.value, 50);
+  assert.strictEqual(b.value, 50);
+  assert.deepStrictEqual(c.value, { x: 30, y: 5 });
+  assert.strictEqual(d.value, 10);
 });
 
 test('spring: nudge kicks a resting spring; finish() snaps; cancel() freezes', async () => {
@@ -999,8 +1072,8 @@ test('ease: every curve starts at 0 and ends at 1; shapes are sane', () => {
   assert.deepStrictEqual(Object.keys(Anim.ease).sort(), names.slice().sort());
   for (const name of names) {
     const fn = Anim.ease[name];
-    near(fn(0), 0, 1e-9, name + '(0)');
-    near(fn(1), 1, 1e-9, name + '(1)');
+    assert.ok(Object.is(fn(0), 0), name + '(0) must be exactly 0 (and not -0), got ' + fn(0));
+    assert.strictEqual(fn(1), 1, name + '(1) must be exactly 1');
     for (let t = 0; t <= 1; t += 0.01) assert.ok(Number.isFinite(fn(t)), `${name}(${t}) is finite`);
   }
   // monotonic curves
@@ -1076,16 +1149,20 @@ test('lerp / clamp / mapRange', () => {
   assert.strictEqual(Anim.mapRange(3, 4, 4, 7, 9), 7, 'an empty input range does not divide by zero');
 });
 
-test('arc(): exact end points, lift raises the middle, side bows it sideways, shared output object', () => {
+test('arc(): exact end points, lift raises the middle, side bows it sideways, a new point per call', () => {
   const path = Anim.arc({ x: 100, y: 400 }, { x: 500, y: 400 }, { lift: 80 });
-  assert.deepStrictEqual(Object.assign({}, path(0)), { x: 100, y: 400 });
-  assert.deepStrictEqual(Object.assign({}, path(1)), { x: 500, y: 400 });
+  // two samples held at the same time must stay independent (callers compare points to get a heading)
+  const start = path(0);
+  const end = path(1);
+  assert.deepStrictEqual(start, { x: 100, y: 400 });
+  assert.deepStrictEqual(end, { x: 500, y: 400 });
   const mid = path(0.5);
   near(mid.x, 300, 1e-9);
   near(mid.y, 320, 1e-9, 'the midpoint is lifted by exactly `lift`');
-  assert.strictEqual(path(0.2), path(0.8), 'one shared object by default');
+  assert.notStrictEqual(path(0.2), path(0.8), 'a new object per call');
+  assert.deepStrictEqual(start, { x: 100, y: 400 }, 'earlier results are not overwritten');
   const own = {};
-  assert.strictEqual(path(0.3, own), own);
+  assert.strictEqual(path(0.3, own), own, '`out` is filled and returned (allocation-free use)');
   assert.notStrictEqual(own, path(0.3));
 
   // side: travelling right, positive side bows towards the bottom of the screen (the traveller's right)
@@ -1101,7 +1178,7 @@ test('arc(): exact end points, lift raises the middle, side bows it sideways, sh
   near(Anim.arc({ x: 0, y: 0 }, { x: 5000, y: 0 })(0.5).y, -140, 1e-9);
   // zero-length paths and overshoot are fine
   const still = Anim.arc({ x: 7, y: 9 }, { x: 7, y: 9 });
-  assert.deepStrictEqual(Object.assign({}, still(0.5)), { x: 7, y: 9 });
+  assert.deepStrictEqual(still(0.5), { x: 7, y: 9 });
   const over = path(1.1);
   assert.ok(over.x > 500 && Number.isFinite(over.y));
   // direction of travel

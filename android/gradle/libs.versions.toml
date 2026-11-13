@@ -8,11 +8,14 @@ androidx-activity = "1.13.0"
 # androidx.core: 1.19+ requires compileSdk 37 and AGP 9.1+.
 androidx-core = "1.18.0"
 androidx-webkit = "1.18.0"
+# Unit tests of the shell's pure logic (app/src/test). Plain JUnit 4, JVM only.
+junit = "4.13.2"
 
 [libraries]
 androidx-activity = { module = "androidx.activity:activity", version.ref = "androidx-activity" }
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "androidx-core" }
 androidx-webkit = { module = "androidx.webkit:webkit", version.ref = "androidx-webkit" }
+junit = { module = "junit:junit", version.ref = "junit" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
