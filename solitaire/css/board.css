@@ -46,6 +46,34 @@
   to { opacity: 1; }
 }
 
+/*
+ * "No": the whole table gives a small shudder (Board.nudgeStock — nothing to suggest). A transform on the two
+ * layers, so the compositor moves everything at once and no card is touched. Two names for the same animation:
+ * swapping the class restarts it without a forced reflow.
+ */
+.cards.is-nope,
+.piles.is-nope {
+  animation: board-nope 360ms ease-out both;
+}
+.cards.is-nope-b,
+.piles.is-nope-b {
+  animation: board-nope-b 360ms ease-out both;
+}
+@keyframes board-nope {
+  0% { transform: translate3d(0, 0, 0); }
+  18% { transform: translate3d(calc(var(--card-w) * -0.07), 0, 0); }
+  42% { transform: translate3d(calc(var(--card-w) * 0.055), 0, 0); }
+  66% { transform: translate3d(calc(var(--card-w) * -0.03), 0, 0); }
+  100% { transform: translate3d(0, 0, 0); }
+}
+@keyframes board-nope-b {
+  0% { transform: translate3d(0, 0, 0); }
+  18% { transform: translate3d(calc(var(--card-w) * -0.07), 0, 0); }
+  42% { transform: translate3d(calc(var(--card-w) * 0.055), 0, 0); }
+  66% { transform: translate3d(calc(var(--card-w) * -0.03), 0, 0); }
+  100% { transform: translate3d(0, 0, 0); }
+}
+
 /* ------------------------------------------------------------------ pile slots */
 .pile {
   position: absolute;
@@ -172,6 +200,24 @@
   100% { opacity: 0; transform: scale(1.32); }
 }
 
+/* "nothing to suggest": a red outline on the stock for a moment (static — also the reduced-motion cue) */
+.pile--stock.is-refusing {
+  box-shadow:
+    inset 0 0 0 max(2px, calc(var(--card-w) * 0.035)) #ff9a9a,
+    0 0 calc(var(--card-w) * 0.2) calc(var(--card-w) * 0.05) rgba(255, 120, 120, 0.45);
+}
+.pile--stock.is-refusing .pile__mark {
+  opacity: 0.9;
+  color: #ff9a9a;
+}
+
+/* a completed foundation wears a gold crown for a moment (static — also the reduced-motion cue) */
+.pile--foundation.is-crowned {
+  box-shadow:
+    0 0 0 max(2px, calc(var(--card-w) * 0.05)) var(--gold),
+    0 0 calc(var(--card-w) * 0.34) calc(var(--card-w) * 0.12) rgba(243, 201, 105, 0.6);
+}
+
 /* the stock asks for a tap (nothing else can move) */
 .pile--stock.is-inviting .pile__mark {
   animation: board-invite 1400ms ease-in-out infinite;
@@ -204,7 +250,22 @@
 }
 
 
-/* The top card of the stock asks for a tap: a slow gold breath around its back (opacity only). */
+/*
+ * The top card of the stock asks for a tap: it breathes — a slow gold glow around its back (opacity) and the
+ * faintest swell (the `scale` property of an inner box: the board's `transform` on .card and the tilt
+ * transform of cards.css are both left alone, and the compositor runs it without any style work).
+ */
+.card.is-inviting:not(.is-hint):not(.is-lifted) .card__tilt {
+  animation: board-breathe 3400ms ease-in-out infinite;
+}
+@keyframes board-breathe {
+  0%, 100% { scale: 1; }
+  50% { scale: 1.035; }
+}
+:root[data-effects="low"] .card.is-inviting .card__tilt {
+  animation: none;
+}
+
 .card.is-inviting:not(.is-hint) .card__back::before {
   content: "";
   position: absolute;
@@ -274,14 +335,37 @@
   opacity: 1;
 }
 
-/* hint ghost: a translucent copy of the card that glides to the suggested pile and back */
+/*
+ * Hint ghost: a translucent copy of the suggested card (and the run on it) that glides to the pile it could
+ * go to and dissolves there. One box that carries the cards; the board animates its transform and opacity.
+ */
 .board-ghost {
-  opacity: 0.55;
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--card-w);
+  height: var(--card-h);
+  opacity: 0;
   pointer-events: none;
   z-index: 4;
+  will-change: transform, opacity;
+  transform-origin: 50% 35%;
 }
-.board-ghost .card__shadow {
+.board-ghost .card__shadow,
+.board-ghost .card__glare,
+.board-ghost .card__back {
   display: none;
+}
+/* a soft gold halo so the ghost reads as "an idea", not as a card that moved */
+.board-ghost::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--card-radius);
+  box-shadow:
+    0 0 0 max(1px, calc(var(--card-w) * 0.02)) rgba(243, 201, 105, 0.85),
+    0 0 calc(var(--card-w) * 0.3) calc(var(--card-w) * 0.06) rgba(243, 201, 105, 0.5);
+  pointer-events: none;
 }
 
 /* ------------------------------------------------------------------ low effects quality */

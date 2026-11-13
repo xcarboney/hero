@@ -191,32 +191,56 @@
     drawGap: 85,
     recycleMs: 300,
     recycleSpan: 380, // the whole cascade launches within this long
-    // ---- drag
+    // ---- press + drag ("stiff paper": quick, well damped, small angles)
+    pressScale: 0.955, // finger down: the card is pushed into the felt before anything else happens
+    pressMs: 90,
     dragScale: 1.07,
-    dragLag: 0.045, // s: time constant of each trailing card
+    dragLiftMs: 170,
+    dragLag: 0.03, // s: time constant of the first trailing card…
+    dragLagGrow: 0.22, // …and how much softer each further card of the run is
     dragStretchX: 0.4, // how far a trailing card may fall behind its neighbour / card width
     dragStretchY: 0.26, // … / card height
-    tiltZ: 0.007, // deg per px/s
-    tiltY: 0.016,
-    tiltX: 0.014,
-    dropStiffness: 330,
-    dropDamping: 25,
+    tiltK: 320, // tilt spring (per s²) — critically-ish damped: it leans into the motion and comes straight back
+    tiltC: 27,
+    tiltZ: 0.0055, // deg per px/s
+    tiltY: 0.012,
+    tiltX: 0.011,
+    tiltMaxZ: 8, // clamps (deg)
+    tiltMaxY: 14,
+    tiltMaxX: 12,
+    dropStiffness: 620, // the magnetic snap onto a legal pile
+    dropDamping: 36,
+    dropRunSoften: 46, // each further card of a dropped run lands this much softer (stiffness)
+    returnStiffness: 300, // a cancelled drag going home
+    returnDamping: 27,
     // ---- reveal
     revealMs: 320,
     revealDelay: 110,
     revealHop: 0.13, // card heights
-    // ---- deal
+    // ---- new game: gather, shuffle, deal (about 2.5 s together at speed 1)
     deckScale: 1.3,
-    gatherMs: 400,
-    gatherSpan: 300,
-    dealMs: 400,
-    dealGap: 38,
+    gatherMs: 330, // flight of the farthest card (nearer ones are quicker)
+    gatherSpan: 170, // the sweep goes round the table within this long
+    cutMs: 180,
+    riffleGap: 5.4, // ms between two cards falling
+    riffleMs: 135, // one card's fall
+    squareMs: 190,
+    dealMs: 330, // + distance (see deal())
+    dealGap: 30,
     dealAhead: 5, // cards kept rendered on top of the deck while dealing
+    dealFlipMs: 270,
     // ---- glide (layout changes, neighbours)
     glideStiffness: 230,
     glideDamping: 27,
     // ---- hint
-    hintMs: 2200,
+    hintMs: 2200, // lifetime of the static cue (reduced motion); the animated hint lasts two ghost passes
+    hintPassMs: 780,
+    hintGhostMax: 6, // cards of a run that get a ghost
+    // ---- hover (fine pointers only)
+    hoverTilt: 9, // deg at the edge of the card
+    hoverGlare: 0.42,
+    hoverLift: 0.3,
+    hoverScale: 1.035,
   };
 
   // ------------------------------------------------------------------ module state
@@ -243,8 +267,11 @@
   let idleFrames = 0;
 
   let drag = null; // see dragStart()
-  let pressed = null;
+  let pressed = null; // { sprites } while a finger rests on a card (see press())
+  let hover = null; // { s, px, py, rx, ry, go } while a fine pointer rests on a top card (see hoverAt())
   let hintState = null;
+  let lite = false; // the device is struggling (or effects are 'low'): transform-only choreography, fewer particles
+  let nopeFlip = false;
   let pulseFlip = false;
   let resizeObserver = null;
   let inviteOn = false;
@@ -261,8 +288,27 @@
     const u = 1 - t;
     return 1 - u * u * u;
   }
+  function outQuart(t) {
+    const u = 1 - t;
+    return 1 - u * u * u * u;
+  }
+  function outBack(t) {
+    const c = 1.70158;
+    const u = t - 1;
+    return 1 + (c + 1) * u * u * u + c * u * u;
+  }
   function inOutSine(t) {
     return -(Math.cos(PI * t) - 1) * 0.5;
+  }
+  function inOutCubic(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+  /** Maps an angle in degrees into (-180, 180]. */
+  function wrap180(a) {
+    a = a % 360;
+    if (a > 180) a -= 360;
+    else if (a <= -180) a += 360;
+    return a;
   }
   function A() {
     return SOL.Anim;
@@ -431,13 +477,16 @@
       const fy1 = tracking ? s.ty : o.y;
       const dist = Math.hypot(fx1 - x0, fy1 - y0);
       const duration = o.duration !== undefined ? o.duration : flightMs(dist);
-      const rot0 = s.rot;
-      const rx0 = s.rx;
-      const ry0 = s.ry;
+      // (angles left over from a 3D show unwind the short way round)
+      const rot0 = (s.rot = wrap180(s.rot));
+      const rx0 = (s.rx = wrap180(s.rx));
+      const ry0 = (s.ry = wrap180(s.ry));
       const sc0 = s.scale;
       const lift0 = s.lift;
       const flip0 = s.flip;
       const rot1 = o.rot || 0;
+      const rx1 = o.rx || 0;
+      const ry1 = o.ry || 0;
       const sc1 = o.scale === undefined ? 1 : o.scale;
       const lift1 = o.lift || 0;
       const flip1 = o.flip === undefined ? (tracking ? (s.faceUp ? 0 : 180) : flip0) : o.flip;
@@ -446,6 +495,9 @@
       const peakLift = o.peakLift === undefined ? 0.75 : o.peakLift;
       const peakScale = o.peakScale === undefined ? 0.07 : o.peakScale;
       const spin = o.spin || 0;
+      const turns = (o.turns || 0) * 360; // whole in-plane turns: the card ends looking exactly as without them
+      const ease = o.ease || outCubic;
+      const ownsFlip = flip1 !== flip0;
       const arc = o.arc || 0;
       const side = o.side || 0;
       // sideways bow: along the normal to the right of the direction of travel
@@ -477,7 +529,7 @@
             s.z = o.z !== undefined ? o.z : nextFlyZ();
             if (o.onStart) o.onStart(s);
           }
-          const e = outCubic(t);
+          const e = ease(t);
           const p = e + over * t * t * t * t * (1 - t) * 12.2; // a little past the target, then back
           const bow = 4 * p * (1 - p);
           const x1 = tracking ? s.tx : fx1;
@@ -485,12 +537,12 @@
           s.x = x0 + (x1 - x0) * p + nx * side * bow;
           s.y = y0 + (y1 - y0) * p + ny * side * bow - arc * bow;
           const bell = Math.sin(PI * t);
-          s.rot = rot0 + (rot1 - rot0) * e + spin * bell;
-          s.rx = rx0 * (1 - e);
-          s.ry = ry0 * (1 - e);
+          s.rot = rot0 + (rot1 - rot0) * e + spin * bell + turns * e;
+          s.rx = rx0 + (rx1 - rx0) * e;
+          s.ry = ry0 + (ry1 - ry0) * e;
           s.scale = sc0 + (sc1 - sc0) * e + peakScale * bell;
           s.lift = clamp(lift0 + (lift1 - lift0) * e + peakLift * bell, 0, 1);
-          if (flip1 !== flip0) s.flip = flip0 + (flip1 - flip0) * inOutSine(clamp((t - fa) / (fb - fa), 0, 1));
+          if (ownsFlip) s.flip = flip0 + (flip1 - flip0) * inOutSine(clamp((t - fa) / (fb - fa), 0, 1));
           if (tracking && L) {
             // In-game flights stay on the table: a bowed, scaled-up card must not be cut by the screen edge
             // or slide under the HUD.
@@ -515,11 +567,12 @@
           s.x = tracking ? s.tx : fx1;
           s.y = tracking ? s.ty : fy1;
           s.rot = rot1;
-          s.rx = 0;
-          s.ry = 0;
+          s.rx = rx1;
+          s.ry = ry1;
           s.scale = sc1;
           s.lift = lift1;
-          s.flip = flip1;
+          // (a flight that does not turn the card leaves the face to whoever is turning it — see deal())
+          if (ownsFlip) s.flip = flip1;
           touch(s);
           if (o.onLand) o.onLand(s);
           s._settled();
@@ -631,6 +684,7 @@
       s.flipMode = o.mode === SPIN ? SPIN : PROP;
       s.dflip = deg;
       let started = false;
+      let air = false; // the hop also lifts the card — unless a flight or a pose owns lift / scale meanwhile
       const h = A().tween({
         duration: o.duration === undefined ? TUNE.revealMs : o.duration,
         delay: o.delay || 0,
@@ -639,13 +693,14 @@
           if (s.hFlip !== h) return;
           if (!started) {
             started = true;
+            air = !!hop && !s.hFlight && !s.hPose && !s.held;
             if (o.onStart) o.onStart(s);
           }
           s.flip = flip0 + (deg - flip0) * inOutSine(t);
           if (hop) {
             const bell = Math.sin(PI * t);
             if (!s.hOff) s.oy = -hop * bell;
-            if (!s.hPose && !s.held) {
+            if (air && !s.hFlight && !s.hPose && !s.held) {
               s.lift = 0.55 * bell;
               s.scale = 1 + 0.05 * bell;
             }
@@ -658,7 +713,7 @@
           s.flip = deg;
           if (hop) {
             if (!s.hOff) s.oy = 0;
-            if (!s.hPose && !s.held) {
+            if (air && !s.hFlight && !s.hPose && !s.held) {
               s.lift = 0;
               s.scale = 1;
             }
@@ -700,6 +755,48 @@
         },
       });
       s.hOff = h;
+      return h;
+    }
+
+    /**
+     * A little performance in place: fn(t, sprite) writes any of rot / rx / ry / scale / lift for t = 0..1 and
+     * must bring them back to rest by t = 1 (they are forced to rest when it ends). Runs in the pose slot, so
+     * it is cancelled by anything that takes the card (a flight, a drag, another pose).
+     */
+    act(fn, o) {
+      o = o || EMPTY;
+      const s = this;
+      if (s.hPose) {
+        const p = s.hPose;
+        s.hPose = null;
+        p.cancel();
+      }
+      s.cover(false);
+      const h = A().tween({
+        duration: o.duration === undefined ? 420 : o.duration,
+        delay: o.delay || 0,
+        ease: 'linear',
+        update: function (t) {
+          if (s.hPose !== h) return;
+          fn(t, s);
+          s.lift = clamp(s.lift, 0, 1);
+          touch(s);
+        },
+        done: function () {
+          if (s.hPose !== h) return;
+          s.hPose = null;
+          if (!s.held) {
+            s.rot = 0;
+            s.rx = 0;
+            s.ry = 0;
+            s.scale = 1;
+            s.lift = 0;
+          }
+          touch(s);
+          s._settled();
+        },
+      });
+      s.hPose = h;
       return h;
     }
 
@@ -899,6 +996,7 @@
 
   function tick(dt) {
     if (drag && !drag.released) dragFrame(dt);
+    if (hover) hoverFrame(dt);
     if (dirty.length !== 0) {
       idleFrames = 0;
       flush();
@@ -1592,7 +1690,10 @@
     });
   }
 
-  /** A card arrived on its foundation: slot pulse, particles, pitch, haptic. */
+  /**
+   * A card arrived on its foundation: slot pulse, particles in the suit's colour, a note that climbs with the
+   * rank, a haptic. `quiet` (auto-complete, where a card lands every few frames): fewer particles.
+   */
   function foundationArrive(s, o) {
     const suit = suitOf(s.id);
     const rank = rankOf(s.id);
@@ -1604,41 +1705,102 @@
       /* ignore */
     }
     haptic(rank === 13 ? 'win' : 'success');
+    if (rank === 13) suitComplete(s);
     const f = fx();
     if (!f || !L) return;
     const w = L.cardW;
     const cx = L.left + s.tx + w / 2;
     const cy = L.top + s.ty + L.cardH / 2;
-    f.ring(cx, cy, { color: SUIT_GLOW[suit], radius: w * 1.05, width: Math.max(2, w * 0.035), duration: 460 });
+    if (!quiet) {
+      f.ring(cx, cy, { color: SUIT_GLOW[suit], radius: w * 1.05, width: Math.max(2, w * 0.035), duration: 460 });
+    }
     f.burst(cx, cy, {
       kind: 'suit',
       suit: suit,
-      count: quiet ? 5 : 9,
+      count: quiet ? (lite ? 2 : 4) : 9,
       size: clamp(w * 0.11, 5, 13),
       speed: w * 3.6,
       gravity: w * 8,
     });
-    f.burst(cx, cy, { kind: 'spark', count: quiet ? 6 : 12, speed: w * 4.4, size: clamp(w * 0.035, 1.6, 3.2), gravity: w * 7 });
-    if (rank === 13) {
-      f.shimmer({ x: L.left + s.tx, y: L.top + s.ty, width: w, height: L.cardH }, { radius: w * 0.075, duration: 900 });
-      f.burst(cx, cy, { kind: 'star', count: 14, speed: w * 3, size: clamp(w * 0.1, 4, 10) });
+    if (!quiet || !lite) {
+      f.burst(cx, cy, { kind: 'spark', count: quiet ? 5 : 12, speed: w * 4.4, size: clamp(w * 0.035, 1.6, 3.2), gravity: w * 7 });
     }
   }
 
-  /** The card a run lands on gives a little. */
+  /** The cards a run lands on give a little: the one right under it most, the next two less, a beat later. */
   function bump(pileId, belowIndex) {
     if (!state || belowIndex < 0 || reduced()) return;
-    const id = state.piles[pileId][belowIndex];
-    if (id === undefined) return;
-    const s = sprites[id];
-    if (s.held || s.hFlight || s.hOff) return;
-    const amp = clamp(L.cardH * 0.022, 1, 3);
-    s.wobble(
-      function (t, sp) {
-        sp.oy = amp * Math.sin(PI * t) * (1 - t);
-      },
-      { duration: 200 }
-    );
+    const arr = state.piles[pileId];
+    if (!arr) return;
+    const amp = clamp(L.cardH * 0.024, 1, 3.2);
+    for (let k = 0; k < 3; k++) {
+      const id = arr[belowIndex - k];
+      if (id === undefined) break;
+      const s = sprites[id];
+      if (s.held || s.busy() || s.covered) continue;
+      const a = amp * (1 - k * 0.3);
+      s.wobble(
+        function (t, sp) {
+          sp.oy = a * Math.sin(PI * t) * (1 - t);
+        },
+        { duration: 210, delay: k * 18 }
+      );
+    }
+  }
+
+  /** A run landed on a column: the top cards of the columns next to it lean away for a moment. */
+  function ripple(pileId) {
+    if (!state || reduced() || pileId.charAt(0) !== 't') return;
+    const c = Number(pileId.charAt(1));
+    const amp = clamp(L.cardW * 0.028, 1, 2.6);
+    for (let d = -1; d <= 1; d += 2) {
+      const arr = state.piles['t' + (c + d)];
+      if (!arr || arr.length === 0) continue;
+      const s = sprites[arr[arr.length - 1]];
+      if (s.held || s.busy()) continue;
+      s.wobble(
+        function (t, sp) {
+          sp.ox = d * amp * Math.sin(PI * t) * (1 - t);
+        },
+        { duration: 240, delay: 40 }
+      );
+    }
+  }
+
+  /**
+   * A foundation is complete (its King just arrived): the stack takes a bow. A sweep of light across it, a
+   * wide gold ring, stars — and the King nods in 3D (top edge towards the player, back, settle).
+   */
+  function suitComplete(s) {
+    const el = pileEls[s.pile];
+    if (el) {
+      // a static gold crown on the slot for a moment: the cue that needs no motion
+      el.classList.add('is-crowned');
+      root.setTimeout(function () {
+        el.classList.remove('is-crowned');
+      }, 900);
+    }
+    if (reduced() || !L) return;
+    if (!s.held && !s.hFlight) {
+      s.act(
+        function (t, sp) {
+          // down-up-settle: a damped nod
+          const env = Math.sin(PI * Math.min(1, t * 1.15)) * (1 - t);
+          sp.rx = -26 * Math.sin(t * PI * 2.2) * (1 - t);
+          sp.scale = 1 + 0.16 * env;
+          sp.lift = lite ? 0 : 0.7 * Math.sin(PI * t);
+        },
+        { duration: 620 }
+      );
+    }
+    const f = fx();
+    if (!f) return;
+    const w = L.cardW;
+    const cx = L.left + s.tx + w / 2;
+    const cy = L.top + s.ty + L.cardH / 2;
+    f.shimmer({ x: L.left + s.tx, y: L.top + s.ty, width: w, height: L.cardH }, { radius: w * 0.075, duration: 900 });
+    f.ring(cx, cy, { color: GOLD, radius: w * 1.9, width: Math.max(2, w * 0.05), duration: 640 });
+    f.burst(cx, cy, { kind: 'star', count: lite ? 8 : 16, speed: w * 3.4, size: clamp(w * 0.1, 4, 10) });
   }
 
   function shakeSprite(s, delay, strength) {
@@ -1790,12 +1952,14 @@
         s.dx = s.tx;
         s.dy = s.ty;
         s.dflip = s.faceUp ? 0 : 180;
+        // The magnetic snap: a stiff spring pulls the card straight onto its place (the hand's velocity is
+        // mostly dropped — the pile takes over), each further card of a run a touch softer.
         s.springTo(s.tx, s.ty, {
-          stiffness: Math.max(170, TUNE.dropStiffness - i * 26),
+          stiffness: Math.max(240, TUNE.dropStiffness - i * TUNE.dropRunSoften),
           damping: TUNE.dropDamping,
-          velocity: { x: dropped.vx, y: dropped.vy },
+          velocity: { x: dropped.vx * 0.35, y: dropped.vy * 0.35 },
         });
-        s.poseTo({ rot: 0, rx: 0, ry: 0, scale: 1, lift: 0 }, { duration: 230 + i * 20, ease: 'outCubic' });
+        s.poseTo({ rot: 0, rx: 0, ry: 0, scale: 1, lift: 0 }, { duration: 170 + i * 16, ease: 'outCubic' });
         touch(s);
       }
       sfx('place', { pan: panOf(lead.tx) });
@@ -1803,11 +1967,13 @@
       else {
         haptic('thud');
         bump(toPile, lead.index - 1);
+        ripple(toPile);
       }
       if (delta) scorePop(lead.tx, lead.ty, delta);
     } else {
       const dist = Math.hypot(lead.tx - lead.x, lead.ty - lead.y);
-      const baseMs = (auto ? clamp(flightMs(dist) * 0.82, 220, 400) : flightMs(dist) * (toFoundation ? 1.12 : 1)) * tempo;
+      const step = o.step || 0;
+      const baseMs = (auto ? clamp(flightMs(dist) * 0.95, 280, 440) : flightMs(dist) * (toFoundation ? 1.12 : 1)) * tempo;
       const want = L.cardH * (toFoundation ? TUNE.arcFoundation : TUNE.arc) * clamp(dist / (L.cardW * 3), 0.35, 1);
       const arc = arcFor(lead, want);
       // foundation flights also bow sideways — always towards the middle of the table, never off its edge
@@ -1816,8 +1982,10 @@
         const nx = -(lead.ty - lead.y) / dist; // x of the normal to the right of the direction of travel
         const inward = (lead.x + lead.tx) / 2 < (L.w - L.cardW) / 2 ? 1 : -1;
         side = (nx * inward >= 0 ? 1 : -1) * Math.min(L.cardW * 0.5, dist * 0.12) * Math.min(1, Math.abs(nx) * 3);
+        // the auto-complete cascade braids: successive cards take a wider, then a tighter curve
+        if (auto) side *= 1 + (step % 3) * 0.7;
       }
-      const spin = clamp((lead.tx - lead.x) / (L.cardW * 4), -1, 1) * (toFoundation ? 9 : 5);
+      const spin = clamp((lead.tx - lead.x) / (L.cardW * 4), -1, 1) * (toFoundation ? 9 : 5) + (auto ? (step % 2 ? 10 : -10) : 0);
       for (let i = 0; i < n; i++) {
         const s = sprites[transfers[i].card];
         const isLead = i === 0;
@@ -1827,10 +1995,10 @@
           arc: arc,
           side: side,
           spin: spin,
-          peakLift: 0.9,
+          peakLift: auto && lite ? 0 : 0.9,
           liftSteps: auto ? 3 : 0,
-          peakScale: toFoundation ? 0.16 : 0.09,
-          trail: auto ? SUIT_GLOW[suitOf(s.id)] : null,
+          peakScale: toFoundation ? (auto ? 0.22 : 0.16) : 0.09,
+          trail: auto && !lite ? SUIT_GLOW[suitOf(s.id)] : null,
           onStart:
             isLead && !undo && !auto
               ? function (sp) {
@@ -1852,6 +2020,7 @@
                     sfx('place', { pan: panOf(sp.tx) });
                     haptic('thud');
                     bump(sp.pile, sp.index - 1);
+                    ripple(sp.pile);
                     if (delta) scorePop(sp.tx, sp.ty, delta);
                   }
                 }
@@ -1899,7 +2068,11 @@
     return promise;
   }
 
-  /** Every card sweeps into one face-down deck in the middle of the table. */
+  /**
+   * The old game is swept up: one pass round the table (left, top, right — like an arm collecting the cards),
+   * every card curling in towards the deck spot on the same side, turning face-down on the way. They all
+   * arrive within a few frames of each other, so the deck forms with one beat.
+   */
   function gather() {
     if (!inited) return Promise.resolve();
     takeDrag();
@@ -1920,39 +2093,77 @@
       order.length = 0;
       for (let i = 0; i < 52; i++) order.push(i);
     }
+    const sizes = Object.create(null);
+    if (state) for (let p = 0; p < PILE_IDS.length; p++) sizes[PILE_IDS[p]] = state.piles[PILE_IDS[p]].length;
     deckMode = true;
     state = null;
     inviteOn = false;
     refreshInvite();
     if (pileEls.stock) pileEls.stock.classList.remove('is-stacked', 'is-spent');
-    for (let k = 0; k < 52; k++) sprites[order[k]].index = k;
+    // where each card is now (retarget overwrites the logical place)
+    const from = [];
+    for (let k = 0; k < 52; k++) {
+      const s = sprites[order[k]];
+      from.push({ fromTop: (sizes[s.pile] || 1) - 1 - s.index, covered: s.covered });
+      s.index = k;
+    }
     retarget();
-    const gap = TUNE.gatherSpan / 52;
     const scale = L.deck.scale;
-    sfx('whoosh', { duration: TUNE.gatherSpan + TUNE.gatherMs * 0.6 });
+    const far = Math.max(1, Math.hypot(L.w, L.h) * 0.6);
+    const total = TUNE.gatherSpan + TUNE.gatherMs;
+    sfx('whoosh', { duration: total * 0.9 });
     const handles = [];
+    const late = [];
     for (let k = 0; k < 52; k++) {
       const s = sprites[order[k]];
       s.held = 'deck';
+      s.soft = false;
       s.dx = s.tx;
       s.dy = s.ty;
       s.dflip = 180;
-      const dist = Math.hypot(s.tx - s.x, s.ty - s.y);
+      if (from[k].covered && !s.busy()) {
+        // Buried in the stock / waste / a foundation: nobody sees it leave. It waits (not rendered) under
+        // the deck spot and joins the deck when the visible cards land on it.
+        s.stop();
+        s.x = s.tx;
+        s.y = s.ty;
+        s.ox = 0;
+        s.oy = 0;
+        s.rot = 0;
+        s.rx = 0;
+        s.ry = 0;
+        s.scale = scale;
+        s.lift = 0;
+        s.flip = 180;
+        s.z = s.tz;
+        touch(s);
+        late.push(s);
+        continue;
+      }
+      const ddx = s.tx - s.x;
+      const ddy = s.ty - s.y;
+      const dist = Math.hypot(ddx, ddy);
+      // the sweep: cards to the left of the deck go first, then the ones above it, then the right
+      const ang = Math.atan2(-ddy, -ddx); // direction from the deck to the card
+      const sweep = dist < 2 ? 0.5 : clamp(((ang + PI) / PI) % 2, 0, 1); // left 0 … up 0.5 … right 1 (below: 0..1 too)
+      const delay = sweep * TUNE.gatherSpan + Math.min(6, from[k].fromTop) * 9;
       handles.push(
         s.fly({
           x: s.tx,
           y: s.ty,
           flip: 180,
           flipMode: SPIN,
-          flipFrom: 0.05,
-          flipTo: 0.7,
+          flipFrom: 0.02,
+          flipTo: 0.62,
           scale: scale,
-          duration: TUNE.gatherMs,
-          delay: k * gap,
-          arc: Math.min(L.cardH * 0.5, dist * 0.18),
-          spin: ((k % 5) - 2) * 4,
-          peakLift: 0, // 52 cards at once: transform only (no shadow layers, no --lift restyles)
-          peakScale: 0.04,
+          duration: TUNE.gatherMs * (0.62 + 0.38 * clamp(dist / far, 0, 1)),
+          delay: delay,
+          ease: inOutCubic, // gathers speed, then lands softly: it is pulled in, not thrown
+          arc: 0,
+          side: Math.min(L.cardW * 1.5, dist * 0.3), // every card curls the same way round
+          spin: clamp(-ddx / (L.cardW * 3), -1, 1) * 16,
+          peakLift: 0, // dozens of cards at once: transform only (no shadow layers, no --lift restyles)
+          peakScale: 0.05,
           overshoot: 0,
           z: TUNE.flyZ + k,
           onLand: function (sp) {
@@ -1962,14 +2173,34 @@
         }).finished
       );
     }
+    if (late.length) {
+      handles.push(
+        A()
+          .wait(total * 0.82)
+          .then(function () {
+            if (gen !== choreoGen) return;
+            for (let i = 0; i < late.length; i++) if (late[i].held === 'deck') late[i].cover(false);
+          })
+      );
+    }
     return choreo(
       Promise.all(handles).then(function () {
-        if (gen === choreoGen) haptic('thud');
+        if (gen !== choreoGen) return;
+        for (let i = 0; i < 52; i++) if (sprites[i].held === 'deck') sprites[i].cover(false);
+        haptic('thud');
       })
     );
   }
 
-  /** One riffle: the deck splits into two leaning halves, the cards fall together alternately, the deck squares up. */
+  /**
+   * One riffle shuffle:
+   *   cut      the top half lifts off and the two halves swing apart into a V, inner corners together, inner
+   *            edges bowed up towards the player (3D);
+   *   riffle   cards fall alternately from the left and the right half into the middle — each keeps a little of
+   *            its half's angle, so the growing pile shows the two interleaved halves;
+   *   square   both sides are pushed together: the deck is one clean block again, with a tap.
+   * Called again while the controller waits for a seed (winnable deals): the deck simply riffles once more.
+   */
   function shuffle() {
     if (!inited || !deckMode) return Promise.resolve();
     const gen = choreoGen;
@@ -1982,66 +2213,75 @@
       sfx('shuffle');
       return choreo(A().wait(reduced() ? 0 : 200));
     }
-    const half = Math.ceil(deck.length / 2);
+    const n = deck.length;
+    const half = Math.ceil(n / 2);
     const sc = L.deck.scale;
     const w = L.cardW * sc;
-    const spread = Math.min(w * 0.66, Math.max(10, (L.w - w) / 2 - 6));
-    const lean = 9;
-    sfx('shuffle', { duration: 620 });
+    const u = L.cardW / 100;
+    const spread = Math.min(w * 0.6, Math.max(10, (L.w - w) / 2 - 6));
+    const lean = 13; // deg: the V
+    const bow = lite ? 0 : 24; // deg: inner edges up
+    const speed = SOL.Anim.speed || 1;
+    const riffleSpan = (n - 1) * TUNE.riffleGap + TUNE.riffleMs;
 
-    // 1. split
-    const split = [];
-    for (let i = 0; i < deck.length; i++) {
+    // 1. cut — the bottom half slides left, the top half lifts off to the right
+    const cut = [];
+    for (let i = 0; i < n; i++) {
       const s = deck[i];
       const right = i >= half;
       const k = right ? i - half : i;
-      split.push(
+      s.cover(false);
+      cut.push(
         s.fly({
-          x: s.tx + (right ? spread : -spread) + k * 0.12,
-          y: s.ty - k * 0.35 * (L.cardW / 100),
-          rot: right ? -lean : lean,
+          x: s.tx + (right ? spread : -spread) + (right ? -1 : 1) * k * 0.1 * u,
+          y: Math.round(L.deck.y) - k * 0.5 * u + L.cardH * 0.04,
+          rot: right ? lean : -lean,
           scale: sc,
-          duration: 190,
-          delay: k * 1.5,
+          duration: TUNE.cutMs,
+          delay: right ? 0 : 26,
+          ease: inOutCubic,
+          arc: right ? L.cardH * 0.16 : 0,
           peakLift: 0,
-          peakScale: 0,
+          peakScale: right ? 0.05 : 0,
           overshoot: 0,
+          ry: right ? bow : -bow,
           z: s.tz,
         }).finished
       );
     }
+    haptic('tick');
 
     return choreo(
-      Promise.all(split)
+      Promise.all(cut)
         .then(function () {
           if (gen !== choreoGen) return null;
-          // 2. riffle: one card from each half in turn drops into the middle
+          // 2. riffle: one card from each half in turn falls into the middle (bottom cards first)
+          sfx('shuffle', { duration: riffleSpan / speed });
           const order = [];
           for (let k = 0; k < half; k++) {
             order.push(deck[k]);
-            if (half + k < deck.length) order.push(deck[half + k]);
+            if (half + k < n) order.push(deck[half + k]);
           }
+          for (let j = 0; j < order.length; j++) order[j].index = j; // the new deck order
+          retarget();
           const all = [];
           for (let j = 0; j < order.length; j++) {
             const s = order[j];
-            s.index = j; // the new deck order
-          }
-          retarget();
-          for (let j = 0; j < order.length; j++) {
-            const s = order[j];
+            const right = j % 2 === 1;
             s.dx = s.tx;
             s.dy = s.ty;
+            // (fly() eases the bow out: the card springs flat as it leaves the thumb)
             all.push(
               s.fly({
-                x: s.tx,
+                x: s.tx + (right ? 1 : -1) * w * 0.085,
                 y: s.ty,
-                rot: 0,
+                rot: right ? 5.5 : -5.5,
                 scale: sc,
-                duration: 150,
-                delay: j * 6.5,
-                arc: L.cardH * 0.1,
+                duration: TUNE.riffleMs,
+                delay: j * TUNE.riffleGap,
+                arc: L.cardH * 0.07,
                 peakLift: 0,
-                peakScale: 0.03,
+                peakScale: 0.035,
                 overshoot: 0,
                 z: TUNE.flyZ + j,
                 onLand: function (sp) {
@@ -2056,22 +2296,38 @@
         })
         .then(function () {
           if (gen !== choreoGen) return null;
-          // 3. square up: the whole deck gets one firm tap
+          // 3. square up: the two interleaved halves are pushed into one block, which takes a firm tap
           haptic('thud');
           const taps = [];
-          for (let i = 0; i < deck.length; i++) {
+          for (let i = 0; i < n; i++) {
             const s = deck[i];
             if (s.held !== 'deck') continue;
-            s.scale = sc * 1.045;
-            touch(s);
-            taps.push(s.poseTo({ scale: sc, rot: 0 }, { duration: 150, ease: 'outBack' }).finished);
+            taps.push(
+              s.fly({
+                x: s.tx,
+                y: s.ty,
+                rot: 0,
+                scale: sc,
+                duration: TUNE.squareMs,
+                ease: outBack,
+                peakLift: 0,
+                peakScale: 0.05,
+                overshoot: 0,
+                z: s.tz,
+              }).finished
+            );
           }
           return Promise.all(taps);
         })
     );
   }
 
-  /** Deals a fresh state from the deck. Resolves when every card is home. */
+  /**
+   * Deals a fresh state from the deck, the way a dealer flicks cards across a table: each one leaves fast,
+   * turning once in the plane of the table, bows over the felt, slides a little past its place and settles;
+   * the card that ends on top of a column is turned over as it touches down. The rest of the deck is then set
+   * down on the stock. Resolves when every card is home (the last face may still be turning).
+   */
   function deal(next) {
     if (!inited || !next) return Promise.resolve();
     if (!deckMode) {
@@ -2107,6 +2363,7 @@
     for (let i = 0; i < stock.length - TUNE.keepStock; i++) sprites[stock[i]].cover(true);
 
     const speed = SOL.Anim.speed || 1;
+    const far = Math.max(1, L.w * 0.55);
     const dealt = A().stagger(order, TUNE.dealGap, function (id, k) {
       if (gen !== choreoGen) return null;
       if (k + ahead < order.length) sprites[order[k + ahead]].cover(false);
@@ -2114,31 +2371,49 @@
       if (s.held !== 'deck') return null;
       s.held = null;
       const top = s.faceUp;
-      const dist = Math.hypot(s.tx - s.x, s.ty - s.y);
-      return s.fly({
-        duration: TUNE.dealMs,
-        arc: Math.min(L.cardH * 0.55, dist * 0.2),
-        side: (s.tx < s.x ? -1 : 1) * Math.min(L.cardW * 0.4, dist * 0.08),
-        spin: (s.tx < s.x ? -1 : 1) * (10 + (k % 4) * 3),
-        peakLift: 0.9,
+      const ddx = s.tx - s.x;
+      const dist = Math.hypot(ddx, s.ty - s.y);
+      const dir = ddx < 0 ? -1 : 1;
+      const reach = clamp(dist / far, 0, 1);
+      const ms = TUNE.dealMs + 70 * reach;
+      const h = s.fly({
+        duration: ms,
+        ease: outQuart, // thrown: all the speed is at the start
+        arc: Math.min(L.cardH * 0.5, dist * 0.2),
+        side: dir * Math.min(L.cardW * 0.5, dist * 0.1),
+        turns: lite ? 0 : dir, // one full turn in the plane of the table
+        spin: lite ? dir * 14 : 0,
+        peakLift: lite ? 0 : 0.8,
         liftSteps: 3, // ten cards in the air at once: a handful of shadow steps each, not one per frame
-        peakScale: 0.05,
-        flipMode: PROP,
-        flipFrom: 0.42,
-        flipTo: 0.96,
+        peakScale: 0.04,
+        overshoot: L.cardW * 0.2,
+        flip: 180, // lands face-down; the top card of a column is turned by the flipTo below
         onStart: function (sp) {
-          sfx('deal', { pan: panOf(sp.tx), pitch: 0.94 + (k % 7) * 0.02 });
+          sfx('deal', { pan: panOf(sp.tx), pitch: 0.92 + (k % 7) * 0.025 });
         },
-        onLand: top
-          ? function (sp) {
-              haptic('tick');
-              sfx('flip', { pan: panOf(sp.tx), volume: 0.5 });
-            }
-          : null,
-      }).finished;
+        onLand: function (sp) {
+          if (gen !== choreoGen) return;
+          bump(sp.pile, sp.index - 1);
+          if (k % 3 === 0) haptic('tick');
+        },
+      });
+      if (top) {
+        // timed to the landing: the turn starts as the card comes down and ends just after it touched
+        s.flipTo(0, {
+          duration: TUNE.dealFlipMs,
+          delay: ms * 0.7,
+          mode: lite ? SPIN : PROP,
+          hop: L.cardH * 0.1,
+          onStart: function (sp) {
+            sfx('flip', { pan: panOf(sp.tx), volume: 0.6 });
+            haptic('tap');
+          },
+        });
+      }
+      return h.finished;
     });
 
-    // The rest of the deck slides to the stock slot once the last card is on its way.
+    // The rest of the deck is set down on the stock while the last cards are still in the air.
     const lastLaunch = (order.length - 1) * TUNE.dealGap;
     const stockHome = [];
     for (let i = 0; i < stock.length; i++) {
@@ -2148,19 +2423,20 @@
       const dist = Math.hypot(s.tx - s.x, s.ty - s.y);
       stockHome.push(
         s.fly({
-          duration: 420,
-          delay: lastLaunch + 60 + i * 9,
+          duration: 360,
+          delay: Math.max(0, lastLaunch - 110) + i * 4,
           lazy: true, // the covered ones stay unrendered until they take off
-          arc: Math.min(L.cardH * 0.4, dist * 0.12),
+          ease: inOutCubic,
+          arc: Math.min(L.cardH * 0.45, dist * 0.14),
           spin: 0,
           peakLift: 0,
           peakScale: 0,
-          overshoot: L.cardW * 0.05,
+          overshoot: 0,
           z: TUNE.flyZ + 1400 + i,
           onStart:
             i === 0
               ? function () {
-                  sfx('slide', { duration: 380 / speed, pan: panOf(L.piles.stock.x) });
+                  sfx('slide', { duration: 340 / speed, pan: panOf(L.piles.stock.x) });
                 }
               : null,
           onLand:
@@ -2249,41 +2525,171 @@
     return { x: x, y: y, left: x, top: y, right: x + L.cardW, bottom: y + L.cardH, width: L.cardW, height: L.cardH };
   }
 
-  // ------------------------------------------------------------------ press + drag
-  /** Finger down on a card that can move: the faintest lift, so the touch registers before anything happens. */
+  // ------------------------------------------------------------------ press + hover + drag
+  /**
+   * Finger (or button) down on a card that can move: it is pushed into the felt a little — the card and the run
+   * on top of it — so the touch registers before anything else happens. A drag then lifts it out of that
+   * dip; a tap sends it flying from there; a release without either lets it spring back.
+   */
   function press(cardId) {
     unpress();
+    hoverEnd();
     const s = sprites[cardId];
-    if (!s || s.held || s.hFlight || reduced() || deckMode) return;
-    pressed = s;
-    // a (soft) hold: a free sprite would be relaxed back to rest as soon as the little lift ended
-    s.held = 'press';
-    s.soft = true;
-    s.poseTo({ lift: 0.3, scale: 1.025 }, { duration: 110 });
+    if (!s || s.held || s.hFlight || reduced() || deckMode || !state) return;
+    const arr = state.piles[s.pile] || [];
+    const list = [];
+    if (s.pile.charAt(0) === 't') {
+      for (let i = s.index; i < arr.length; i++) {
+        const c = sprites[arr[i]];
+        if (c.held || c.hFlight) break;
+        list.push(c);
+      }
+    } else {
+      list.push(s);
+    }
+    if (list.length === 0) return;
+    pressed = { sprites: list };
+    for (let i = 0; i < list.length; i++) {
+      const c = list[i];
+      // a (soft) hold: a free sprite would be relaxed back to rest as soon as the little dip ended
+      c.held = 'press';
+      c.soft = true;
+      c.poseTo(
+        { scale: TUNE.pressScale + Math.min(0.03, i * 0.006), lift: 0, rot: 0, rx: 0, ry: 0 },
+        { duration: TUNE.pressMs, delay: i * 8 }
+      );
+    }
   }
 
   function unpress() {
-    const s = pressed;
+    const p = pressed;
     pressed = null;
-    if (!s || s.held !== 'press') return;
-    s.held = null;
-    s.soft = false;
-    if (s.lift !== 0 || s.scale !== 1 || s.hPose) s.poseTo({ lift: 0, scale: 1 }, { duration: 140 });
-    else s._settled();
+    if (!p) return;
+    for (let i = 0; i < p.sprites.length; i++) {
+      const s = p.sprites[i];
+      if (s.held !== 'press') continue;
+      s.held = null;
+      s.soft = false;
+      // springs back up with a little bounce
+      if (s.lift !== 0 || s.scale !== 1 || s.hPose) s.poseTo({ lift: 0, scale: 1 }, { duration: 200, ease: 'outBack' });
+      else s._settled();
+    }
   }
 
   /**
-   * Ends every soft hold (press, a hover tilt, …): the game needs its cards. Called before anything that
-   * moves cards. The sprites relax back to rest unless the caller animates them right away.
+   * Ends every soft hold (press, hover tilt, …): the game needs its cards. Called before anything that moves
+   * cards. The sprites relax back to rest unless the caller animates them right away.
    */
   function releaseSoft() {
     pressed = null;
+    hoverEnd(true);
     for (let i = 0; i < 52; i++) {
       const s = sprites[i];
       if (!s.held || !s.soft) continue;
       s.held = null;
       s.soft = false;
       s._settled();
+    }
+  }
+
+  /**
+   * Idle life for fine pointers: the top face-up card under the pointer leans towards it (the corner under
+   * the pointer goes down, as if pressed by a fingertip) and a soft highlight follows the pointer across
+   * its face. SOL.Input calls this on every mouse move; (-1, -1) or leaving the table ends it.
+   * A soft hold: the moment the game needs the card (a move, a drag, a deal) it lets go.
+   */
+  function hoverAt(cx, cy) {
+    if (!inited || !L || !state || deckMode || drag || pressed || reduced() || choreoBusy > 0 || cx < 0) {
+      hoverEnd();
+      return false;
+    }
+    const id = cardAt(cx, cy, 0);
+    const s = id >= 0 ? sprites[id] : null;
+    let ok = !!s && s.faceUp && s.flip === 0 && !s.hFlight && !s.hPos && !s.hFlip && !s.hOff;
+    if (ok && s.held && s.held !== 'hover') ok = false;
+    if (ok && (!hover || hover.s !== s) && s.hPose) ok = false;
+    if (ok) {
+      const arr = state.piles[s.pile];
+      if (!arr || arr[arr.length - 1] !== s.id) ok = false; // only the card on top of a pile
+    }
+    if (!ok) {
+      hoverEnd();
+      return false;
+    }
+    if (!hover || hover.s !== s) {
+      hoverEnd();
+      s.held = 'hover';
+      s.soft = true;
+      s.el.classList.add('is-glare');
+      hover = { s: s, px: 0, py: 0, rx: 0, ry: 0, go: 0, gx: 50, gy: 50, live: true };
+    }
+    hover.px = clamp((cx - L.left - s.x) / L.cardW - 0.5, -0.5, 0.5);
+    hover.py = clamp((cy - L.top - s.y) / L.cardH - 0.5, -0.5, 0.5);
+    hover.live = true;
+    wake();
+    return true;
+  }
+
+  /** One frame of the hover tilt: everything eases towards where the pointer is. */
+  function hoverFrame(dt) {
+    const h = hover;
+    const s = h.s;
+    if (s.held !== 'hover') {
+      hoverEnd(true);
+      return;
+    }
+    if (!h.live) return;
+    const k = 1 - Math.exp(-Math.min(dt, 50) / 70);
+    const trx = -h.py * 2 * TUNE.hoverTilt;
+    const tryy = h.px * 2 * TUNE.hoverTilt;
+    const tgx = 50 + h.px * 90;
+    const tgy = 50 + h.py * 90;
+    h.rx += (trx - h.rx) * k;
+    h.ry += (tryy - h.ry) * k;
+    h.go += (TUNE.hoverGlare - h.go) * k;
+    h.gx += (tgx - h.gx) * k;
+    h.gy += (tgy - h.gy) * k;
+    s.rx = h.rx;
+    s.ry = h.ry;
+    s.lift += (TUNE.hoverLift - s.lift) * k;
+    s.scale += (TUNE.hoverScale - s.scale) * k;
+    touch(s);
+    const st = s.el.style;
+    st.setProperty('--glare-x', r2(h.gx) + '%');
+    st.setProperty('--glare-y', r2(h.gy) + '%');
+    st.setProperty('--glare-o', String(Math.round(h.go * 100) / 100));
+    // close enough: stop writing (the frame subscription may go back to sleep) until the pointer moves again
+    if (Math.abs(trx - h.rx) < 0.05 && Math.abs(tryy - h.ry) < 0.05 && Math.abs(TUNE.hoverGlare - h.go) < 0.01) h.live = false;
+  }
+
+  /** The pointer left the card: it settles flat again. `taken` = the game took the card (its hold is gone). */
+  function hoverEnd(taken) {
+    const h = hover;
+    if (!h) return;
+    hover = null;
+    const s = h.s;
+    const el = s.el;
+    const go = h.go;
+    // the highlight fades with a tween of its own (it is not a sprite value)
+    A().tween({
+      duration: 150,
+      ease: 'linear',
+      update: function (t) {
+        el.style.setProperty('--glare-o', String(Math.round(go * (1 - t) * 100) / 100));
+      },
+      done: function () {
+        if (hover && hover.s === s) return; // hovered again meanwhile
+        el.classList.remove('is-glare');
+        el.style.removeProperty('--glare-o');
+        el.style.removeProperty('--glare-x');
+        el.style.removeProperty('--glare-y');
+      },
+    });
+    if (!taken && s.held === 'hover') {
+      s.held = null;
+      s.soft = false;
+      if (s.rx !== 0 || s.ry !== 0 || s.lift !== 0 || s.scale !== 1) relax(s, 200);
+      else s._settled();
     }
   }
 
@@ -2344,7 +2750,8 @@
       s.held = 'drag';
       s.z = TUNE.dragZ + i;
       s.el.classList.add('is-dragging');
-      s.poseTo({ lift: 1, scale: TUNE.dragScale }, { duration: 150, ease: 'outBack' });
+      // out of the press dip and up, quickly, with a little overshoot: the card is in the hand
+      s.poseTo({ lift: 1, scale: TUNE.dragScale }, { duration: TUNE.dragLiftMs, delay: i * 10, ease: 'outBack' });
       touch(s);
     }
     drag = {
@@ -2404,12 +2811,13 @@
     lead.y = ny;
 
     if (!still && h > 0) {
-      // tilt: a damped spring chasing a target set by the velocity (air resistance, then a little wobble)
-      const K = 150;
-      const C = 13;
-      const tz = clamp(d.vx * TUNE.tiltZ, -11, 11);
-      const tyaw = clamp(d.vx * TUNE.tiltY, -20, 20);
-      const tpitch = clamp(-d.vy * TUNE.tiltX, -16, 16);
+      // tilt: a stiff, well damped spring chasing a target set by the velocity — paper leaning into the air,
+      // proportional to the speed and clamped, straight again the moment the hand stops
+      const K = TUNE.tiltK;
+      const C = TUNE.tiltC;
+      const tz = clamp(d.vx * TUNE.tiltZ, -TUNE.tiltMaxZ, TUNE.tiltMaxZ);
+      const tyaw = clamp(d.vx * TUNE.tiltY, -TUNE.tiltMaxY, TUNE.tiltMaxY);
+      const tpitch = clamp(-d.vy * TUNE.tiltX, -TUNE.tiltMaxX, TUNE.tiltMaxX);
       d.rotV += ((tz - d.rot) * K - d.rotV * C) * h;
       d.rot += d.rotV * h;
       d.ryV += ((tyaw - d.ry) * K - d.ryV * C) * h;
@@ -2426,16 +2834,18 @@
     }
     touch(lead);
 
-    // the rest of the run: each card chases the one below it
+    // the rest of the run: each card chases the one below it — and each is a little softer than the last, so
+    // the tail of a long run swings wider than its head
     const fan = d.fan;
-    const a = still ? 1 : 1 - Math.exp(-h / TUNE.dragLag);
-    const b = still ? 1 : 1 - Math.exp(-h / (TUNE.dragLag * 1.4));
     // …but the run stays a run: however fast the hand moves, neighbours never stretch far apart
     const maxX = L.cardW * TUNE.dragStretchX;
     const maxY = L.cardH * TUNE.dragStretchY;
     for (let i = 1; i < d.sprites.length; i++) {
       const s = d.sprites[i];
       const prev = d.sprites[i - 1];
+      const lag = TUNE.dragLag * (1 + (i - 1) * TUNE.dragLagGrow);
+      const a = still ? 1 : 1 - Math.exp(-h / lag);
+      const b = still ? 1 : 1 - Math.exp(-h / (lag * 1.5));
       s.x = clamp(s.x + (prev.x - s.x) * a, prev.x - maxX, prev.x + maxX);
       s.y = clamp(s.y + (prev.y + fan - s.y) * a, prev.y + fan - maxY, prev.y + fan + maxY);
       s.rot += (prev.rot - s.rot) * b;
@@ -2548,8 +2958,8 @@
         s.dx = s.tx;
         s.dy = s.ty;
         s.springTo(s.tx, s.ty, {
-          stiffness: Math.max(170, TUNE.dropStiffness - 40 - i * 24),
-          damping: TUNE.dropDamping + 2,
+          stiffness: Math.max(170, TUNE.returnStiffness - i * 22),
+          damping: TUNE.returnDamping,
           velocity: { x: d.vx, y: d.vy },
         });
         s.poseTo({ rot: 0, rx: 0, ry: 0, scale: 1, lift: 0 }, { duration: 240 });
@@ -2570,72 +2980,144 @@
     if (!h) return;
     hintState = null;
     if (h.timer) root.clearTimeout(h.timer);
-    for (let i = 0; i < h.els.length; i++) h.els[i].classList.remove('is-hint', 'is-target');
+    for (let i = 0; i < h.els.length; i++) h.els[i].classList.remove('is-hint');
     if (h.tween) h.tween.cancel();
     if (h.ghost && h.ghost.parentNode) h.ghost.parentNode.removeChild(h.ghost);
+    // the lifted cards come back down (unless the game has already taken them)
+    for (let i = 0; i < h.lifted.length; i++) {
+      const s = h.lifted[i];
+      if (s.held !== 'hint') continue;
+      s.held = null;
+      s.soft = false;
+      s._settled();
+    }
+  }
+
+  /** Where a run moved to `pileId` would land (table space). */
+  function landingSpot(pileId) {
+    const arr = state.piles[pileId];
+    const origin = L.piles[pileId];
+    if (pileId.charAt(0) === 't' && arr.length > 0) {
+      const top = sprites[arr[arr.length - 1]];
+      return { x: top.tx, y: top.ty + (top.faceUp ? L.upFan : L.downFan) };
+    }
+    return { x: origin.x, y: origin.y };
   }
 
   /**
-   * Shows a hint: the card (or the stock, for a draw) pulses, the target lights up, and a translucent ghost of
-   * the card glides to the target and back. Seam for the animation director: everything is in this function.
+   * Shows a hint and returns at once (it never blocks input; the next action simply clears it).
+   *   move   the suggested card and the run on it lift; a translucent ghost of them glides along an arc to
+   *          where they would land and dissolves there — twice — while the target card / slot glows.
+   *   draw   the top card of the stock beckons (two small bounces) and its slot rings twice.
+   * Under reduced motion: the gold rings only, for TUNE.hintMs.
    */
   function hint(action) {
     if (!inited || !state || deckMode || !action || !L) return false;
     clearHint();
-    const h = { els: [], timer: 0, tween: null, ghost: null };
+    const h = { els: [], timer: 0, tween: null, ghost: null, lifted: [] };
+    const calm = reduced();
+    const passMs = TUNE.hintPassMs;
     if (action.type === 'draw') {
       const stock = state.piles.stock;
-      const el = stock.length > 0 ? sprites[stock[stock.length - 1]].el : pileEls.stock;
+      const top = stock.length > 0 ? sprites[stock[stock.length - 1]] : null;
+      const el = top ? top.el : pileEls.stock;
       el.classList.add('is-hint');
       h.els.push(el);
+      pulse('stock', GOLD);
+      if (!calm) {
+        if (top && !top.held && !top.busy()) {
+          top.act(
+            function (t, sp) {
+              const w = Math.abs(Math.sin(t * PI * 2)) * (1 - t * 0.35);
+              sp.scale = 1 + 0.1 * w;
+              sp.lift = lite ? 0 : 0.6 * w;
+            },
+            { duration: passMs * 1.1 }
+          );
+        }
+        let second = false;
+        h.tween = A().tween({
+          duration: passMs * 2,
+          ease: 'linear',
+          update: function (t) {
+            if (!second && t >= 0.5) {
+              second = true;
+              pulse('stock', GOLD);
+            }
+          },
+          done: function () {
+            if (hintState === h) clearHint();
+          },
+        });
+      }
     } else if (action.type === 'move') {
       const s = sprites[action.card];
-      if (!s) return false;
+      if (!s || !state.piles[action.to]) return false;
       s.el.classList.add('is-hint');
       h.els.push(s.el);
       const tEl = targetEl(action.to);
-      if (tEl) {
-        tEl.classList.add(tEl.classList.contains('card') ? 'is-target' : 'is-hint');
+      if (tEl && tEl !== s.el) {
+        tEl.classList.add('is-hint');
         h.els.push(tEl);
       }
-      if (!reduced() && overlayEl) {
-        // where the card would land
-        const arr = state.piles[action.to];
-        const origin = L.piles[action.to];
-        let gx = origin.x;
-        let gy = origin.y;
-        if (action.to.charAt(0) === 't' && arr.length > 0) {
-          const topS = sprites[arr[arr.length - 1]];
-          gx = topS.tx;
-          gy = topS.ty + (topS.faceUp ? L.upFan : L.downFan);
+      if (!calm && overlayEl) {
+        let run = [];
+        try {
+          run = E().getRun(state, action.card) || [];
+        } catch (err) {
+          run = [];
         }
-        const ghost = SOL.Cards.create(action.card, { back: s.el.getAttribute('data-back') });
-        ghost.classList.add('board-ghost');
-        ghost.removeAttribute('role');
-        ghost.setAttribute('aria-hidden', 'true');
+        if (run.length === 0) run = [action.card];
+        // ---- the real cards lift
+        for (let i = 0; i < run.length; i++) {
+          const c = sprites[run[i]];
+          if (c.held || c.busy()) continue;
+          c.held = 'hint';
+          c.soft = true;
+          h.lifted.push(c);
+          c.poseTo({ lift: lite ? 0 : 0.7, scale: 1.06 }, { duration: 220, delay: i * 22, ease: 'outBack' });
+        }
+        // ---- the ghost: a translucent copy of the run in the overlay layer
+        const to = landingSpot(action.to);
         const x0 = s.tx;
         const y0 = s.ty;
+        const fan = run.length > 1 ? clamp(sprites[run[1]].ty - sprites[run[0]].ty, 2, L.upFan) : 0;
+        const ghost = doc.createElement('div');
+        ghost.className = 'board-ghost';
+        ghost.setAttribute('aria-hidden', 'true');
+        const shown = Math.min(run.length, TUNE.hintGhostMax);
+        for (let i = 0; i < shown; i++) {
+          const g = SOL.Cards.create(run[i], { back: s.el.getAttribute('data-back') });
+          g.removeAttribute('role');
+          g.removeAttribute('aria-label');
+          g.style.transform = 'translate3d(0,' + r2(i * fan) + 'px,0)';
+          ghost.appendChild(g);
+        }
+        ghost.style.opacity = '0';
         ghost.style.transform = 'translate3d(' + x0 + 'px,' + y0 + 'px,0)';
         overlayEl.appendChild(ghost);
         h.ghost = ghost;
-        const lift = Math.min(L.cardH * 0.5, Math.hypot(gx - x0, gy - y0) * 0.2);
+        const dist = Math.hypot(to.x - x0, to.y - y0);
+        let bowY = Math.min(L.cardH * 0.9, Math.max(L.cardH * 0.3, dist * 0.28));
+        if ((y0 + to.y) / 2 - bowY < -L.cardH * 0.15) bowY = -bowY * 0.6; // no room above: dip below instead
+        const lean = clamp((to.x - x0) / (L.cardW * 3), -1, 1) * 7;
         h.tween = A().tween({
-          duration: 1500,
+          duration: passMs * 2,
           ease: 'linear',
           update: function (t) {
-            // out (0..0.45), rest, back (0.6..1)
-            const p = t < 0.45 ? inOutSine(t / 0.45) : t < 0.6 ? 1 : 1 - inOutSine((t - 0.6) / 0.4);
-            const bow = 4 * p * (1 - p);
+            const u = (t * 2) % 1 || (t >= 1 ? 1 : 0); // 0..1 within each of the two passes
+            // lift off (fade in), glide, dissolve
+            const p = inOutCubic(clamp((u - 0.06) / 0.72, 0, 1));
+            const bowT = 4 * p * (1 - p);
+            const fade = u < 0.14 ? u / 0.14 : u > 0.78 ? Math.max(0, 1 - (u - 0.78) / 0.2) : 1;
+            const grow = u > 0.78 ? 1 + 0.14 * Math.min(1, (u - 0.78) / 0.2) : 1 + 0.05 * Math.min(1, u / 0.14);
             ghost.style.transform =
-              'translate3d(' + r2(x0 + (gx - x0) * p) + 'px,' + r2(y0 + (gy - y0) * p - lift * bow) + 'px,0)';
-            ghost.style.opacity = String(r2(0.55 * Math.min(1, t * 8, (1 - t) * 6)));
+              'translate3d(' + r2(x0 + (to.x - x0) * p) + 'px,' + r2(y0 + (to.y - y0) * p - bowY * bowT) + 'px,0) rotate(' +
+              r2(lean * bowT) + 'deg) scale(' + Math.round(grow * 1000) / 1000 + ')';
+            ghost.style.opacity = String(Math.round(0.62 * fade * 100) / 100);
           },
           done: function () {
-            if (ghost.parentNode) ghost.parentNode.removeChild(ghost);
-            if (hintState === h) {
-              h.ghost = null;
-              h.tween = null;
-            }
+            if (hintState === h) clearHint();
           },
         });
       }
@@ -2643,10 +3125,12 @@
       return false;
     }
     hintState = h;
-    // UI state with a lifetime, not animation sequencing (it must also last under reduced motion).
-    h.timer = root.setTimeout(function () {
-      if (hintState === h) clearHint();
-    }, TUNE.hintMs);
+    if (calm) {
+      // UI state with a lifetime, not animation sequencing (SOL.Anim.wait resolves at once under reduced motion).
+      h.timer = root.setTimeout(function () {
+        if (hintState === h) clearHint();
+      }, TUNE.hintMs);
+    }
     sfx('hint');
     haptic('tap');
     return true;
@@ -2664,6 +3148,11 @@
     }
   }
 
+  /**
+   * "Nothing to suggest": the stock and the waste shake their heads, the whole table gives a small shudder
+   * (a CSS animation on the two layers — nothing in the model moves) and the stock slot shows a red outline
+   * for a moment (the cue that needs no motion).
+   */
   function nudgeStock() {
     if (!inited || !state || deckMode) return;
     const ids = [];
@@ -2673,6 +3162,20 @@
     if (wa.length) ids.push(wa[wa.length - 1]);
     for (let i = 0; i < ids.length; i++) shakeSprite(sprites[ids[i]], i * 40, 0.6);
     pulse('stock', MINUS);
+    nopeFlip = !nopeFlip;
+    const layers = [cardsEl, pilesEl];
+    for (let i = 0; i < layers.length; i++) {
+      layers[i].classList.remove('is-entering', 'is-nope', 'is-nope-b');
+      layers[i].classList.add(nopeFlip ? 'is-nope' : 'is-nope-b');
+    }
+    const el = pileEls.stock;
+    if (el) {
+      el.classList.add('is-refusing');
+      root.setTimeout(function () {
+        el.classList.remove('is-refusing');
+      }, 700);
+    }
+    haptic('error');
   }
 
   /**
@@ -2739,7 +3242,19 @@
       const h = place(s, how, opts);
       if (h && h.finished) all.push(h.finished);
     }
+    if (how === 'instant' && state && !deckMode) {
+      for (let p = 0; p < PILE_IDS.length; p++) settlePile(PILE_IDS[p]);
+    }
     return Promise.all(all);
+  }
+
+  /**
+   * Lite mode: the device is struggling (SOL.Game measures the deal) or effects are set to 'low'. Heavy
+   * choreography is simplified — flips turn the card element instead of animating --flip, mass flights cast
+   * no shadows, trails and most particles are skipped. SOL.Celebrate reads it too.
+   */
+  function setLite(on) {
+    lite = !!on;
   }
 
   // ------------------------------------------------------------------ settings hooks
@@ -2832,6 +3347,10 @@
     shake: shake,
     nudgeStock: nudgeStock,
     setStockInvite: setStockInvite,
+    hoverAt: hoverAt,
+    hoverEnd: function () {
+      hoverEnd();
+    },
 
     cardAt: cardAt,
     pileAt: pileAt,
@@ -2866,6 +3385,11 @@
     pulse: pulse,
     scorePop: scorePop,
     foundationArrive: foundationArrive,
+    suitComplete: suitComplete,
+    setLite: setLite,
+    isLite: function () {
+      return lite;
+    },
     busyCount: busyCount,
     isDeckMode: function () {
       return deckMode;

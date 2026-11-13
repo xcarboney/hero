@@ -73,9 +73,16 @@
   const SOLVER_LIMIT_MS = 2600; // hard wall-clock limit for the winnable-seed search
   const SOLVER_BUDGET_MS = 1600;
   const STUCK_DELAY_MS = 750; // let the last move land before the "no more moves" prompt
-  const AUTO_GAP_START = 125;
-  const AUTO_GAP_END = 42;
+  const AUTO_GAP_START = 140; // auto-complete: ms between the first two cards…
+  const AUTO_GAP_END = 35; // …shrinking to this
+  const AUTO_ACCEL = 0.9; // each gap is this fraction of the one before
   const HURRY = 3;
+  // Adaptive quality: frame intervals measured during the deal (the busiest moment that every session has).
+  const PERF_MIN_FRAMES = 24;
+  const PERF_SLOW_MS = 20.5; // a frame that missed a 60 Hz deadline
+  const PERF_LITE_AVG_MS = 24; // "struggling": average well above 20 ms and most frames late
+  const PERF_LITE_SHARE = 0.5;
+  const PERF_OK_AVG_MS = 18.5; // good again (hysteresis)
   const ENCORE_DELAY_MS = 320;
   const LANDING_LIMIT_MS = 1200;
 
@@ -99,6 +106,9 @@
   let encoreTimer = 0;
   let encoresLeft = 0; // per win: closing dialogs on a won table must not turn into an endless party
   let hurried = false;
+  let lite = false; // adaptive quality: the device was struggling during a deal (this session only)
+  let liteLocked = false; // the player chose an effects level by hand: stop second-guessing it
+  const perf = { stop: null, n: 0, sum: 0, slow: 0, skip: 0, last: null };
 
   const hintCache = { v: -1, list: [] };
   let stuck = false;
@@ -378,6 +388,7 @@
     const list = hints();
     const b = board();
     if (list.length === 0) {
+      // nothing useful to suggest: the stock and the table shake their heads
       if (b) b.nudgeStock();
       sfx('invalid', { volume: 0.45 });
       return false;
@@ -386,6 +397,11 @@
     return true;
   }
 
+  /**
+   * Plays the game out: an accelerating cascade (the gap between two cards shrinks from AUTO_GAP_START to
+   * AUTO_GAP_END ms). Every step is a normal engine action, so it can stop anywhere: a tap on the table
+   * (Game.cancelAuto) leaves a valid, saved position. A win flows straight into the celebration.
+   */
   function autoComplete() {
     if (!state || locked() || !E().canAutoComplete(state)) return Promise.resolve(false);
     const token = ++autoToken;
@@ -394,6 +410,7 @@
     sfx('autocomplete');
     if (SOL.Input) SOL.Input.cancel();
     let step = 0;
+    let gap = AUTO_GAP_START;
 
     function finish() {
       if (token === autoToken) setBusy('auto', false);
@@ -409,9 +426,9 @@
       afterAction(record, { auto: true, step: step });
       step++;
       if (record.won) return finish();
-      // an accelerating cascade
-      const gap = Math.max(AUTO_GAP_END, AUTO_GAP_START * Math.pow(0.93, step));
-      return (Anim ? Anim.wait(gap) : Promise.resolve()).then(next);
+      const wait = gap;
+      gap = Math.max(AUTO_GAP_END, gap * AUTO_ACCEL);
+      return (Anim ? Anim.wait(wait) : Promise.resolve()).then(next);
     }
 
     return Promise.resolve()
@@ -420,6 +437,16 @@
         log('autoComplete failed', err);
         return finish();
       });
+  }
+
+  /** Stops a running auto-complete after the current card (a tap on the table). */
+  function cancelAuto() {
+    if (!busy.has('auto')) return false;
+    autoToken++;
+    setBusy('auto', false);
+    checkStuck();
+    emitStatus();
+    return true;
   }
 
   // ------------------------------------------------------------------ win
@@ -460,14 +487,18 @@
     emit('game:won', result);
   }
 
-  /** Resolves when no card is moving any more (or after `maxMs`): lets the last card land before the show. */
+  /**
+   * Resolves the moment no card is moving any more (or after `maxMs` of real time): the winning card lands,
+   * and the show starts on the very next frame.
+   */
   function whenLanded(maxMs) {
     return new Promise(function (resolve) {
       const t0 = now();
       (function poll() {
         const b = board();
-        if (!b || b.busyCount() === 0 || now() - t0 >= maxMs) resolve();
-        else root.setTimeout(poll, 40); // waiting for a state, not sequencing an animation
+        if (!b || b.busyCount() === 0 || now() - t0 >= maxMs || hidden) resolve();
+        else if (SOL.Anim) SOL.Anim.nextFrame().then(poll);
+        else root.setTimeout(poll, 30); // waiting for a state, not sequencing an animation
       })();
     });
   }
@@ -510,6 +541,67 @@
     }, ENCORE_DELAY_MS);
   }
 
+  // ------------------------------------------------------------------ adaptive quality
+  /**
+   * Applies the effective effects level everywhere: SOL.FX (particle counts, canvas resolution), the board and
+   * the celebration (transform-only choreography) and <html data-effects> (stylesheets drop their expensive
+   * decoration). Effective = 'low' when the setting says so or when the session is in lite mode.
+   */
+  function applyQuality() {
+    const wanted = setting('effects', 'high') === 'low' ? 'low' : 'high';
+    const effective = lite ? 'low' : wanted;
+    try {
+      if (SOL.FX) SOL.FX.setQuality(effective);
+      const b = board();
+      if (b && b.setLite) b.setLite(effective === 'low');
+      if (doc && doc.documentElement) doc.documentElement.setAttribute('data-effects', effective);
+    } catch (err) {
+      log('applying the effects quality failed', err);
+    }
+  }
+
+  function setLite(on, info) {
+    on = !!on;
+    if (on === lite) return;
+    lite = on;
+    applyQuality();
+    emit('game:quality', { lite: lite, avgFrameMs: info ? info.avg : 0, lateShare: info ? info.share : 0 });
+  }
+
+  /** Starts sampling frame intervals (real time, as SOL.Anim's frame loop reports them). */
+  function perfStart() {
+    perfEnd(false);
+    if (!SOL.Anim || SOL.Anim.reduced || hidden || liteLocked) return;
+    perf.n = 0;
+    perf.sum = 0;
+    perf.slow = 0;
+    perf.skip = 2; // the first frames follow the long task that set the deal up
+    perf.stop = SOL.Anim.frame(function (dt) {
+      if (perf.skip > 0) {
+        perf.skip--;
+        return;
+      }
+      perf.n++;
+      perf.sum += dt;
+      if (dt > PERF_SLOW_MS) perf.slow++;
+    });
+  }
+
+  /**
+   * Ends the sampling. `judge`: decide whether this device needs lite mode — the average frame took well over
+   * 20 ms and most frames were late — or, once in lite mode, whether it is comfortably fast again.
+   */
+  function perfEnd(judge) {
+    if (!perf.stop) return;
+    perf.stop();
+    perf.stop = null;
+    if (!judge || hidden || liteLocked || perf.n < PERF_MIN_FRAMES) return;
+    const info = { avg: perf.sum / perf.n, share: perf.slow / perf.n, frames: perf.n };
+    perf.last = info;
+    if (!lite && info.avg > PERF_LITE_AVG_MS && info.share > PERF_LITE_SHARE) setLite(true, info);
+    else if (lite && info.avg < PERF_OK_AVG_MS && info.share < 0.2) setLite(false, info);
+  }
+
   // ------------------------------------------------------------------ new game / restore
   function cancelRunning() {
     dealToken++;
@@ -531,6 +623,7 @@
     }
     busy.delete('auto');
     busy.delete('celebrate');
+    perfEnd(false);
     endHurry();
   }
 
@@ -652,8 +745,10 @@
         emit('game:new', { state: state, restored: false });
         emitStatus();
         saveNow();
+        perfStart();
         return Promise.resolve(b ? b.deal(state) : null).then(function () {
           if (token !== dealToken) return false;
+          perfEnd(true);
           endHurry();
           setBusy('deal', false);
           checkStuck();
@@ -759,9 +854,11 @@
 
   function pause(reason) {
     const key = String(reason === undefined ? 'default' : reason);
+    const first = !pauses.has(key);
     pauses.set(key, (pauses.get(key) || 0) + 1);
     if (SOL.Input) SOL.Input.cancel();
     updateClock();
+    if (first) emit('game:pause', { paused: true, reason: key });
   }
 
   function resume(reason) {
@@ -770,6 +867,7 @@
     if (n <= 1) pauses.delete(key);
     else pauses.set(key, n - 1);
     updateClock();
+    if (n === 1) emit('game:pause', { paused: pauses.size > 0, reason: key });
     if (key === 'modal' && pauses.size === 0 && state && state.won) scheduleEncore();
   }
 
@@ -784,9 +882,13 @@
       if (key === 'reducedMotion' || key === '*') {
         if (SOL.Anim) SOL.Anim.setReducedMotion(S.reducedMotion());
       }
-      if (key === 'effects' || key === '*') {
-        if (SOL.FX) SOL.FX.setQuality(S.get('effects'));
+      if (key === 'effects') {
+        // The player picked a level by hand: that is what they get from now on (no more adaptive switching).
+        lite = false;
+        liteLocked = true;
       }
+      // Always: SOL.Settings rewrites <html data-effects> on every change, lite mode has to be put back.
+      applyQuality();
       if (key === 'theme' || key === 'effects' || key === 'reducedMotion' || key === '*') {
         if (SOL.FX && !hidden) SOL.FX.ambient(true, { theme: S.get('theme') });
       }
@@ -860,6 +962,19 @@
     },
     inputLocked: locked,
     hurry: hurry,
+    cancelAuto: cancelAuto,
+    isAutoCompleting: function () {
+      return busy.has('auto');
+    },
+    isLite: function () {
+      return lite;
+    },
+    setLite: function (on) {
+      setLite(on, null);
+    },
+    perf: function () {
+      return perf.last ? { avgFrameMs: perf.last.avg, lateShare: perf.last.share, frames: perf.last.frames, lite: lite } : null;
+    },
     loadState: loadState,
     getStatus: getStatus,
     getHints: function () {
@@ -905,7 +1020,6 @@
     step('fx', function () {
       if (!SOL.FX) return missing('SOL.FX');
       SOL.FX.init({ back: doc.getElementById('fx-back'), front: doc.getElementById('fx-front') });
-      SOL.FX.setQuality(setting('effects', 'high'));
       if (!hidden) SOL.FX.ambient(true, { theme: setting('theme', 'emerald') });
     });
     step('audio', function () {
@@ -916,6 +1030,7 @@
       if (!SOL.Board) return missing('SOL.Board');
       if (!SOL.Board.init()) throw new Error('SOL.Board.init() could not find its mount points or dependencies');
     });
+    step('quality', applyQuality);
     step('input', function () {
       if (!SOL.Input) return missing('SOL.Input');
       SOL.Input.init();

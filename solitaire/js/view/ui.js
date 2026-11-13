@@ -2112,7 +2112,7 @@
       ['Foundation card back to a column', '−15', 'is-minus'],
       ['Turn the deck over (Draw 1)', '−100', 'is-minus'],
       ['Turn the deck over (Draw 3, from the 4th pass)', '−20', 'is-minus'],
-      ['Time bonus for a win', '700,000 ÷ seconds', 'is-gold'],
+      ['Time bonus for a win (games of 30 seconds or more)', '700,000 ÷ seconds', 'is-gold'],
     ];
     const list = h('ul.ui-scores');
     for (const r of rows) list.appendChild(h('li', null, h('span', null, r[0]), h('b' + (r[2] ? '.' + r[2] : ''), null, r[1])));

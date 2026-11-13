@@ -273,13 +273,14 @@ class MainActivity : ComponentActivity() {
      * while they are laid out as visible. getInsets() is zero for a hidden bar and is not
      * affected by the transient bars of the full-screen mode, so neither moves the board.
      *
-     * From Android 11 on a window can only hide the bars once it has the focus, so at every
-     * launch in full-screen mode the first insets still contain the bars and the ones without
-     * them follow a few frames later. The page is told the truth ([insetsPx]) as always, but
-     * the document-start script, which sizes the very first layout, gets the insets the window
-     * is about to have ([settledInsetsPx]): a page that starts loading in that moment would
-     * otherwise lay the board out for bars that are already on their way out and jump when
-     * they are gone.
+     * On Android 11 and newer a request to hide the bars takes effect only once the window is
+     * on screen and in control of them, so at a launch in full-screen mode the first insets can
+     * still contain the bars, and the ones without them follow a few frames later. The page is
+     * told the truth ([insetsPx]) as always, but the document-start script, which sizes the
+     * very first layout, gets the insets the window is about to have ([settledInsetsPx]): a
+     * page that starts loading in that moment would otherwise lay the board out for bars that
+     * are already on their way out and jump when they are gone. (Should a device refuse to
+     * hide them, SOL.App.setInsets corrects the layout as soon as the page has loaded.)
      */
     private fun onWindowInsets(windowInsets: WindowInsetsCompat) {
         watchForBarsComingBack(windowInsets)

@@ -131,7 +131,11 @@ internal class NativeBridge(private val host: Host, storage: KeyValueFileStore) 
     @JavascriptInterface
     fun storageSet(key: String?, value: String?): Boolean = storage.set(key, value)
 
-    /** `SolitaireNative.storageRemove(key)` -> true unless the key is not a valid key. */
+    /**
+     * `SolitaireNative.storageRemove(key)` -> true unless the key is not a valid key. (The page
+     * rarely calls it: to remove a key durably store.js stores its marker `<removed>` instead,
+     * see the header of solitaire/js/core/store.js. Values are never interpreted here.)
+     */
     @JavascriptInterface
     fun storageRemove(key: String?): Boolean = storage.remove(key)
 

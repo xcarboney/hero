@@ -10,7 +10,10 @@
  *                         (the board picks the legal pile with the largest overlap); anywhere else it returns.
  *   long-press a card     ~450ms without moving, face-up cards only: 'heavy' haptic + SOL.Game.inspect(card)
  *   right-click a card    the same, for mice
- *   tap during the deal   hurries the deal up; tap during the celebration skips it
+ *   tap during the deal   hurries the deal up; tap during auto-complete stops the cascade after the card in
+ *                         the air; tap during the celebration skips it to the tidy end state
+ *   hover (mouse / pen)   the top face-up card under the pointer leans towards it with a moving highlight
+ *                         (SOL.Board.hoverAt) — decoration only, nothing depends on it
  * Keyboard: Space / D draw, U or Ctrl/Cmd+Z undo, H hint, N new game, A auto-complete, I inspect the card under
  * the pointer, Esc cancels a drag / skips the celebration (overlays close themselves).
  *
@@ -110,6 +113,15 @@
     else setCursor('');
   }
 
+  /** A fine pointer moved over the table with no button down: cursor feedback and the idle tilt. */
+  function hover(x, y, type) {
+    if (type === 'mouse') hoverCursor(x, y);
+    const board = B();
+    if (!board || typeof board.hoverAt !== 'function') return;
+    if (locked()) board.hoverEnd();
+    else board.hoverAt(x, y);
+  }
+
   // ------------------------------------------------------------------ gesture bookkeeping
   function clearTimer() {
     if (active && active.timer) {
@@ -201,7 +213,9 @@
       return;
     }
     if (locked()) {
-      if (typeof g.hurry === 'function') g.hurry();
+      // auto-complete: a tap stops the cascade; the deal: a tap plays the rest of it faster
+      if (typeof g.isAutoCompleting === 'function' && g.isAutoCompleting()) g.cancelAuto();
+      else if (typeof g.hurry === 'function') g.hurry();
       return;
     }
 
@@ -256,7 +270,7 @@
     pointer.inside = true;
     const a = active;
     if (!a) {
-      if (e.pointerType === 'mouse') hoverCursor(e.clientX, e.clientY);
+      if (e.pointerType === 'mouse' || e.pointerType === 'pen') hover(e.clientX, e.clientY, e.pointerType);
       return;
     }
     if (e.pointerId !== a.id) return;
@@ -356,9 +370,10 @@
   }
 
   function onPointerLeave(e) {
-    if (e.pointerType === 'mouse') {
+    if (e.pointerType === 'mouse' || e.pointerType === 'pen') {
       pointer.inside = false;
       if (!active) setCursor('');
+      if (B() && typeof B().hoverEnd === 'function') B().hoverEnd();
     }
   }
 
