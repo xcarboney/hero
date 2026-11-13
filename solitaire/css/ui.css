@@ -11,10 +11,14 @@
  * Rules this file keeps (contract section 14):
  *   - no backdrop-filter and no filter anywhere: the "glass" is layered translucent gradients and
  *     hairline highlights, so nothing has to be re-blurred while cards or sheets move;
- *   - CSS motion animates transform and opacity only; JS motion is driven by SOL.Anim in ui.js;
+ *   - CSS motion animates transform and opacity only. Sheets and dialogs open and close with transitions
+ *     that ui.js sets inline (duration from the speed setting), so they run on the compositor; what must
+ *     follow input (dragging a sheet, the HUD effects, the Auto-complete pill) is driven by SOL.Anim;
  *   - html[data-effects="low"] turns the looping decoration off; html[data-reduced-motion="true"] is
  *     handled by base.css (it collapses every transition / animation in here);
- *   - every interactive target is at least 44px, nothing interactive sits under a safe-area inset.
+ *   - every interactive target is at least 44px, nothing interactive sits under a safe-area inset;
+ *   - the HUD and the toolbar size themselves by the width they really have (container queries on
+ *     .ui-hud-box / .ui-tb-box): side insets count, the viewport width alone does not.
  *
  * All class names are prefixed with "ui-". Local tokens are prefixed with "--ui-".
  */
@@ -962,10 +966,6 @@ button.ui-row:active {
 .ui-row__chev .ui-icon {
   width: 18px;
   height: 18px;
-}
-.ui-row--danger .ui-row__label,
-.ui-row--danger .ui-row__icon {
-  color: #ff9a94;
 }
 
 /* switch */

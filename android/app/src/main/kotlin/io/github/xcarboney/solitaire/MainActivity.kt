@@ -89,6 +89,13 @@ class MainActivity : ComponentActivity() {
     /** System bar + display cutout insets in physical px; null until the first dispatch. */
     private var insetsPx: Insets? = null
 
+    /**
+     * What [insetsPx] is going to be once the bars are the way [applySystemBars] asked for them.
+     * The two only differ for the moment in which a request to hide the bars has not taken
+     * effect yet; see [onWindowInsets].
+     */
+    private var settledInsetsPx: Insets? = null
+
     /** The display density [insetsPx] was received at: CSS px = px / density. */
     private var insetsDensity = 1f
 
@@ -265,17 +272,35 @@ class MainActivity : ComponentActivity() {
      * What the page has to keep clear, in physical px: display cutouts always, system bars only
      * while they are laid out as visible. getInsets() is zero for a hidden bar and is not
      * affected by the transient bars of the full-screen mode, so neither moves the board.
+     *
+     * From Android 11 on a window can only hide the bars once it has the focus, so at every
+     * launch in full-screen mode the first insets still contain the bars and the ones without
+     * them follow a few frames later. The page is told the truth ([insetsPx]) as always, but
+     * the document-start script, which sizes the very first layout, gets the insets the window
+     * is about to have ([settledInsetsPx]): a page that starts loading in that moment would
+     * otherwise lay the board out for bars that are already on their way out and jump when
+     * they are gone.
      */
     private fun onWindowInsets(windowInsets: WindowInsetsCompat) {
         watchForBarsComingBack(windowInsets)
         val px = windowInsets.getInsets(
             WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
         )
+        val settledPx = if (fullscreen && !isInMultiWindowMode) {
+            // systemBars() without the two bars applySystemBars hides: the caption bar stays.
+            windowInsets.getInsets(
+                WindowInsetsCompat.Type.captionBar() or WindowInsetsCompat.Type.displayCutout(),
+            )
+        } else {
+            px
+        }
         val density = resources.displayMetrics.density
-        if (px == insetsPx && density == insetsDensity) return
+        val changedForPage = px != insetsPx || density != insetsDensity
+        if (!changedForPage && settledPx == settledInsetsPx) return
         insetsPx = px
+        settledInsetsPx = settledPx
         insetsDensity = density
-        publishInsets()
+        publishInsets(tellPage = changedForPage)
     }
 
     /**
@@ -307,20 +332,26 @@ class MainActivity : ComponentActivity() {
      * Hands the current insets to the page. Before the page has loaded they are only stored (in
      * the bridge, for the document-start script); onPageFinished calls this again, which replays
      * them through SOL.App.setInsets.
+     *
+     * @param tellPage false when only [settledInsetsPx] changed: the page already has [insetsPx].
      */
-    private fun publishInsets() {
+    private fun publishInsets(tellPage: Boolean = true) {
         val px = insetsPx ?: return
+        bridge?.safeAreaInsetsJson = insetsJson(settledInsetsPx ?: px)
+        if (tellPage && pageReady) {
+            webView?.evaluateJavascript(SET_INSETS_SCRIPT.replace(INSETS_PLACEHOLDER, insetsJson(px)), null)
+        }
+    }
+
+    /** [px] as the JSON object the page expects, in CSS px at [insetsDensity]. */
+    private fun insetsJson(px: Insets): String {
         val density = insetsDensity
         // Locale.US: a decimal comma would not be a number in JavaScript.
-        val json = String.format(
+        return String.format(
             Locale.US,
             "{\"top\":%.2f,\"right\":%.2f,\"bottom\":%.2f,\"left\":%.2f}",
             px.top / density, px.right / density, px.bottom / density, px.left / density,
         )
-        bridge?.safeAreaInsetsJson = json
-        if (pageReady) {
-            webView?.evaluateJavascript(SET_INSETS_SCRIPT.replace(INSETS_PLACEHOLDER, json), null)
-        }
     }
 
     // ------------------------------------------------------------------------------- WebView

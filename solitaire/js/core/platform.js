@@ -23,7 +23,9 @@
  *   SolitaireNative.safeAreaInsets()     -> '{"top":24,"right":0,"bottom":16,"left":0}' (CSS px)
  *                                        or '' while unknown. Used by the shell's own script
  *                                        that seeds --safe-* before the first layout; the page
- *                                        gets the same values through SOL.App.setInsets.
+ *                                        gets the same values through SOL.App.setInsets (only
+ *                                        while the bars are still on their way out after a
+ *                                        start in full-screen mode this is already without them).
  *   SolitaireNative.storageGet(key)      -> string, or no string at all when there is no value
  *                                        (a WebView hands a Java null over as undefined)
  *   SolitaireNative.storageSet(key, v)   -> boolean: false when the value was not accepted
@@ -171,7 +173,10 @@
    * Android keeps the bottom-most 200dp of a taller request). The limit does not apply while
    * the navigation bar is hidden in the shell's full-screen mode. In the shell's WebView 1 CSS
    * px is 1dp. So:
-   *   - full screen on:  the strips run the whole height of #table;
+   *   - full screen on:  the strips run the whole height of #table. Back itself is off while
+   *     the bars are hidden, but with gesture navigation stock Android takes a swipe from a
+   *     side edge as "show the bars" (after which the next one is Back) unless it starts in an
+   *     excluded rectangle: the strips are what keeps an edge drag a drag in this mode too;
    *   - full screen off: they cover the lowest 200 CSS px of #table, the part where the long
    *     tableau columns are picked up and dragged from.
    * The strips are as wide as the widest back-gesture zone of stock Android (about 24dp by

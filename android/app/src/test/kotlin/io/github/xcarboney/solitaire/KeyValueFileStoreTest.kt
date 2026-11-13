@@ -467,6 +467,44 @@ class KeyValueFileStoreTest {
     }
 
     @Test
+    fun `storing the same value again retries a write that failed`() {
+        val dir = temp.newFolder()
+        val failing = AtomicBoolean(true)
+        val store = open(dir) { from, to -> if (failing.get()) false else from.renameTo(to) }
+        assertTrue(store.set("save", "move 1"))
+        assertFalse(store.flush(5_000))
+        assertNull(StorageRecord.read(valueFile(dir, "save")))
+
+        // The page saves again when it is hidden, usually the very state it saved last. That is
+        // normally skipped as "already stored"; not when the earlier write never made it.
+        failing.set(false)
+        assertTrue(store.set("save", "move 1"))
+        // Deliberately no flush here: it would retry the write by itself.
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (StorageRecord.read(valueFile(dir, "save")) == null && System.nanoTime() < deadline) Thread.sleep(5)
+        assertEquals("move 1", StorageRecord.read(valueFile(dir, "save")))
+        assertTrue(store.flush(5_000))
+    }
+
+    @Test
+    fun `the page's removal marker is a value like any other`() {
+        // store.js marks a removed key with a value that is not JSON instead of deleting it, so
+        // that the removal is as durable as a write (see solitaire/js/core/store.js).
+        val dir = temp.newFolder()
+        val store = open(dir)
+        assertTrue(store.set("sol.save.v1", "\"a saved game\""))
+        assertTrue(store.set("sol.save.v1", "<removed>"))
+        assertEquals("<removed>", store.get("sol.save.v1"))
+        assertEquals(listOf("sol.save.v1"), store.keys())
+        store.close()
+        val reopened = open(dir)
+        assertEquals("<removed>", reopened.get("sol.save.v1"))
+        assertTrue(reopened.set("sol.save.v1", "\"the next game\""))
+        assertTrue(reopened.flush(5_000))
+        assertEquals("\"the next game\"", StorageRecord.read(valueFile(dir, "sol.save.v1")))
+    }
+
+    @Test
     fun `an exception while writing is contained`() {
         val dir = temp.newFolder()
         val failing = AtomicBoolean(true)
@@ -614,6 +652,68 @@ class KeyValueFileStoreTest {
         assertFalse(store.set("late", "x"))
         assertFalse(store.remove("k0"))
         assertEquals("reads still work", "value 0", store.get("k0"))
+    }
+
+    // ------------------------------------------------------------------ the page's access
+
+    @Test
+    fun `a page that is not the game cannot read, write, remove or list`() {
+        val dir = temp.newFolder()
+        val store = open(dir)
+        val page = GuardedStore(store)
+        assertTrue(page.set("sol.save.v1", "the saved game"))
+        assertEquals("the saved game", page.get("sol.save.v1"))
+        assertEquals("[\"sol.save.v1\"]", page.keysJson())
+
+        page.pageTrusted = false
+        assertNull(page.get("sol.save.v1"))
+        assertFalse(page.set("sol.save.v1", "overwritten"))
+        assertFalse(page.set("sol.other", "planted"))
+        assertFalse(page.remove("sol.save.v1"))
+        assertEquals("[]", page.keysJson())
+        assertTrue(store.flush(5_000))
+        assertEquals("nothing reached the store", "the saved game", store.get("sol.save.v1"))
+        assertEquals(listOf("sol.save.v1"), store.keys())
+        assertEquals(listOf("sol.save.v1.val"), names(dir))
+
+        page.pageTrusted = true // the game's own page is back
+        assertEquals("the saved game", page.get("sol.save.v1"))
+        assertTrue(page.remove("sol.save.v1"))
+        assertEquals("[]", page.keysJson())
+    }
+
+    @Test
+    fun `a released bridge stays without access, another one on the same store has it`() {
+        val store = open(temp.newFolder())
+        val old = GuardedStore(store)
+        assertTrue(old.set("sol.save.v1", "move 1"))
+        old.released = true
+        old.pageTrusted = true
+        assertNull(old.get("sol.save.v1"))
+        assertFalse(old.set("sol.save.v1", "a late write from the page that is going away"))
+        assertFalse(old.remove("sol.save.v1"))
+        assertEquals("[]", old.keysJson())
+
+        // The WebView that replaces it (after a renderer loss) reads what the old one stored.
+        val next = GuardedStore(store)
+        assertEquals("move 1", next.get("sol.save.v1"))
+        assertEquals("[\"sol.save.v1\"]", next.keysJson())
+    }
+
+    @Test
+    fun `invalid input through the guarded store is refused like anywhere else`() {
+        val root = temp.newFolder()
+        val dir = File(root, "store")
+        val page = GuardedStore(open(dir))
+        assertFalse(page.set("../escape", "x"))
+        assertFalse(page.set("ok", null))
+        assertFalse(page.set(null, "x"))
+        assertNull(page.get("../escape"))
+        assertNull(page.get(null))
+        assertFalse(page.remove("a/b"))
+        assertFalse(page.remove(null))
+        assertEquals("[]", page.keysJson())
+        assertEquals(listOf("store"), names(root))
     }
 
     @Test

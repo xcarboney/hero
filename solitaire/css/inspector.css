@@ -295,10 +295,9 @@ html[data-effects="low"] .insp-card__glow {
   margin: calc(var(--card-w) * -0.7) 0 0 calc(var(--card-w) * -0.5);
   transform-style: preserve-3d;
   /*
-   * No will-change here, on purpose: with it the compositor keeps the raster scale the card had when it left
-   * its (small) source and the art stays blurry at full size. Without it every layer of the card is rastered
-   * at device resolution or better (inside a perspective the compositor never goes below that, and only steps
-   * up in whole multiples when the card is zoomed).
+   * No will-change here, on purpose: it would freeze the scale the card's layers were rastered at, and a card
+   * zoomed in (up to 2.4x) would turn blurry. Without it the compositor re-rasters them in whole multiples of
+   * the device scale as the card grows; the 3D transform alone already gives the wrapper its own layer.
    */
 }
 

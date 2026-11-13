@@ -20,7 +20,7 @@ import android.webkit.JavascriptInterface
  * Only the methods annotated with [JavascriptInterface] are visible to JavaScript. R8 keeps
  * their names (app/proguard-rules.pro).
  */
-internal class NativeBridge(private val host: Host, private val storage: KeyValueFileStore) {
+internal class NativeBridge(private val host: Host, storage: KeyValueFileStore) {
 
     /** What the bridge can ask of the Activity. Every method is called on the UI thread. */
     interface Host {
@@ -33,12 +33,16 @@ internal class NativeBridge(private val host: Host, private val storage: KeyValu
 
     private val mainThread = Handler(Looper.getMainLooper())
 
+    /** The store as this bridge's page may use it: not at all once [release]d or untrusted. */
+    private val storage = GuardedStore(storage)
+
     @Volatile
     private var released = false
 
     /**
-     * The current safe-area insets as a JSON object in CSS px, or "" while unknown. Written by
-     * the UI thread, read by [safeAreaInsets] on the bridge thread.
+     * The safe-area insets for a page that is about to lay itself out, as a JSON object in CSS
+     * px, or "" while unknown. Written by the UI thread, read by [safeAreaInsets] on the bridge
+     * thread.
      */
     @Volatile
     var safeAreaInsetsJson: String = ""
@@ -53,9 +57,13 @@ internal class NativeBridge(private val host: Host, private val storage: KeyValu
      *
      * Like the URL check it is a second line of defence. The first is that a foreign page can
      * never load: no INTERNET permission, every request answered locally, navigation locked.
+     * The flag itself lives in [GuardedStore], which is what the unit tests cover.
      */
-    @Volatile
-    var pageTrusted: Boolean = true
+    var pageTrusted: Boolean
+        get() = storage.pageTrusted
+        set(value) {
+            storage.pageTrusted = value
+        }
 
     /** `SolitaireNative.haptic(kind)`. Unknown kinds (and non-strings) are ignored. */
     @JavascriptInterface
@@ -101,7 +109,8 @@ internal class NativeBridge(private val host: Host, private val storage: KeyValu
      * `SolitaireNative.safeAreaInsets()` -> '{"top":24.00,"right":0.00,"bottom":16.00,"left":0.00}'
      * or ''. The page gets its insets through SOL.App.setInsets; this getter exists for the
      * shell's own document-start script, which seeds the --safe-* CSS variables before the first
-     * layout (see MainActivity).
+     * layout (see MainActivity). The values are the ones SOL.App.setInsets delivers, except while
+     * a request to hide the bars is still taking effect: then they are already without the bars.
      */
     @JavascriptInterface
     fun safeAreaInsets(): String = safeAreaInsetsJson
@@ -112,7 +121,7 @@ internal class NativeBridge(private val host: Host, private val storage: KeyValu
      * Always the latest value passed to [storageSet], also before it has reached the disk.
      */
     @JavascriptInterface
-    fun storageGet(key: String?): String? = if (storageUsable()) storage.get(key) else null
+    fun storageGet(key: String?): String? = storage.get(key)
 
     /**
      * `SolitaireNative.storageSet(key, value)` -> true when the value was accepted. False for a
@@ -120,23 +129,22 @@ internal class NativeBridge(private val host: Host, private val storage: KeyValu
      * of the key then stays as it was.
      */
     @JavascriptInterface
-    fun storageSet(key: String?, value: String?): Boolean = storageUsable() && storage.set(key, value)
+    fun storageSet(key: String?, value: String?): Boolean = storage.set(key, value)
 
     /** `SolitaireNative.storageRemove(key)` -> true unless the key is not a valid key. */
     @JavascriptInterface
-    fun storageRemove(key: String?): Boolean = storageUsable() && storage.remove(key)
+    fun storageRemove(key: String?): Boolean = storage.remove(key)
 
     /** `SolitaireNative.storageKeys()` -> a JSON array of the keys that have a value, sorted. */
     @JavascriptInterface
-    fun storageKeys(): String = StorageRules.keysToJson(if (storageUsable()) storage.keys() else emptyList())
+    fun storageKeys(): String = storage.keysJson()
 
     /** Makes the bridge inert once its WebView is gone; late calls from the page are dropped. */
     fun release() {
         released = true
+        storage.released = true
         mainThread.removeCallbacksAndMessages(null)
     }
-
-    private fun storageUsable(): Boolean = !released && pageTrusted
 
     private fun onMainThread(action: () -> Unit) {
         if (released) return

@@ -47,12 +47,27 @@
  * - The win screen opens ~2.5 s after 'game:won' (SOL.Anim.wait, so it follows the speed setting and is
  *   immediate under reduced motion), and at the latest 4 s of real time after it (SOL.Anim's clock runs slow
  *   when frames are long); a new game or an undo in between cancels it.
- * - The "no more moves" card is not modal: it docks over the toolbar, never takes focus, registers NO back
- *   handler (see showStuck), and goes away on the next 'game:change' / 'game:new'. "Keep looking" silences
- *   it until the next deal.
+ * - The "no more moves" card is not modal: it docks over the toolbar (which is inert and faded out while it
+ *   is covered; the card has Undo / New game itself), never takes focus, registers NO back handler (see
+ *   showStuck), and goes away on the next 'game:change' / 'game:new'. "Keep looking" silences it until the
+ *   next deal.
  * - Settings shows a control for every key of SOL.Settings; 'fullscreen' only inside the Android app
  *   (SOL.Platform.isNativeApp), where it has an effect.
- * - All JS motion runs through SOL.Anim; CSS motion is transform / opacity only (see ui.css).
+ * - "New game" (toolbar, win screen, stuck card, Deal now, restart) goes through startDeal(): the New button
+ *   stays disabled from the request until the controller's 'game:new' (or its promise settling).
+ *
+ * Motion
+ * ------
+ * - Sheets and dialogs open and close with CSS transitions on transform / opacity (animateIn / animateOut):
+ *   they run on the compositor, so a busy main thread does not make them stutter. Their durations follow
+ *   SOL.Anim.speed and they are skipped when SOL.Anim.reduced is set — the two things SOL.Anim exists for.
+ * - Everything that must follow JS input or state runs on SOL.Anim: dragging a sheet and its release, the
+ *   Auto-complete pill, the HUD's flash / chip / bumps (createPulse), the win screen's count-up, the win-rate
+ *   ring, the "no more moves" card.
+ * - Small state changes are CSS transitions / keyframes on transform and opacity only (switches, segmented
+ *   thumb, rolling digits, ripples, toasts); base.css collapses those under reduced motion.
+ * - HUD and toolbar adapt to the width they really have (container queries on .ui-hud-box / .ui-tb-box), so
+ *   side insets count; see ui.css for the measured thresholds.
  */
 (function (root) {
   'use strict';
@@ -985,7 +1000,9 @@
       const height = sheet.offsetHeight || 1;
       const y = layer.y || 0;
       const v = d.v * 1000; // px per second
-      const dismiss = !cancelled && layer.spec.dismissible !== false && y > 12 && (y > height * 0.32 || v > 650);
+      // Let go after a deliberate pull (a third of the sheet, 180 px at most — tall sheets must not need more
+      // thumb travel than that) or with a flick: it leaves. Anything less springs back.
+      const dismiss = !cancelled && layer.spec.dismissible !== false && y > 12 && (y > Math.min(height * 0.32, 180) || v > 650);
       if (dismiss) {
         closeLayer(layer, undefined, { velocity: Math.max(v, 0) });
       } else {

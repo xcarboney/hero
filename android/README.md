@@ -46,7 +46,7 @@ Page to app, `SolitaireNative.…`:
 | `setFullscreen(bool)` | | `true` hides the status and navigation bars, `false` shows them. Idempotent. The app remembers the last value and starts in that mode next time. |
 | `setGestureExclusion(json)` | | `json` is an array of at most 8 rectangles in CSS px relative to the viewport, `[{"x":0,"y":120,"w":40,"h":500}, …]`: areas where a swipe from the screen edge belongs to the game, not to the Back gesture. `[]` clears them. Invalid input is ignored. Android 10 and newer. |
 | `exit()` | | Closes the app. |
-| `safeAreaInsets()` | string | `{"top":24.00,"right":0.00,"bottom":16.00,"left":0.00}` in CSS px, or `""` while unknown. Read by the app's own start-up script; the page gets the same values through `SOL.App.setInsets`. |
+| `safeAreaInsets()` | string | `{"top":24.00,"right":0.00,"bottom":16.00,"left":0.00}` in CSS px, or `""` while unknown. Read by the app's own start-up script, which sizes the first layout; the page gets the same values through `SOL.App.setInsets`. (While the bars are on their way out, right after a start in full-screen mode, this already answers without them.) |
 | `storageGet(key)` | string | The stored value; always the latest one, also before it has reached the disk. No value is a Java `null`, which arrives in the page as `undefined`. |
 | `storageSet(key, value)` | boolean | Stores a string. `false`, and the previous value stays, for an invalid key, a value over 2 MB or a full store (32 keys, 8 MB in total). |
 | `storageRemove(key)` | boolean | Removes the value. `false` only for an invalid key. |
@@ -78,26 +78,34 @@ the game. Two things prevent that:
 1. **Full screen** (the game's `fullscreen` setting, on by default). The status and navigation
    bars are hidden in the "swipe to show" mode: a swipe from the top or bottom edge shows them,
    translucent, over the game for a few seconds, and the system hides them again. While the
-   navigation bar is hidden, system gestures need that reveal swipe first, so an edge drag does
-   nothing but move the card. The page is not laid out again for those temporary bars: it is
-   told about display cutouts always, and about bars only while they are really visible. The
-   bars are hidden again when the window gets its focus back and, if a device shows them
-   for real instead of temporarily, three seconds later. A window that shares the screen (split
-   screen, freeform) is never full screen, because the system does not allow it there.
+   navigation bar is hidden the system does not take an edge swipe as Back: Back needs the bars
+   to be shown first. The page is not laid out again for those temporary bars: it is told about
+   display cutouts always, and about bars only while they are really visible. The bars are
+   hidden again when the window gets its focus back and, if a device shows them for real
+   instead of temporarily, three seconds later. A window that shares the screen (split screen,
+   freeform) is never full screen, because the system does not allow it there.
 
    With the setting off the app is edge to edge under visible, transparent bars, and the page
    keeps its controls clear of them.
 
-2. **Gesture exclusion**, for when the bars are visible or a device ignores the above. The page
-   reports two 40 px wide strips along the left and right edges of the card table
-   (`platform.js`), and the app hands them to the system as areas where Back does not start
-   (Android 10 and newer). Android takes at most 200dp of height per screen edge into account
-   (stock Android keeps the bottom-most 200dp of a taller request), unless the navigation bar is
-   hidden as in full-screen mode. So the strips cover the whole table in full-screen mode and
-   its lowest 200 px otherwise: the part long columns are dragged from. The 40 px match the
-   widest Back zone of stock Android (its highest "back sensitivity" setting). While a dialog or
-   the card inspector is open there are no strips, so that Back is easy to reach where it is
-   useful.
+2. **Gesture exclusion** (Android 10 and newer). The page reports two 40 px wide strips along
+   the left and right edges of the card table (`platform.js`), and the app hands them to the
+   system as areas where an edge swipe belongs to the game. That matters in both modes:
+
+   - In full-screen mode with gesture navigation, stock Android also takes a swipe from a
+     *side* edge as "show the bars", and while they are shown the next edge swipe is Back. A
+     swipe that starts inside a strip does not show the bars, so dragging a card from an outer
+     column stays a drag.
+   - With the bars visible (the setting is off, split screen, a device that does not hide
+     them), a swipe that starts inside a strip is not Back.
+
+   Android takes at most 200dp of height per screen edge into account (stock Android keeps the
+   bottom-most 200dp of a taller request), unless the navigation bar is hidden as in
+   full-screen mode. So the strips cover the whole table in full-screen mode and its lowest
+   200 px otherwise: the part long columns are dragged from. The 40 px match the widest Back
+   zone of stock Android (its highest "back sensitivity" setting). While a dialog or the card
+   inspector is open there are no strips, so that the bars and Back can be reached from
+   anywhere along the edge when they are wanted.
 
 ## Where the saved game lives
 

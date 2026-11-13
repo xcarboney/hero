@@ -101,6 +101,32 @@ internal object StorageRecord {
 }
 
 /**
+ * A [KeyValueFileStore] as one page may use it through `SolitaireNative.storage*`: every call
+ * is refused, without touching the store, once the page's bridge has been released or while the
+ * WebView shows something that is not the game ([NativeBridge.pageTrusted]).
+ *
+ * Both flags are written by the UI thread and read on the WebView's bridge thread.
+ */
+internal class GuardedStore(private val store: KeyValueFileStore) {
+    @Volatile
+    var released = false
+
+    @Volatile
+    var pageTrusted = true
+
+    fun get(key: String?): String? = if (usable()) store.get(key) else null
+
+    fun set(key: String?, value: String?): Boolean = usable() && store.set(key, value)
+
+    fun remove(key: String?): Boolean = usable() && store.remove(key)
+
+    /** The keys as the JSON array `storageKeys()` answers with; `[]` when the store is off limits. */
+    fun keysJson(): String = StorageRules.keysToJson(if (usable()) store.keys() else emptyList())
+
+    private fun usable(): Boolean = !released && pageTrusted
+}
+
+/**
  * A small durable key/value store: one file per key in [dir].
  *
  * Why it exists: the game saves through the WebView's localStorage after every move, but
