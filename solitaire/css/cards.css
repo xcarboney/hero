@@ -315,6 +315,34 @@
   transition-delay: 0s;
 }
 
+/*
+ * The tight mark (tightMarkup() in cards.js): the suit once more, top-right, for a card of which only a strip
+ * along the top edge can be seen that is too low for the classic corner index — the suit under the rank is cut
+ * off there. The owner sets .is-tight on such a card. The mark exists in the classic layout only (the compact
+ * suit sits top-right anyway) and fades like the fan mark, so nothing pops while a column grows or shrinks.
+ */
+.card__tight {
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 140ms ease-out, visibility 0s linear 140ms;
+}
+@container sol-card (max-width: 59.9px) {
+  .card__tight {
+    display: none;
+  }
+}
+.card[data-layout="compact"] .card__tight {
+  display: none;
+}
+.card[data-layout="classic"] .card__tight {
+  display: inline;
+}
+.card.is-tight .card__tight {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
+}
+
 /* ------------------------------------------------------------------ flip shading + glare */
 /*
  * Two overlay planes per effect, one hugging each face and culled from behind, so whichever side faces the

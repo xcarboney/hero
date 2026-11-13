@@ -4,7 +4,8 @@
  * Layout is phone portrait first (controls in the thumb zone, --safe-* insets respected, Close under the left
  * thumb for html[data-left-handed="true"]), then short landscape, then desktop. Only `transform` and `opacity`
  * ever animate; there is no blur and no filter at all. html[data-effects="low"] drops the foil sheen and the
- * lamp glows. Reduced motion is handled by base.css (CSS) and SOL.Anim (JS).
+ * lamp glows. Reduced motion is handled by base.css (CSS) and SOL.Anim (JS). No text is smaller than 11px
+ * (the button labels and the "Selected" tag are the smallest), as in ui.css.
  *
  * Cards are styled by cards.css alone. This file sizes them through --card-w on an ancestor, positions the
  * wrappers it owns around them (.insp-obj, .insp-gal__item, .insp-back) and adds its own lighting planes next

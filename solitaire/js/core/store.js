@@ -21,6 +21,11 @@
  *     it were new.
  * Outside the app nothing changes: localStorage, then memory. The API is the same everywhere.
  *
+ * SOL.Settings also applies the settings that CSS and the browser need to the document, when this
+ * file loads and after every change (Settings.applyToDocument): data-theme, data-reduced-motion,
+ * data-left-handed and data-effects on <html>, and the table theme's dark tone in the page's
+ * <meta name="theme-color">, so a browser's own bars follow the theme.
+ *
  * Events (SOL.Bus):
  *   'settings:change'  { key, value, previous, all }
  *   'stats:change'     { stats }
@@ -217,6 +222,15 @@
   /** animSpeed -> multiplier handed to SOL.Anim.setSpeed (durations are divided by it). */
   const SPEEDS = { slow: 0.6, normal: 1, fast: 1.8 };
 
+  /**
+   * theme -> the colour a browser paints its own bars with around the page (its address bar, the
+   * status bar of the installed web app), kept in the page's <meta name="theme-color">: a dark
+   * tone of that table, halfway between --felt and --felt-lo of css/base.css. The Emerald one is
+   * the value index.html and manifest.webmanifest start with. tests/store.test.js holds the four
+   * against base.css. (The Android app has no such bar: it draws under transparent system bars.)
+   */
+  const THEME_COLORS = { emerald: '#0b3d2e', midnight: '#0e173c', crimson: '#400c18', slate: '#1c232c' };
+
   let settings = null;
   let motionQuery = null;
 
@@ -295,15 +309,23 @@
       return SPEEDS[Settings.get('animSpeed')] || 1;
     },
 
-    /** Mirrors theme / reduced motion / handedness / effects onto <html> so CSS can react. */
+    /**
+     * Mirrors theme / reduced motion / handedness / effects onto <html> so CSS can react, and the
+     * theme's dark tone into the page's <meta name="theme-color"> (when the page has one) so the
+     * browser's own bars match the table. Runs when this file loads and after every change.
+     */
     applyToDocument() {
       const doc = root.document;
       if (!doc || !doc.documentElement) return;
       const el = doc.documentElement;
-      el.setAttribute('data-theme', Settings.get('theme'));
+      const theme = Settings.get('theme');
+      el.setAttribute('data-theme', theme);
       el.setAttribute('data-reduced-motion', Settings.reducedMotion() ? 'true' : 'false');
       el.setAttribute('data-left-handed', Settings.get('leftHanded') ? 'true' : 'false');
       el.setAttribute('data-effects', Settings.get('effects'));
+      const color = THEME_COLORS[theme];
+      const meta = typeof doc.querySelector === 'function' ? doc.querySelector('meta[name="theme-color"]') : null;
+      if (meta && color && meta.getAttribute('content') !== color) meta.setAttribute('content', color);
     },
   };
 

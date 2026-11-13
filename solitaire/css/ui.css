@@ -22,6 +22,9 @@
  *   - html[data-effects="low"] turns the looping decoration off; html[data-reduced-motion="true"] is
  *     handled by base.css (it collapses every transition / animation in here);
  *   - every interactive target is at least 44px, nothing interactive sits under a safe-area inset;
+ *   - no text is smaller than 11px, the small uppercase captions included (HUD captions, toolbar labels, section
+ *     headings, the captions of the statistics and of the win screen). Sizes are px on purpose: the UI does not
+ *     follow the system font size (the Android shell pins the WebView's text zoom to 100%);
  *   - the HUD and the toolbar size themselves by the width they really have (container queries on
  *     .ui-hud-box / .ui-tb-box): side insets count, the viewport width alone does not.
  *
@@ -211,9 +214,9 @@
 }
 .ui-stat__label {
   position: relative;
-  height: 12px;
-  font: 700 11px/12px var(--font-ui);
-  letter-spacing: 0.08em;                        /* capitals only: 12px of line is enough, 12 + 1 + 23 fit the bar */
+  height: 11px;                                  /* capitals only, so 11px of line holds 11px of type: the bar's */
+  font: 700 11px/11px var(--font-ui);            /* rows keep their heights (11 + 1 + 23, and 11 + 1 + 20 sideways) */
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--ink-dim);
 }
@@ -463,7 +466,7 @@
 .ui-tb__label {
   position: relative;
   font: 600 11px/12px var(--font-ui);
-  letter-spacing: 0.03em;
+  letter-spacing: 0;                             /* untracked: "3D cards" has to fit a 48px button (a 260px bar) */
   white-space: nowrap;
   color: var(--ink-dim);
 }
@@ -588,6 +591,7 @@
   .ui-tb__label {
     font-size: 13.5px;
     line-height: 16px;
+    letter-spacing: 0.03em;
     color: var(--ink);
   }
   .ui-tb__btn--accent .ui-tb__label {
@@ -616,6 +620,7 @@
   }
   .ui-tb__label {
     font-size: 12.5px;
+    letter-spacing: 0.03em;
     color: var(--ink);
   }
   .ui-tb__icon,
@@ -1749,6 +1754,19 @@ button.ui-row:active {
   font-size: 17px;
   line-height: 33px;
 }
+/* Played / Won share the narrow strip beside the ring: at 30px "1,284" is wider than its column on a 360px
+   phone and would end in an ellipsis. Where the engine can measure the strip (container units), the two
+   numbers are as large as a column (half the strip, less half the gap) allows; --ui-fig-em is the width of
+   the wider one in em, set by ui.js. Older engines keep the stepped sizes above. */
+@supports (width: 1cqw) {
+  .ui-stats__sum {
+    container-type: inline-size;
+  }
+  .ui-stats__sum .ui-fig--big .ui-fig__value {
+    font-size: clamp(15px, calc((50cqw - 5px) / var(--ui-fig-em, 1)), 30px);
+    line-height: 33px;
+  }
+}
 .ui-fig__value.is-none {
   color: var(--ink-dim);                         /* "no record yet": quieter than a number, still readable */
   font-weight: 500;
@@ -1952,6 +1970,25 @@ button.ui-row:active {
 }
 .ui-keys span.ui-keys__k {
   white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ open-source licences (Android app) */
+
+/* One paragraph of the notices per <p>; ui.js has joined its lines again and kept the breaks that mean
+   something (list entries, the licence's title lines) as "\n", which pre-line shows. */
+.ui-lic p {
+  margin: 0 4px 12px;
+  font: 400 13px/1.5 var(--font-ui);
+  color: var(--ink-dim);
+  white-space: pre-line;
+  overflow-wrap: anywhere;                       /* a library name is one long word: it may break on a 320px phone */
+}
+.ui-lic p:first-child {
+  margin-top: 6px;
+  color: var(--ink);
+}
+.ui-lic p:last-child {
+  margin-bottom: 0;
 }
 
 /* ------------------------------------------------------------------ confirm */

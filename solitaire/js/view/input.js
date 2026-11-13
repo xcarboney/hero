@@ -7,8 +7,9 @@
  *   tap a card            auto-move (SOL.Game.autoMove) when the `tapToMove` setting is on; otherwise a
  *                         double-tap does it. A card that has nowhere to go shakes its head. A tap in the
  *                         same place within DOUBLE_TAP_MS of a tap that moved a card is swallowed if it would
- *                         act on that card again or on the card it uncovered (the second tap of a habitual
- *                         double tap must not play a card the player has not looked at yet).
+ *                         act on that card again or on the face-down card it turned over (the second tap of
+ *                         a habitual double tap must not play a card the player has not looked at yet). A
+ *                         card that was face-up before — the next card of a run or of the waste — is played.
  *   tap the stock         draw / recycle (also the empty stock slot)
  *   drag a card           picks up the card and everything on top of it once the pointer has moved past a
  *                         small slop (touch 10px, pen 6px, mouse 4px). The card is held by the spot where the
@@ -26,7 +27,8 @@
  *
  * Hit-testing goes through the board's layout model (Board.cardAt / pileAt): no DOM reads. A card is hit
  * where it is drawn, also while it glides or flies, and a flying card at its landing place as well; an exact
- * hit always wins, and a finger that misses every card takes the nearest one within TAP_SLACK px.
+ * hit always wins, and a finger that misses every card takes the nearest one within TAP_SLACK px that it could
+ * do something with (the stock, a face-up card) — never a card lying face-down in a column.
  * A card is only ever played while the player can see its face. The game state turns a card face-up the
  * moment a move uncovers or draws it; the table turns it a little later. Until its back is out of sight (and
  * for the whole gesture, if the finger went down before that) it cannot be tapped, dragged or inspected.
@@ -67,8 +69,8 @@
   let active = null;
   let lastTap = { card: -1, time: 0 };
   /**
-   * The last tap that moved a card: when and where, the card, the card it uncovered, and the game state and
-   * its move count right after (see isEcho).
+   * The last tap that moved a card: when and where, the card, the face-down card it turned over (-1: none),
+   * and the game state and its move count right after (see isEcho).
    */
   let lastMove = { time: -1e9, x: 0, y: 0, card: -1, bared: -1, state: null, moves: -1 };
   const pointer = { x: -1, y: -1, type: '', inside: false };
@@ -229,12 +231,17 @@
     return !sp || sp.flip < 90;
   }
 
-  /** The card directly under `card` in its pile — the one a move of `card` uncovers — or -1. */
-  function cardUnder(card) {
+  /**
+   * The face-down card directly under `card` in its pile — the one a move of `card` turns over — or -1.
+   * (Ask before the move: afterwards the state calls it face-up.) A card under `card` that is face-up already
+   * is not it: the player has seen that one — the next card of a run, the next card of the waste.
+   */
+  function hiddenUnder(card) {
     try {
       const st = G().state;
       const at = SOL.Engine.locate(st, card);
-      return at && at.index > 0 ? st.piles[at.pile][at.index - 1] : -1;
+      const under = at && at.index > 0 ? st.piles[at.pile][at.index - 1] : -1;
+      return under >= 0 && !st.faceUp[under] ? under : -1;
     } catch (err) {
       return -1;
     }
@@ -242,8 +249,10 @@
 
   /**
    * The tail of a double tap: this tap comes right after, and in the same place as, a tap that moved a card,
-   * and it would act on that card again (still drawn there as it leaves) or on the card that move uncovered.
-   * Many players double-tap by habit; the second tap must not play a card they have not looked at yet.
+   * and it would act on that card again (still drawn there as it leaves) or on the face-down card that move
+   * turned over. Many players double-tap by habit; the second tap must not play a card they have not looked
+   * at yet. A card that was face-up before the first tap is not held back: tapping twice quickly plays the
+   * next card of a run or of the waste as well.
    */
   function isEcho(a) {
     const m = lastMove;
@@ -423,7 +432,7 @@
     lastTap.card = -1;
     if (a.pile && a.pile.charAt(0) === 'f') return; // taps on foundations do nothing (drags still work)
     if (isEcho(a)) return; // the second tap of a double tap: swallowed
-    const bared = cardUnder(a.card);
+    const bared = hiddenUnder(a.card);
     if (g.autoMove(a.card)) {
       lastMove = { time: t, x: a.x0, y: a.y0, card: a.card, bared: bared, state: g.state, moves: g.state.moves };
     } else {

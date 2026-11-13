@@ -59,9 +59,11 @@
  *   -- dragging (called by SOL.Input; client coordinates) --
  *   Board.cardAt(clientX, clientY, slop = 0) -> cardId | -1        the card a touch at this point means: the
  *                                    topmost card drawn there; with `slop`, when no card is hit exactly, the
- *                                    NEAREST card within `slop` px. A card in flight is hit at its landing place
- *                                    (it counts as lying there already) and where it is drawn — but there it
- *                                    gives way to the stock and to a face-up card of another pile under it.
+ *                                    NEAREST card within `slop` px (a card lying face-down in a column is
+ *                                    never taken by a near miss, only by an exact hit). A card in flight is hit
+ *                                    at its landing place (it counts as lying there already) and where it is
+ *                                    drawn — but there it gives way to the stock and to a face-up card of another
+ *                                    pile under it.
  *   Board.pileAt(clientX, clientY, slop = 0) -> pileId | null      which pile's area the point is in
  *   Board.press(cardId) / Board.unpress()                           finger down: the card (and the run on it) is
  *                                    pushed into the felt a little; a drag lifts it out of the dip, a release
@@ -108,10 +110,13 @@
  *   Board.touch(sprite)              "I changed this sprite's values": schedules its style write
  *   Board.flush()                    write the styles of touched sprites right now (normally once per frame)
  *   Board.pulse(pileId, color?)      the slot's arrival ring
- *   Board.scorePop(x, y, delta)      "+10" for the card whose top-left corner is the table-space point (x, y):
- *                                    gold on a dark pill, rising from the card's top edge — in the top row,
- *                                    where that would run under the HUD, it plays on the lower half of the card
- *                                    instead, clear of its rank and suit (canvas, or a DOM label when FX is off)
+ *   Board.scorePop(x, y, delta, openY?)   "+10" for the card whose top-left corner is the table-space point
+ *                                    (x, y): gold on a dark pill, rising from the card's top edge — near the
+ *                                    top of the table (the top row; in the side arrangement also the first
+ *                                    cards of a column), where that would run under the HUD, it plays on the
+ *                                    lower half of the card instead, clear of its rank and suit. `openY`: the
+ *                                    y of the last card of a run that came with it (the label then plays on
+ *                                    that card, the one in view). Canvas, or a DOM label when FX is off.
  *   Board.foundationArrive(sprite, { quiet })   the whole arrival effect (ring, particles, pitch, haptic)
  *   Board.TUNE                       every timing / distance constant (mutable: tune them live)
  *   Board.busyCount() -> number      sprites with a running animation
@@ -163,7 +168,10 @@
  * 180 (the flip shading), and .is-glare while a card carries a glare (the hover tilt sets it; add it yourself
  * before you animate --glare-o / --glare-x / --glare-y on a card, remove it afterwards). One more, for the
  * card art: .is-fanned on every waste card under the top one while the draw-3 waste fans sideways — such a
- * card shows only its left edge, and cards.css gives the phone art a small suit under the rank there.
+ * card shows only its left edge, and cards.css gives the phone art a small suit under the rank there. And
+ * .is-tight on every covered face-up card of a tableau column whose fan step is squeezed below
+ * TUNE.tightBelow (0.25 of the card height; classic art only — long columns on wide, short tables): the suit
+ * under the rank of its corner index is cut off there, and cards.css shows the suit once more top-right.
  * FLAT CARDS (board.css): a table card that is neither .is-turning nor .is-glare is flattened into ONE
  * compositor layer — its inner 3D boxes are switched off and only the visible face is rendered. So when you
  * rotate a sprite yourself (rx / ry), never go past edge-on (|ry| > 90) with flip left at 0: set flip to 180
@@ -216,6 +224,7 @@
     down: 0.125, // face-down fan offset / card height
     upMin: 0.1,
     downMin: 0.045,
+    tightBelow: 0.25, // classic art: a face-up fan step under this (/ card height) cuts the corner suit (see markTight)
     wasteFanCompact: 0.44, // draw-3 waste fan offset / card width
     wasteFanClassic: 0.3,
     liftSteps: 8, // distinct --lift values between 0 and 1 (see Sprite._write)
@@ -317,6 +326,7 @@
   let zSeq = 0;
 
   const dirty = []; // sprites whose styles need writing
+  const tightWant = new Uint8Array(52); // scratch of markTight()
   let stopTick = null;
   let idleFrames = 0;
 
@@ -440,6 +450,7 @@
       this.hOff = null;
       this.covered = false; // completely under other cards of its pile and not rendered (see cover())
       this.fanned = false; // a covered card of the sideways draw-3 waste fan (see markFanned())
+      this.tight = false; // a covered face-up card of a column squeezed below its corner index (see markTight())
       this.liftQ = 0; // --lift quantisation of the running flight (0 = TUNE.liftSteps)
       // style cache
       this._dirty = false;
@@ -451,6 +462,7 @@
       this._wTurn = false;
       this._wLifted = false;
       this._wFan = false;
+      this._wTight = false;
     }
 
     busy() {
@@ -918,6 +930,10 @@
         s._wFan = s.fanned;
         s.el.classList.toggle('is-fanned', s.fanned);
       }
+      if (s.tight !== s._wTight) {
+        s._wTight = s.tight;
+        s.el.classList.toggle('is-tight', s.tight);
+      }
 
       // ---- transform
       let t = 'translate3d(' + r2(s.x + s.ox) + 'px,' + r2(s.y + s.oy) + 'px,0)';
@@ -1141,7 +1157,16 @@
       // up to 0.6 of a card — the 2 x 2 foundation block (and the stock) must read as groups of their own, not
       // as two more columns.
       const spare = Math.max(0, availW - 10 * cardW - 11 * gap);
-      const sep = gap * 2 + Math.min(spare / 2, Math.max(0, cardW * 0.6 - gap * 2));
+      let sep = gap * 2 + Math.min(spare / 2, Math.max(0, cardW * 0.6 - gap * 2));
+      // No room in the margins (a small phone held sideways: the cards take the whole width): the columns move a
+      // little closer together instead — down to a tenth of a card, still more air than the columns of the
+      // portrait table have — until the groups stand half a card apart. The cards keep their size.
+      const tight = Math.max(4, cardW * 0.1);
+      if (sep < cardW * 0.5 && gap > tight) {
+        const give = Math.min(gap - tight, ((cardW * 0.5 - sep) * 2) / 7);
+        gap -= give;
+        sep += (give * 7) / 2;
+      }
       const total = 10 * cardW + 7 * gap + 2 * sep;
       const x0 = padL + (availW - total) / 2;
       const step = cardW + gap;
@@ -1293,6 +1318,7 @@
         s.faceUp = false;
       }
       markFanned(null);
+      markTight(null);
       return;
     }
     const piles = state.piles;
@@ -1358,6 +1384,7 @@
     const stockEl = pileEls.stock;
     if (stockEl) stockEl.classList.toggle('is-spent', piles.stock.length === 0 && piles.waste.length === 0);
     markFanned(piles.waste);
+    markTight(piles);
   }
 
   /**
@@ -1373,6 +1400,35 @@
       const on = sideways && s.pile === 'waste' && i !== top;
       if (on !== s.fanned) {
         s.fanned = on;
+        touch(s);
+      }
+    }
+  }
+
+  /**
+   * A column squeezed so far (wide and short tables, late in a game) that its fan step is lower than the
+   * classic corner index — rank over suit — is high: the suit under the rank of every covered face-up card is
+   * cut off. Those cards carry .is-tight and cards.css shows their suit once more, top-right, level with the
+   * rank (classic art only; the phone art has its suit there anyway). `piles` null: nobody.
+   */
+  function markTight(piles) {
+    tightWant.fill(0);
+    if (piles && !L.compact) {
+      const faces = state.faceUp;
+      for (let c = 0; c < 7; c++) {
+        const arr = piles[TABLEAU[c]];
+        const n = arr.length;
+        let nDown = 0;
+        for (let i = 0; i < n; i++) if (!faces[arr[i]]) nDown++;
+        if (n - nDown < 2 || columnFan(nDown, n - nDown).up >= L.cardH * TUNE.tightBelow) continue;
+        for (let i = 0; i < n - 1; i++) if (faces[arr[i]]) tightWant[arr[i]] = 1;
+      }
+    }
+    for (let i = 0; i < 52; i++) {
+      const s = sprites[i];
+      const on = tightWant[i] === 1;
+      if (on !== s.tight) {
+        s.tight = on;
         touch(s);
       }
     }
@@ -1742,16 +1798,20 @@
     el.classList.add(pulseFlip ? 'is-pulse' : 'is-pulse-b');
   }
 
-  function scorePop(x, y, delta) {
+  function scorePop(x, y, delta, openY) {
     if (!delta || !L) return;
     const text = (delta > 0 ? '+' : '\u2212') + Math.abs(delta); // a real minus sign
+    const size = clamp(L.cardW * 0.36, 15, 30);
     let rise = clamp(L.cardH * 0.6, 30, 70);
     let onCard = false;
-    if (y - rise < L.cardH * 0.08) {
-      // The top row (a card reached its foundation, a recycle): the label can neither rise over the HUD nor
-      // may it settle on the rank and suit of the card that has just landed. It plays on the lower half of
-      // that card — from 0.84 of its height up to the middle.
-      y = L.topY + L.cardH * 0.84;
+    if (y - 4 - rise < size * 0.7) {
+      // Near the top of the table (a card reached its foundation, a recycle; in the side arrangement also the
+      // first cards of a column): rising from the card's top edge, the pill (size * 0.7 high each way) would
+      // run under the HUD. The label can neither do that nor may it settle on the rank and suit of the card
+      // that has just landed, so it plays on the lower half of THAT card — from 0.84 of its height up to the
+      // middle. `openY`: the top of the last card of a run that landed with it (the card whose lower half
+      // can be seen).
+      y = (openY > y ? openY : y) + L.cardH * 0.84;
       rise = L.cardH * 0.34;
       onCard = true;
     }
@@ -1760,7 +1820,7 @@
       const c = toClient(x + L.cardW / 2, y);
       f.floatText(c.x, onCard ? c.y : c.y - 4, text, {
         color: delta > 0 ? GOLD : MINUS,
-        size: clamp(L.cardW * 0.36, 15, 30),
+        size: size,
         rise: rise,
         duration: 950,
         plate: true, // a dark pill, like the DOM label below: score labels play over cards, and gold on ivory is weak
@@ -2032,7 +2092,7 @@
       sfx('recycle', { duration: n * gap + TUNE.recycleMs * 0.6, pan: panOf(L.piles.stock.x) });
       haptic('thud');
       pulse('stock', GOLD);
-      if (delta) scorePop(L.piles.stock.x, L.piles.stock.y + L.cardH * 0.4, delta);
+      if (delta) scorePop(L.piles.stock.x, L.piles.stock.y, delta); // (plays on the lower half of the slot)
     }
   }
 
@@ -2040,6 +2100,7 @@
     const n = transfers.length;
     if (n === 0) return;
     const lead = sprites[transfers[0].card];
+    const tail = sprites[transfers[n - 1].card]; // the last card of the run (its lower half stays in view)
     const toPile = transfers[0].to;
     const toFoundation = toPile.charAt(0) === 'f';
     const fromDrag = !!(dropped && o.source === 'drag' && dropped.sprites.indexOf(lead) !== -1);
@@ -2071,7 +2132,7 @@
         bump(toPile, lead.index - 1);
         ripple(toPile);
       }
-      if (delta) scorePop(lead.tx, lead.ty, delta);
+      if (delta) scorePop(lead.tx, lead.ty, delta, tail.ty);
     } else {
       const dist = Math.hypot(lead.tx - lead.x, lead.ty - lead.y);
       const step = o.step || 0;
@@ -2123,7 +2184,7 @@
                     haptic('thud');
                     bump(sp.pile, sp.index - 1);
                     ripple(sp.pile);
-                    if (delta) scorePop(sp.tx, sp.ty, delta);
+                    if (delta) scorePop(sp.tx, sp.ty, delta, tail.ty);
                   }
                 }
               : null,
@@ -2581,6 +2642,9 @@
    * that misses every card takes the NEAREST card within `slop` px — not the one highest in the stacking order:
    * a finger in the gap between two columns means the card it almost touched. Cards at the same distance
    * (the overlapping cards of a column): the topmost, which is the one whose strip is level with the finger.
+   * Only cards the player can do something with are in that race: the stock, and every card that lies (or is
+   * about to lie) face-up. A card lying face-down in a column answers an exact hit only — a finger in the gap
+   * between it and the stock above it, or the face-up card beside it, means the stock, or that card.
    *
    * A card in flight can be touched in two places:
    *   - where it is going to land: it counts as lying there already, on top of its pile;
@@ -2605,10 +2669,13 @@
     let airD = Infinity;
     for (let i = 0; i < 52; i++) {
       const s = sprites[i];
+      // (a card lying face-down in a column has to be hit exactly: nothing can be done with it, so a near
+      // miss is never meant for it and it must not take one from the stock above or the card beside it)
+      const reach = !s.faceUp && s.pile.charAt(0) === 't' ? 0 : pad;
       let d;
       if (!s.hFlight) {
         d = cardGap(x, y, s.x + s.ox, s.y + s.oy);
-        if (d <= pad && (d < restD || (d === restD && s.z > sprites[rest].z))) {
+        if (d <= reach && (d < restD || (d === restD && s.z > sprites[rest].z))) {
           rest = i;
           restD = d;
         }
@@ -2616,14 +2683,14 @@
       }
       if (s.tracking) {
         d = cardGap(x, y, s.tx, s.ty);
-        if (d <= pad && (d < landD || (d === landD && s.tz > sprites[land].tz))) {
+        if (d <= reach && (d < landD || (d === landD && s.tz > sprites[land].tz))) {
           land = i;
           landD = d;
         }
       }
       if (!onStock) {
         d = cardGap(x, y, s.x + s.ox, s.y + s.oy);
-        if (d <= pad && (d < airD || (d === airD && s.z > sprites[air].z))) {
+        if (d <= reach && (d < airD || (d === airD && s.z > sprites[air].z))) {
           air = i;
           airD = d;
         }

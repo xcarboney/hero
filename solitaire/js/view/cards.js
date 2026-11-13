@@ -31,7 +31,7 @@
  *     <div class="card__shadow"></div>                         (two cross-faded lift shadows; rotates with the faces)
  *     <div class="card__tilt">
  *       <div class="card__flip">
- *         <div class="card__face card__front"><svg class="card__art">…three <use> into the sprite…</svg></div>
+ *         <div class="card__face card__front"><svg class="card__art">…four <use> into the sprite…</svg></div>
  *         <div class="card__face card__back"></div>            (the design is a CSS background chosen by data-back)
  *         <div class="card__edges">…</div>                     (only with { thick: true }: 4 walls + 7 strips per rounded
  *                                                                corner, each an <i class="card__edge">, lit from the top-left)
@@ -45,12 +45,13 @@
  * --sheen-o / --shadow-o (0..1). Nothing in here listens for resize: every measure derives from --card-w in CSS,
  * and the art is SVG.
  *
- * Art notes: all shapes live once in an injected <svg> sprite (#sol-card-sprite) and each front is three <use>
+ * Art notes: all shapes live once in an injected <svg> sprite (#sol-card-sprite) and each front is four <use>
  * elements — a classic layout (corner indices, pips, ornamental ace, double-ended courts), a compact one for
- * cards narrower than 60px (big rank + suit, one large suit or a single bust) and the fan mark (below); a
- * container query in cards.css shows one of the two layouts. The six backs are procedurally generated SVG
- * documents handed to CSS as data: URIs, so a face-down card costs no extra DOM. Everything is original: suits,
- * numerals, court figures and backs are drawn from scratch below. A card is 11 DOM nodes (44 with { thick: true }).
+ * cards narrower than 60px (big rank + suit, one large suit or a single bust), the fan mark and the tight mark
+ * (both below); a container query in cards.css shows one of the two layouts. The six backs are procedurally
+ * generated SVG documents handed to CSS as data: URIs, so a face-down card costs no extra DOM. Everything is
+ * original: suits, numerals, court figures and backs are drawn from scratch below. A card is 12 DOM nodes (45
+ * with { thick: true }).
  *
  * Optional attribute: data-layout="compact" | "classic" on the .card element pins the front layout whatever the
  * card's size (unset = automatic). Nothing in here sets it.
@@ -60,8 +61,16 @@
  * chip for the courts), which is hidden otherwise; the classic layout ignores it (its corner index has the suit
  * under the rank anyway). The owner sets it (SOL.Board does, for the draw-3 waste); nothing in here does.
  *
+ * Optional class: .is-tight on the .card element — "only a strip along the top edge of this card can be seen,
+ * too low for the classic corner index" (a covered card of a squeezed column: the suit under the rank is cut
+ * off). In the classic layout it shows the tight mark, the suit once more in the top-right corner, level with
+ * the rank (that corner is empty on every classic face), which is hidden otherwise; the compact layout ignores
+ * it (its suit sits there anyway). The owner sets it (SOL.Board does, for squeezed tableau columns); nothing
+ * in here does.
+ *
  * Layout numbers other modules may lean on (fractions of the card height, measured from the top edge): the
- * corner index ends at 0.26 in the classic layout (rank alone: 0.17) and at 0.27 in the compact one, so a
+ * corner index ends at 0.26 in the classic layout (rank alone: 0.17; the tight mark ends at 0.15, so a classic
+ * card marked .is-tight shows rank and suit down to a step of 0.17) and at 0.27 in the compact one, so a
  * tableau fan step of 0.27-0.28 keeps rank and suit of every covered card readable at any size. Sideways
  * (fractions of the card width from the left edge): the classic index needs 0.22; the compact rank needs 0.24
  * (0.33 for the 10) and the compact suit sits top-RIGHT, so a sideways fan of compact cards shows rank and
@@ -557,6 +566,17 @@
     return s + use('sol-suit-' + c.suit, cx - size / 2, y, size, size);
   }
 
+  /*
+   * The tight mark: the suit once more, in the top-right corner of the CLASSIC layout, level with the rank. A
+   * column squeezed below the height of the corner index (rank over suit, 0.26 of the card) cuts the suit off
+   * its covered cards; the owner marks those cards .is-tight and cards.css then shows this mark (it is hidden
+   * everywhere else). The corner is free on every classic face: pips end at x = 188, the court frame at 193, and
+   * the ace's sunburst starts lower. Needs no sprite group of its own: it instances the suit symbol directly.
+   */
+  function tightMarkup(suit) {
+    return use('sol-suit-' + suit, 201, 13, 38, 38, ' class="card__tight"');
+  }
+
   // ------------------------------------------------------------------ sprite
   function spriteMarkup() {
     let s = '';
@@ -984,7 +1004,8 @@
       '<svg class="card__art" viewBox="0 0 250 350" aria-hidden="true" focusable="false">' +
         '<use class="card__classic" href="#sol-face-' + c.id + '"/>' +
         '<use class="card__compact" href="#sol-mini-' + c.id + '"/>' +
-        '<use class="card__fan" href="#sol-fan-' + c.id + '"/></svg>',
+        '<use class="card__fan" href="#sol-fan-' + c.id + '"/>' +
+        tightMarkup(c.suit) + '</svg>',
       !!o.thick
     );
     return el;

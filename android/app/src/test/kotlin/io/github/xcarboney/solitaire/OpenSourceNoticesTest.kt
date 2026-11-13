@@ -91,7 +91,7 @@ class OpenSourceNoticesTest {
     private val shipped = File("src/main/assets", OpenSourceNotices.ASSET)
 
     @Test
-    fun `the shipped notices end with the licence text exactly as the libraries ship it`() {
+    fun `the shipped notices contain the licence text exactly as the libraries ship it`() {
         // Every AndroidX library carries the Apache License 2.0 under META-INF; this one is a
         // plain jar, so the file is on the unit tests' classpath.
         val resource = javaClass.classLoader?.getResource("META-INF/androidx/annotation/annotation/LICENSE.txt")
@@ -101,7 +101,7 @@ class OpenSourceNoticesTest {
         assertTrue(licence.trimEnd().endsWith("END OF TERMS AND CONDITIONS"))
 
         val notices = shipped.readText(Charsets.UTF_8)
-        assertTrue("the licence text is in the notices, character for character", notices.endsWith(licence))
+        assertTrue("the licence text is in the notices, character for character", notices.contains(licence))
         val heading = "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION"
         assertEquals("...and only once", 1, notices.split(heading).size - 1)
     }

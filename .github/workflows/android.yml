@@ -54,7 +54,9 @@ jobs:
       # chmod: a wrapper script committed through the GitHub web UI or API loses its executable
       # bit, and the build would then stop with "Permission denied".
       # testDebugUnitTest: the JVM unit tests of the shell's own logic (app/src/test): the
-      # durable key/value store behind the saved game and the gesture exclusion rectangles.
+      # durable key/value store behind the saved game, the gesture exclusion rectangles and the
+      # open-source notices. Every build also runs checkOpenSourceNotices, which fails when the
+      # notices in the APK do not list exactly the libraries that are packaged.
       - name: Lint, unit-test and build the debug APK
         working-directory: android
         run: |

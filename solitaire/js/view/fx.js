@@ -60,7 +60,7 @@
  * floatText, shimmer, confetti and fireworks always draw on the front canvas. Front-canvas order, bottom to top:
  * shimmers, particles, rockets, rings, texts.
  *
- * A typical "card reached its foundation" recipe (see dev/fx-demo.html `fx.foundation`):
+ * A typical "card reached its foundation" recipe:
  *   FX.ring(cx, cy, { radius: cardW * 1.1 });   FX.burst(cx, cy, { kind: 'suit', suit, count: 10 });
  *   FX.burst(cx, cy, { kind: 'spark', count: 14 });   FX.floatText(cx, top - 6, '+10');
  *   FX.shimmer(cardRect, { radius: cardW * 0.075 });
@@ -1656,8 +1656,13 @@
       if (!alive) return;
       const dt = last ? Math.min(MAX_DT, Math.max(0, t - last)) : 16;
       last = t;
-      id = raf(loop);
-      fn(dt, t);
+      // (the next frame is asked for afterwards, and only when still subscribed — as in SOL.Anim: a frame that
+      //  is requested and then cancelled still costs one, and the ambient layer's slow clock takes single frames)
+      try {
+        fn(dt, t);
+      } finally {
+        if (alive) id = raf(loop);
+      }
     }
     id = raf(loop);
     return function () {

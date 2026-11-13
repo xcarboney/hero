@@ -37,6 +37,13 @@
  *                                        read back the moment storageSet returns and is written
  *                                        to disk in the background. store.js stores JSON, and
  *                                        '<removed>' for a key it has removed.
+ *   SolitaireNative.openSourceLicenses() -> string: the notices of the open-source libraries the
+ *                                        app bundles (which libraries, then the full text of their
+ *                                        licence) as plain text with lines of at most 77
+ *                                        characters; '' when it cannot be read. Used by ui.js
+ *                                        (SOL.UI), which shows it under Settings > Open-source
+ *                                        licences and offers that entry only where this method
+ *                                        exists. The web page itself bundles no third-party code.
  *
  * and calls back into the page:
  *

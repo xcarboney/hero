@@ -1,7 +1,8 @@
 /*
  * js/core/store.js: SOL.Store with and without the Android shell's native key/value store, the
- * 'fullscreen' setting, and the unchanged public API of Store / Settings / Stats / Save.
- * Run with: node --test solitaire/tests/
+ * 'fullscreen' setting, what SOL.Settings writes to the document (the theme-color that follows
+ * the table theme), and the unchanged public API of Store / Settings / Stats / Save.
+ * Run with: node --test "solitaire/tests/*.test.js"      (from the repository root)
  *
  * store.js keeps module-level state (the in-memory fallback, the cached settings and stats) and
  * looks at globalThis.SolitaireNative / globalThis.localStorage, so every scenario loads a fresh
@@ -13,6 +14,7 @@
 const test = require('node:test');
 const assert = require('node:assert');
 const path = require('node:path');
+const fs = require('node:fs');
 
 const CORE = path.join(__dirname, '..', 'js', 'core');
 
@@ -83,14 +85,47 @@ function setGlobal(name, value) {
   if (value !== undefined) Object.defineProperty(globalThis, name, { value, configurable: true, writable: true });
 }
 
+/**
+ * The part of a page's document that SOL.Settings writes to: the attributes of <html> and, when
+ * `themeColor` is a string, a <meta name="theme-color" content="..."> as index.html has one.
+ */
+function fakeDocument(themeColor) {
+  const element = () => {
+    const attrs = new Map();
+    return {
+      attrs,
+      writes: 0,
+      getAttribute(name) {
+        return attrs.has(name) ? attrs.get(name) : null;
+      },
+      setAttribute(name, value) {
+        this.writes++;
+        attrs.set(name, String(value));
+      },
+    };
+  };
+  const html = element();
+  const meta = typeof themeColor === 'string' ? element() : null;
+  if (meta) meta.attrs.set('content', themeColor);
+  return {
+    html,
+    meta,
+    documentElement: html,
+    querySelector(selector) {
+      return selector === 'meta[name="theme-color"]' ? meta : null;
+    },
+  };
+}
+
 /** Loads bus.js and store.js afresh against the given fakes. */
-function load({ bridge, localStorage } = {}) {
+function load({ bridge, localStorage, document } = {}) {
   for (const id of Object.keys(require.cache)) {
     if (id.startsWith(CORE)) delete require.cache[id];
   }
   delete globalThis.SOL;
   setGlobal('SolitaireNative', bridge);
   setGlobal('localStorage', localStorage);
+  setGlobal('document', document);
   const Bus = require(path.join(CORE, 'bus.js'));
   const store = require(path.join(CORE, 'store.js'));
   return { Bus, Store: store.Store, Settings: store.Settings, Stats: store.Stats, Save: store.Save };
@@ -100,6 +135,7 @@ test.afterEach(() => {
   delete globalThis.SOL;
   setGlobal('SolitaireNative', undefined);
   setGlobal('localStorage', undefined);
+  setGlobal('document', undefined);
 });
 
 // ------------------------------------------------------------------ outside the app
@@ -571,6 +607,112 @@ test('a saved game of a few hundred KB goes through unchanged', () => {
   assert.ok(big.length > 500000);
   load({ bridge, localStorage: fakeLocalStorage() }).Save.write(big);
   assert.strictEqual(load({ bridge, localStorage: fakeLocalStorage() }).Save.load(), big);
+});
+
+// ------------------------------------------------------------------ settings on the document
+/** index.html as it ships: the colour its <meta name="theme-color"> starts with. */
+function shippedThemeColor() {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+  const m = /<meta\s+name="theme-color"\s+content="(#[0-9a-f]{6})"/i.exec(html);
+  assert.ok(m, 'index.html has a theme-color meta');
+  return m[1].toLowerCase();
+}
+
+/** theme -> { felt, lo }: the --felt and --felt-lo tokens of each table theme in css/base.css. */
+function feltTokens() {
+  const css = fs.readFileSync(path.join(__dirname, '..', 'css', 'base.css'), 'utf8');
+  const out = {};
+  const block = /:root\[data-theme="([a-z]+)"\]\s*\{([^}]*)\}/g;
+  let m;
+  while ((m = block.exec(css))) {
+    const felt = /--felt:\s*(#[0-9a-f]{6})/i.exec(m[2]);
+    const lo = /--felt-lo:\s*(#[0-9a-f]{6})/i.exec(m[2]);
+    if (felt && lo) out[m[1]] = { felt: felt[1], lo: lo[1] };
+  }
+  return out;
+}
+
+function rgb(hex) {
+  return [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+}
+
+test('theme-color: the stored theme is on the page as soon as the file has loaded', () => {
+  const start = shippedThemeColor();
+  // nothing stored: the default theme, whose tone is the one the page ships with (no write at all)
+  const fresh = fakeDocument(start);
+  load({ localStorage: fakeLocalStorage(), document: fresh });
+  assert.strictEqual(fresh.html.attrs.get('data-theme'), 'emerald');
+  assert.strictEqual(fresh.meta.attrs.get('content'), start);
+  assert.strictEqual(fresh.meta.writes, 0);
+
+  // a player who chose Slate: the page still says Emerald when the script runs
+  const doc = fakeDocument(start);
+  load({ localStorage: fakeLocalStorage({ 'sol.settings.v1': '{"theme":"slate"}' }), document: doc });
+  assert.strictEqual(doc.html.attrs.get('data-theme'), 'slate');
+  assert.notStrictEqual(doc.meta.attrs.get('content'), start);
+  assert.match(doc.meta.attrs.get('content'), /^#[0-9a-f]{6}$/);
+});
+
+test('theme-color: follows every change of the theme, and each table has its own dark tone', () => {
+  const start = shippedThemeColor();
+  const tokens = feltTokens();
+  const doc = fakeDocument(start);
+  const { Settings } = load({ localStorage: fakeLocalStorage(), document: doc });
+  assert.deepStrictEqual(Object.keys(tokens).sort(), Settings.THEMES.slice().sort(), 'base.css styles every theme');
+
+  const seen = {};
+  for (const theme of Settings.THEMES.concat(Settings.THEMES)) {
+    assert.strictEqual(Settings.set('theme', theme), true);
+    const color = doc.meta.attrs.get('content');
+    assert.strictEqual(doc.html.attrs.get('data-theme'), theme);
+    assert.match(color, /^#[0-9a-f]{6}$/, theme);
+    if (seen[theme]) assert.strictEqual(color, seen[theme], theme + ': the same tone every time');
+    seen[theme] = color;
+    // a dark tone of that table: halfway between its felt and the felt at its darkest
+    const felt = rgb(tokens[theme].felt);
+    const lo = rgb(tokens[theme].lo);
+    rgb(color).forEach((v, i) => {
+      assert.ok(v >= lo[i] && v <= felt[i], theme + ' ' + color + ' lies between ' + tokens[theme].lo + ' and ' + tokens[theme].felt);
+      assert.ok(Math.abs(v - (felt[i] + lo[i]) / 2) <= 3, theme + ' ' + color + ' is the middle of the two');
+    });
+  }
+  assert.strictEqual(new Set(Object.values(seen)).size, Settings.THEMES.length, 'four themes, four tones');
+  assert.strictEqual(seen.emerald, start, 'the default theme has the tone the page ships with');
+
+  // every way a theme can change goes through it: reset() as well
+  Settings.set('theme', 'crimson');
+  assert.strictEqual(doc.meta.attrs.get('content'), seen.crimson);
+  Settings.reset();
+  assert.strictEqual(doc.html.attrs.get('data-theme'), 'emerald');
+  assert.strictEqual(doc.meta.attrs.get('content'), seen.emerald);
+
+  // a setting that is not the theme leaves the colour alone (and does not rewrite it)
+  const writes = doc.meta.writes;
+  Settings.set('leftHanded', true);
+  assert.strictEqual(doc.html.attrs.get('data-left-handed'), 'true');
+  assert.strictEqual(doc.meta.writes, writes);
+  // an invalid theme is refused and changes nothing
+  assert.strictEqual(Settings.set('theme', 'neon'), false);
+  assert.strictEqual(doc.meta.attrs.get('content'), seen.emerald);
+});
+
+test('theme-color: a page without that meta, or without a document, is left alone', () => {
+  const bare = fakeDocument();
+  const { Settings } = load({ localStorage: fakeLocalStorage(), document: bare });
+  assert.strictEqual(bare.meta, null);
+  assert.doesNotThrow(() => Settings.set('theme', 'midnight'));
+  assert.strictEqual(bare.html.attrs.get('data-theme'), 'midnight');
+
+  // a document that cannot be searched (some other host): the attributes of <html> still follow
+  const old = fakeDocument();
+  delete old.querySelector;
+  const second = load({ localStorage: fakeLocalStorage(), document: old });
+  assert.doesNotThrow(() => second.Settings.set('theme', 'crimson'));
+  assert.strictEqual(old.html.attrs.get('data-theme'), 'crimson');
+
+  const none = load({ localStorage: fakeLocalStorage() });
+  assert.doesNotThrow(() => none.Settings.set('theme', 'slate'));
+  assert.doesNotThrow(() => none.Settings.applyToDocument());
 });
 
 // ------------------------------------------------------------------ the public API did not change

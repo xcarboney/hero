@@ -1,10 +1,10 @@
 /*
  * Tests for SOL.RNG and SOL.Engine (js/core/rng.js, js/core/engine.js).
  *
- * Run with:   node --test "/home/user/hero/solitaire/tests/*.test.js"
- *        or:  cd /home/user/hero/solitaire && node --test
- * (Node 22 no longer accepts a bare directory: `node --test /home/user/hero/solitaire/tests/`
- *  tries to load the directory as a module and fails before any test runs.)
+ * Run with:   node --test "solitaire/tests/*.test.js"      (from the repository root)
+ *        or:  cd solitaire && node --test
+ * (Node 22 no longer accepts a bare directory: `node --test solitaire/tests/` tries to load the
+ *  directory as a module and fails before any test runs.)
  *
  * What is covered: the RNG; the deal (shape, determinism, a pinned layout); every rule of draw,
  * recycle, move and undo with exact records; scoring; win; clone / serialize / deserialize

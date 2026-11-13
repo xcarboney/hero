@@ -18,7 +18,9 @@
  *   - STAGE: it plays in whatever part of the screen is free. When the win screen slides up from the bottom
  *     ('game:pause' { reason: 'modal' }) the show glides into the space above it; when it closes, back. The
  *     sheet is measured once the browser has laid it out (a frame and a task after it opened — and once more a
- *     third of a second later), never inside a frame of the show and never by forcing a layout.
+ *     third of a second later), never inside a frame of the show and never by forcing a layout. The viewport
+ *     size the stage is cut from is read ahead in the same spirit (on load, after a resize, in a task of its
+ *     own), so starting the show reads no layout at all.
  *   - a re-layout (rotation, resize) moves the stage and the foundations under it.
  * Cost: transforms only. The cards themselves are rotated (rx / ry / rot / scale on .card — no animated
  * --flip, no --lift, no shadows) and stay flat, single-layer elements throughout (see "FLAT card" in
@@ -93,6 +95,16 @@
   let show = null; // per-show state, see play()
   let calmTimer = 0;
   let offs = []; // bus subscriptions of the running show
+
+  /*
+   * The size of the viewport, for the stage. window.innerWidth / innerHeight make the browser bring style and
+   * layout up to date first, and the show starts inside an animation frame, right after the board's writes of
+   * that frame — read there, they would cost a forced style and layout pass on the very first frame of the
+   * show. So the size is read AHEAD — when the page loads, after every resize and re-layout, and once more
+   * right after a show has started — always in a task of its own (see readViewSoon).
+   */
+  const view = { w: 0, h: 0 };
+  let viewQueued = false;
 
   // ------------------------------------------------------------------ small helpers
   function sfx(name, opts) {
@@ -200,6 +212,25 @@
   }
 
   // ------------------------------------------------------------------ the stage
+  /**
+   * Reads the viewport size in a task of its own (never inside a frame or an event handler: by then the
+   * browser has rendered whatever was written before). A running show follows a change: its stage glides.
+   */
+  function readViewSoon() {
+    if (viewQueued || typeof root.setTimeout !== 'function') return;
+    viewQueued = true;
+    root.setTimeout(function () {
+      viewQueued = false;
+      view.w = root.innerWidth;
+      view.h = root.innerHeight;
+      if (show && (show.vw !== view.w || show.vh !== view.h)) {
+        show.vw = view.w;
+        show.vh = view.h;
+        aimStage(show);
+      }
+    }, 0);
+  }
+
   /**
    * Top edge (viewport px) of a sheet docked to the bottom of the screen — the win screen on phones — or null.
    * A layout read: only ever called from measureSoon(), after the browser has laid the sheet out by itself.
@@ -312,10 +343,15 @@
     const showZ = B.TUNE.showZ;
     const total = duration();
 
+    // (the viewport size was read ahead, see `view`; a show that starts before the first read measures itself)
+    if (!(view.w > 0 && view.h > 0)) {
+      view.w = root.innerWidth;
+      view.h = root.innerHeight;
+    }
     const sh = (show = {
       L: L0,
-      vw: root.innerWidth,
-      vh: root.innerHeight,
+      vw: view.w,
+      vh: view.h,
       sheetTop: null,
       measureGen: 0, // bumped to schedule / call off a measurement of the sheet (see measureSoon)
       st: { cx: 0, cy: 0, a: 0, b: 0 },
@@ -351,6 +387,7 @@
       sh.order.push(i);
     }
     if (G && typeof G.isPaused === 'function' && G.isPaused()) measureSoon(sh, 1, 0);
+    readViewSoon(); // (a second look once this frame is out: a resize may be on its way)
     if (SOL.Bus) {
       offs.push(
         SOL.Bus.on('game:pause', function (e) {
@@ -370,8 +407,7 @@
         SOL.Bus.on('board:layout', function (layout) {
           if (!show || !layout) return;
           show.L = layout;
-          show.vw = root.innerWidth;
-          show.vh = root.innerHeight;
+          readViewSoon(); // (the viewport has probably changed with it: the stage follows a task later)
           if (show.sheetTop !== null) measureSoon(show, 2, 0);
           aimStage(show);
         })
@@ -803,6 +839,10 @@
     }
     end(false);
   }
+
+  // the viewport size, read ahead for the stage (see `view`)
+  if (typeof root.addEventListener === 'function') root.addEventListener('resize', readViewSoon);
+  readViewSoon();
 
   SOL.Celebrate = {
     play: play,

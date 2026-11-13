@@ -39,7 +39,9 @@
  * resume('modal'); SOL.Settings.get / set / reset; SOL.Stats.summary / reset; SOL.Inspector.openGallery({ tab });
  * SOL.Cards.create / createBackOnly / setBack / suitSvg; SOL.Haptics.play; SOL.Audio.play;
  * SOL.App.addBackHandler; SOL.Platform.isNativeApp / canHover; SOL.PWA.canInstall / promptInstall() and its
- * 'pwa:change' event. Every one of them is optional at run time.
+ * 'pwa:change' event; and, inside the Android app, the shell's SolitaireNative.openSourceLicenses() (the one
+ * bridge method the UI calls itself; contract: the header of js/core/platform.js). Every one of them is
+ * optional at run time.
  *
  * Behaviour worth knowing
  * -----------------------
@@ -55,6 +57,12 @@
  *   next deal.
  * - Settings shows a control for every key of SOL.Settings; 'fullscreen' only inside the Android app
  *   (SOL.Platform.isNativeApp), where it has an effect.
+ * - Inside the Android app Settings ends with "About > Open-source licences": a sheet of its own, on top of the
+ *   settings, with the notices of the libraries the app bundles (the text comes from the shell, see
+ *   openLicences). It closes like every sheet: its button, Back, Esc, backdrop, drag down. The row exists only
+ *   when the shell has SolitaireNative.openSourceLicenses(); the web page bundles no third-party code and never
+ *   shows it.
+ * - No text is smaller than 11px (css/ui.css keeps that floor); the UI does not follow the system font size.
  * - "New game" (toolbar, win screen, stuck card, Deal now, restart) goes through startDeal(): the New button
  *   stays disabled from the request until the controller's 'game:new' (or its promise settling).
  * - Stray taps never act. A panel ignores taps for a moment after it opens (160 ms everywhere, 380 ms within
@@ -640,8 +648,9 @@
     bar.style.transform = '';
     const avail = box.clientWidth;
     if (!(avail > 0)) return;
-    // Everyday values on a bar this wide always fit (up to 12 characters of score + moves + time need at most
-    // 292px): skip the layout read.
+    // Everyday values on a bar this wide always fit: skip the layout read. (Up to 12 characters of score +
+    // moves + time need at most 309px on a bar of 340px or less, where ui.css tightens the gaps, and at most
+    // 325px on a wider one: measured with the 11px captions and the widest of the system fonts.)
     if (!hadFit && avail >= 320 && key.split(':').slice(0, 3).reduce((n, v) => n + Number(v), 0) <= 12) return;
     const natural = function () {
       bar.classList.add('is-measure'); // every column at its content's width (ui.css)
@@ -2008,6 +2017,23 @@
         },
       }))));
 
+    // ---- about: only inside the Android app, which bundles open-source libraries and has to show their
+    // notices. The row needs the shell's bridge method; the web page bundles no third-party code and has none.
+    if (nativeLicences()) {
+      c.appendChild(h('h3.ui-sec', null, 'About'));
+      c.appendChild(h('div.ui-group', null,
+        h('button.ui-row.ui-press', {
+          type: 'button', 'data-settings': 'licences',
+          onclick: () => {
+            feedback();
+            openLicences();
+          },
+        },
+          h('span.ui-row__text', null, h('span.ui-row__label', null, 'Open-source licences'),
+            h('span.ui-row__hint', null, 'The libraries this app is built with')),
+          h('span.ui-row__chev', { html: icon('chevron'), 'aria-hidden': 'true' }))));
+    }
+
     c.appendChild(h('button.ui-btn.ui-btn--block.ui-btn--quiet.ui-reset.ui-press', {
       type: 'button', 'data-settings': 'reset',
       onclick: () => {
@@ -2147,6 +2173,73 @@
     return { el: group, sync: sync };
   }
 
+  // ================================================================== open-source licences (Android app)
+
+  /**
+   * The Android shell's bridge when it can hand over the open-source notices of the app, else null: outside the
+   * app, and in an app whose shell does not have the method. Looked up on every call, like every bridge method
+   * (contract: the header of js/core/platform.js), so a page and a shell of different ages still work together.
+   */
+  function nativeLicences() {
+    try {
+      const b = root.SolitaireNative;
+      return b && typeof b === 'object' && typeof b.openSourceLicenses === 'function' ? b : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /**
+   * The notices are a plain-text file wrapped at 77 columns, as licence texts are. Shown line by line, every
+   * line would break a second time on a phone, so the lines of a paragraph are joined again and the browser
+   * wraps them. A blank line ends a paragraph; a list entry ("- ...") and a centred line (indented far, like
+   * the three title lines of the licence) stay lines of their own. Only line breaks and indentation change:
+   * every word is shown, in its order. Returns one string per paragraph, its lines separated by "\n".
+   */
+  function licenceParagraphs(text) {
+    const out = [];
+    let cur = null;
+    for (const raw of String(text).replace(/\r\n?/g, '\n').split('\n')) {
+      const line = raw.trim();
+      if (!line) {
+        cur = null;
+      } else if (!cur) {
+        out.push((cur = [line]));
+      } else if (/^- /.test(line) || /^\s{16}/.test(raw)) {
+        cur.push(line);
+      } else {
+        cur[cur.length - 1] += ' ' + line;
+      }
+    }
+    return out.map((lines) => lines.join('\n'));
+  }
+
+  /** Settings > Open-source licences: the notices in a sheet of their own, on top of the settings. */
+  function openLicences() {
+    if (!inited || findLayer('licences')) return;
+    let text = '';
+    try {
+      const b = nativeLicences();
+      const answer = b ? b.openSourceLicenses() : '';
+      text = typeof answer === 'string' ? answer : '';
+    } catch (err) {
+      text = '';
+    }
+    const paragraphs = licenceParagraphs(text);
+    if (!paragraphs.length) {
+      toast('The licences could not be loaded', { type: 'error' });
+      return;
+    }
+    openLayer({
+      kind: 'licences',
+      title: 'Open-source licences',
+      build: (layer) => {
+        layer.content.classList.add('ui-lic');
+        for (const p of paragraphs) layer.content.appendChild(h('p', null, p));
+      },
+    });
+  }
+
   // ================================================================== statistics
 
   function statsSpec() {
@@ -2188,6 +2281,21 @@
       // cuts anything longer still with an ellipsis instead of letting it spill out of its box.
       const len = text === null ? 0 : text.length;
       fig.value.setAttribute('data-len', len > 9 ? 'xl' : len > 6 ? 'l' : len > 5 ? 'm' : 's');
+    };
+    /**
+     * Played and Won share the narrow strip beside the ring, where even "1,284" is too wide at full size on a
+     * 360px phone. ui.css makes the two numbers as large as a column allows, both the same size (the one the
+     * wider number needs). For that it needs the width of the text in em: a digit is at most 0.66em wide in
+     * the system fonts, a separator 0.3em.
+     */
+    const fitPair = (a, b) => {
+      const em = Math.max(1, ...[a, b].map((fig) => {
+        const text = fig.value.textContent;
+        const digits = text.replace(/\D/g, '').length;
+        return digits * 0.66 + (text.length - digits) * 0.3;
+      })).toFixed(2);
+      a.value.style.setProperty('--ui-fig-em', em);
+      b.value.style.setProperty('--ui-fig-em', em);
     };
 
     const seg = segmented({
@@ -2271,6 +2379,7 @@
       s.winRate = clamp(Number(s.winRate) || 0, 0, 1); // a damaged stats record may hold more wins than games
       setFig(played, fmtInt(s.played));
       setFig(won, fmtInt(s.won));
+      fitPair(played, won);
       setFig(bestScore, s.won > 0 ? fmtInt(s.bestScore) : null);
       setFig(bestTime, s.bestTimeMs > 0 ? fmtTime(s.bestTimeMs) : null);
       setFig(curStreak, fmtInt(s.currentStreak));

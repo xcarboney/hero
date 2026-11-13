@@ -548,7 +548,7 @@ function installOffer(outcome) {
 }
 
 for (const [name, href, options] of [
-  ['from file://', 'file:///home/user/hero/solitaire/index.html', {}],
+  ['from file://', 'file:///srv/app/solitaire/index.html', {}],
   ['inside the Android app (SolitaireNative bridge)', PAGE, { native: true }],
   ['on the Android app\'s asset host', 'https://appassets.androidplatform.net/assets/solitaire/index.html', {}],
 ]) {

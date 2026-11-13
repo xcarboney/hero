@@ -62,7 +62,7 @@
  *     autocomplete 750 a quick run up the scale: auto-complete starts
  *     win 2400         a short fanfare resolving on a D major chord
  *
- *   Extras (not in the original contract; used by the demo page and the tests):
+ *   Extras (not in the original contract; used by the tests and by development tools):
  *   Audio.NAMES                      the 19 names, in contract order.
  *   Audio.supported                  false when the browser has no WebAudio (everything is then a no-op).
  *   Audio.state                      'unsupported' | 'idle' (no context yet) | 'suspended' | 'running' | 'closed'
@@ -99,7 +99,7 @@
  *   For the first 160 ms of a context's life the compressor is bypassed (it starts with its gain collapsed), so
  *   the sound of the very gesture that unlocks audio is not swallowed.
  *
- * Levels (volume 1, centre pan; see dev/audio-demo.html "Measure all"): card sounds peak around 0.35-0.6, tonal
+ * Levels (volume 1, centre pan; measured by rendering each sound with Audio.render): card sounds peak around 0.35-0.6, tonal
  * accents around 0.15-0.4; at the default volume of 0.6 everything is 6.6 dB below that.
  */
 (function (root) {
@@ -601,7 +601,7 @@
   // ------------------------------------------------------------------ the sounds
   /*
    * name -> {
-   *   level  overall gain (the calibration knob: see dev/audio-demo.html "Measure all")
+   *   level  overall gain (the calibration knob: render the sound with Audio.render and measure its peak)
    *   prio   who survives when the polyphony cap is hit (higher wins)
    *   gap    s. A second request for the same sound within this of an existing one is dropped
    *   wet    reverb send (0 for the dry, close-up card sounds: one node less per trigger)
@@ -1614,7 +1614,7 @@
     }
   }
 
-  // ------------------------------------------------------------------ offline rendering (tests, demo page)
+  // ------------------------------------------------------------------ offline rendering (tests, measuring levels)
   function render(events, options) {
     return new Promise(function (resolve) {
       try {

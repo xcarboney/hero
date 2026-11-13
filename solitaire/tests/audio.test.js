@@ -1,8 +1,8 @@
 /*
  * SOL.Audio — logic tests that do not need a browser.
  *
- * The sound itself is verified in Chromium (dev/audio-demo.html renders every sound through an
- * OfflineAudioContext and measures it). What can be checked here, against a strict fake of the
+ * The sound itself can only be verified in a browser (Audio.render renders any sound through an
+ * OfflineAudioContext, where it can be measured). What can be checked here, against a strict fake of the
  * WebAudio API that throws exactly where real browsers throw, is everything around it:
  * robustness, scheduling on the context clock, the polyphony limiter, the foundation scale and
  * the autoplay / suspend state machine.

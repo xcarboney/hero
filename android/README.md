@@ -33,7 +33,8 @@ That address never leaves the device: `WebViewAssetLoader` answers it from the A
 
 The app injects one object into the page, `window.SolitaireNative` (`NativeBridge.kt`), and
 calls two functions of the page. The page's side is `../solitaire/js/core/platform.js` (its
-header is the same contract seen from JavaScript) and, for storage, `../solitaire/js/core/store.js`.
+header is the same contract seen from JavaScript), for storage `../solitaire/js/core/store.js`
+and for the open-source notices `../solitaire/js/view/ui.js`.
 The page looks every method up before calling it, so a page and a shell of different ages still
 work together; each side just goes without what the other does not have.
 
@@ -51,6 +52,7 @@ Page to app, `SolitaireNative.…`:
 | `storageSet(key, value)` | boolean | Stores a string. `false`, and the previous value stays, for an invalid key, a value over 2 MB or a full store (32 keys, 8 MB in total). |
 | `storageRemove(key)` | boolean | Removes the value. `false` only for an invalid key. |
 | `storageKeys()` | string | JSON array of the keys that have a value, sorted. |
+| `openSourceLicenses()` | string | The notices of the open-source libraries in the APK: which libraries, then the full text of their licence, as plain text with lines of at most 77 characters. `""` if it cannot be read. The page shows it under *Settings > Open-source licences* and offers that entry only when the method exists (see [Open-source notices](#open-source-notices)). |
 
 Keys are 1 to 64 characters out of `A-Z a-z 0-9 . _ -` (the page uses `sol.save.v1`,
 `sol.settings.v1`, `sol.stats.v1`). The app stores the values as they are; the page puts JSON
@@ -67,7 +69,8 @@ App to page:
 
 All of them only act while the WebView shows the game's own page. The methods that touch the
 window run on the UI thread; the storage methods answer on the WebView's bridge thread and never
-wait for a disk write.
+wait for a disk write. `openSourceLicenses()` answers on the bridge thread too: it reads one small
+file from the APK the first time it is asked.
 
 ## Full screen and the Back gesture
 
@@ -139,6 +142,32 @@ If the device cannot write (storage full), the value stays in memory and the wri
 again with every later change and whenever the app is left. Until one succeeds, the file keeps
 the last value that did reach it, and that is what the next start reads.
 
+## Open-source notices
+
+The APK contains open-source libraries (AndroidX, the Kotlin standard library and what they
+depend on; all under the Apache License 2.0), and that licence asks that whoever gets a copy of
+them also gets its text. The app carries it in `app/src/main/assets/open_source_licenses.txt`:
+the list of the libraries, then the licence text, copied unchanged from the `LICENSE.txt` that
+the AndroidX libraries ship. In the game it is under *Settings > About > Open-source licences*.
+The page gets the text through `SolitaireNative.openSourceLicenses()`; the file lies next to
+`assets/solitaire/`, not in it, so it cannot be loaded by URL, and the web version of the game,
+which bundles no libraries, has neither the file nor the entry.
+
+The list is written by hand, so the build checks it: the task `:app:checkOpenSourceNotices`,
+which runs with every build, fails when the lines `- group:artifact` in the file are not exactly
+the libraries on the release runtime classpath. That happens after adding or removing a
+dependency, and sometimes after raising a version (the libraries a library depends on change
+too). Then:
+
+```sh
+./gradlew :app:dependencies --configuration releaseRuntimeClasspath   # what is packaged
+```
+
+Look up the licence of every library the error names (its `.pom` file states it), add or remove
+its line in the file, and, for a licence other than Apache 2.0, add that licence's text as well.
+`OpenSourceNoticesTest` checks that the file still contains the Apache licence text exactly as
+the libraries ship it.
+
 ## Build a debug APK
 
 You need JDK 17 or 21 and the Android SDK (`ANDROID_HOME` set, or `sdk.dir=...` in
@@ -163,7 +192,8 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 `./gradlew lint` runs Android lint (report: `app/build/reports/lint-results-debug.html`).
 `./gradlew testDebugUnitTest` runs the unit tests of the app's own logic (`app/src/test`: the
-key/value store and the gesture exclusion rectangles; plain JUnit on the JVM, no device needed;
+key/value store, the gesture exclusion rectangles and the open-source notices; plain JUnit on
+the JVM, no device needed;
 report: `app/build/reports/tests/testDebugUnitTest/index.html`). The page's side of the contract
 is tested with the web game: `node --test "solitaire/tests/*.test.js"` in the repository root.
 Debug builds allow inspecting the page from desktop Chrome at `chrome://inspect`.
