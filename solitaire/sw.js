@@ -108,10 +108,13 @@ function store(cache, key, cacheMode) {
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE).then((cache) =>
-      // 'reload' bypasses the HTTP cache: a new worker must not precache stale copies.
-      Promise.all(PRECACHE.map((path) => store(cache, new URL(path, APP_ROOT).href, 'reload')))
-    )
+    caches
+      .open(CACHE)
+      .then((cache) =>
+        // 'reload' bypasses the HTTP cache: a new worker must not precache stale copies.
+        Promise.all(PRECACHE.map((path) => store(cache, new URL(path, APP_ROOT).href, 'reload')))
+      )
+      .catch(() => undefined) // Cache Storage refused: install anyway, as a pass-through
   );
 });
 
@@ -154,9 +157,15 @@ self.addEventListener('activate', (event) => {
 async function respond(event) {
   const request = event.request;
   const key = cacheKey(new URL(request.url));
-  const cache = await caches.open(CACHE);
 
-  const cached = await cache.match(key, { ignoreVary: true });
+  let cache;
+  try {
+    cache = await caches.open(CACHE);
+  } catch (err) {
+    return fetch(request); // Cache Storage refused: be a plain pass-through
+  }
+
+  const cached = await cache.match(key, { ignoreVary: true }).catch(() => undefined);
   if (cached) {
     // 'no-cache' makes the browser ask the server (a cheap 304 when nothing changed) instead of
     // trusting its HTTP cache, so the refreshed entry really is the deployed file.
@@ -173,7 +182,7 @@ async function respond(event) {
     return response;
   } catch (err) {
     if (request.mode === 'navigate') {
-      const shell = await cache.match(INDEX_URL, { ignoreVary: true });
+      const shell = await cache.match(INDEX_URL, { ignoreVary: true }).catch(() => undefined);
       if (shell) return shell;
     }
     throw err; // the page sees the same network error it would see without a service worker
