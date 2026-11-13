@@ -135,7 +135,10 @@ val bundleWebGame = tasks.register<BundleWebGame>("bundleWebGame") {
         "dev/**", // demo pages of the web modules
         "tests/**", "test/**", "**/*.test.js", "**/*.spec.js",
         "**/.*", "**/.*/**", // dot-files and dot-directories
-        "sw.js", "**/*.webmanifest", "manifest.json", // PWA plumbing: meaningless inside the app
+        // PWA plumbing, meaningless inside the app: js/pwa.js switches itself off there, so the
+        // service worker, the web manifest and the install icons they refer to (icons/, with the
+        // script that renders them) are never requested. The app has its own launcher icon.
+        "sw.js", "**/*.webmanifest", "manifest.json", "icons/**",
         "node_modules/**", "package.json", "package-lock.json",
         "**/*.md", "**/*.map",
     )

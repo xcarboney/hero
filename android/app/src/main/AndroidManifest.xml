@@ -44,11 +44,19 @@
         <!--
             configChanges: the page re-lays itself out on resize, so no configuration change
             may recreate the Activity (that would reload the WebView in the middle of a game).
+            assetsPaths covers resource overlays being switched, which Android 12+ does every
+            time the wallpaper changes the system colours.
+
+            launchMode singleTask: there must only ever be one game. Started a second time with
+            a different intent (an installer's "Open" button, then the launcher icon), a standard
+            Activity can be stacked on top of itself; two pages would then share one saved game
+            and the stale one underneath would overwrite the newer one's progress.
         -->
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|uiMode|keyboard|keyboardHidden|navigation|touchscreen|fontScale|fontWeightAdjustment|layoutDirection|locale|grammaticalGender|colorMode|mcc|mnc"
-            android:exported="true">
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|uiMode|keyboard|keyboardHidden|navigation|touchscreen|fontScale|fontWeightAdjustment|layoutDirection|locale|grammaticalGender|colorMode|assetsPaths|mcc|mnc"
+            android:exported="true"
+            android:launchMode="singleTask">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
 

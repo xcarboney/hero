@@ -15,13 +15,16 @@ There is exactly one copy of the game in the repository: `../solitaire`. Nothing
 `../solitaire` into `app/build/generated/assets/bundleWebGame/solitaire/`, and that directory is
 merged into the APK as `assets/solitaire/`.
 
-- Left out: `dev/`, `tests/`, dot-files, `sw.js`, web manifests, `*.md`, `*.map`.
+- Left out: `dev/`, `tests/`, dot-files, `*.md`, `*.map`, and the files only the installable
+  web version uses (`sw.js`, the web manifest, `icons/`). Everything else under `../solitaire`
+  ships; the list is in `app/build.gradle.kts`.
 - The task is incremental: change a file of the game, build again, and the APK has the change.
 - The build fails with "Web game not found" if `../solitaire/index.html` is missing, so check
   out the whole repository, not only `android/`.
 
 At runtime the page is loaded from `https://appassets.androidplatform.net/assets/solitaire/index.html`.
-That address never leaves the device: `WebViewAssetLoader` answers it from the APK.
+That address never leaves the device: `WebViewAssetLoader` answers it from the APK, and only
+`assets/solitaire/` is reachable that way.
 `app/src/main/kotlin/.../MainActivity.kt` documents the contract with the page (system bar
 insets, back button, haptics); the page's side of it is `../solitaire/js/core/platform.js`.
 

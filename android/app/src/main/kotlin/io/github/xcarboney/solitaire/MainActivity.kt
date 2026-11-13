@@ -86,7 +86,8 @@ class MainActivity : ComponentActivity() {
         assetLoader = WebViewAssetLoader.Builder()
             .setDomain(GameSite.HOST)
             .setHttpAllowed(false)
-            .addPathHandler(GameSite.ASSETS_PATH, WebViewAssetLoader.AssetsPathHandler(this))
+            // Only assets/solitaire/ is mounted: nothing else in the APK is reachable by URL.
+            .addPathHandler(GameSite.GAME_PATH, GameAssetsHandler(this))
             .build()
 
         container = FrameLayout(this)
@@ -261,9 +262,21 @@ class MainActivity : ComponentActivity() {
 
     private inner class GameClient : WebViewClient() {
 
-        /** Runs on a WebView background thread. Every request is answered here, never by the network. */
-        override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse =
-            assetLoader.shouldInterceptRequest(request.url) ?: blockedResponse()
+        /**
+         * Runs on a WebView background thread. Every request that could leave the app is answered
+         * here, never by the network: with the game's file, or with an empty 403.
+         *
+         * The platform documents that this callback can also be invoked for data: URLs. Those
+         * are content the page generated itself (its card backs are SVG data: URIs), so they are
+         * left to WebView instead of being answered with the 403.
+         */
+        override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
+            val url = request.url
+            if (GameSite.isInPageData(url)) return null
+            // WebViewAssetLoader dereferences the scheme; a URL without one is not ours anyway.
+            if (url.scheme == null) return blockedResponse()
+            return assetLoader.shouldInterceptRequest(url) ?: blockedResponse()
+        }
 
         /**
          * Navigation lock: the page may only ever navigate within the app's own origin. Anything

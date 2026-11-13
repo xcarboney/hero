@@ -57,13 +57,16 @@
   // falls back to standalone; the others are what browsers may substitute.
   const APP_DISPLAY_MODES = ['fullscreen', 'standalone', 'minimal-ui', 'window-controls-overlay'];
   const modeQueries = [];
+  // (display-mode: fullscreen) also matches a browser tab that entered full screen through the
+  // Fullscreen API. That takes a user gesture, so it cannot be the case while this script runs:
+  // fullscreen means "installed" only when the page was launched that way.
+  let launchedFullscreen = false;
 
   function inAppWindow() {
     if (nav.standalone === true) return true; // iOS home-screen web app
     for (const entry of modeQueries) {
       if (!entry.query.matches) continue;
-      // A browser tab made full screen through the Fullscreen API matches too; not an install.
-      if (entry.mode === 'fullscreen' && doc.fullscreenElement) continue;
+      if (entry.mode === 'fullscreen' && !launchedFullscreen) continue;
       return true;
     }
     return false;
