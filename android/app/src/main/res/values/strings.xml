@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Solitaire 3D</string>
+
+    <!-- Toast shown on the first back press when the game has nothing left to close. -->
+    <string name="back_again_to_exit">Press back again to exit</string>
+
+    <!-- Toast shown when the system WebView component is missing, disabled or being updated. -->
+    <string name="error_webview_unavailable">Solitaire 3D needs Android System WebView, which is not available right now. Please try again in a moment.</string>
+
+    <!-- Toast shown when the game view keeps failing and the app closes instead of looping. -->
+    <string name="error_game_keeps_stopping">The game keeps stopping. Your game in progress is saved, please open Solitaire 3D again.</string>
+</resources>

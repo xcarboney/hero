@@ -27,17 +27,40 @@
  *       volume  linear gain on this trigger (0..2).
  *       delay   MILLISECONDS from now, like every other time in this code base. Scheduled on the AudioContext
  *               clock, so a staggered burst (28 x 'deal', delay: i * 45) is sample-accurate however janky the
- *               frame rate is. It is real time: NOT scaled by SOL.Anim.speed (divide by it yourself when you
- *               stagger alongside an animation). Capped at 30 s.
+ *               frame rate is; calls made in one synchronous run share the same "now", so their delays are
+ *               exact relative to each other. It is real time: NOT scaled by SOL.Anim.speed (divide by it
+ *               yourself when you stagger alongside an animation). Capped at 30 s.
  *       pan     -1 (left) .. 1 (right). Equal-power; something subtle like +-0.4 across the table is plenty.
- *       duration (extra) milliseconds; only 'shuffle', 'recycle', 'slide' and 'whoosh' stretch to fit it.
+ *       duration (extra) milliseconds; only 'shuffle', 'recycle', 'slide' and 'whoosh' stretch their action to
+ *               fit it (shuffle and recycle end with a ~120 ms landing after it). Clamped to sensible ranges.
  *       rank    (extra) 1..13, only for 'foundation' (see playFoundation).
  *     Returns true when the sound was scheduled, false when it was ignored: unknown name, disabled, no context
  *     yet (no user gesture so far), page hidden, WebAudio missing, or dropped by the polyphony limiter.
+ *     Scheduling many sounds ahead in one go is cheap: a trigger more than 400 ms away only has its start time
+ *     fixed on the audio clock; its nodes are built about 300 ms before it sounds.
  *     NEVER throws, whatever it is given, whenever it is called (before init() included: that arms init()).
  *   Audio.playFoundation(rank, opts) -> boolean
  *       rank 1..13 walks up A3 B3 D4 E4 F#4 A4 B4 D5 E5 F#5 A5 B5 D6 — the scale starts on the dominant and the
  *       King lands on the tonic, with a small sparkle because the suit is complete. Same opts as play().
+ *
+ *   The sounds (nominal length in ms; * = stretchable with `duration`)
+ *     deal 130         a card flicked off the deck: play it when the card launches
+ *     place 120        a card set down, the fullest card sound: play it when a card / run lands
+ *     pick 70          a card lifted: drag start
+ *     flip 195         a card turned over: air, then the landing ~95 ms in
+ *     slide 200*       a card dragged across the felt: long travels, returns after an illegal drop
+ *     draw 170         stock -> waste (slide off the stock, snap down)
+ *     recycle 540*     waste swept back onto the stock: a falling run of ticks and a landing
+ *     foundation 500   a soft landing plus a mallet note pitched by `rank` (King: 750, with a sparkle)
+ *     invalid 260      a dull double knock for a rejected move
+ *     hint 560         two small bells, a rising fourth
+ *     undo 210         a swish played backwards, then the card settles
+ *     shuffle 840*     a riffle from two hands (stereo), the bridge, the deck squared up
+ *     whoosh 350*      cards sweeping through the air: gathering the deck, the celebration
+ *     click 60         buttons          tick 40    counters, the clock (try pitch for a rising count)
+ *     open 400 / close 360    panels: air and a rising / falling fifth
+ *     autocomplete 750 a quick run up the scale: auto-complete starts
+ *     win 2400         a short fanfare resolving on a D major chord
  *
  *   Extras (not in the original contract; used by the demo page and the tests):
  *   Audio.NAMES                      the 19 names, in contract order.
@@ -47,26 +70,37 @@
  *   Audio.unlock() -> boolean        try to create / resume the context right now (call it from a gesture handler).
  *   Audio.stopAll()                  fade out everything that is sounding or scheduled.
  *   Audio.duration(name, opts) -> ms nominal length (upper bound) of a sound; 0 for unknown names.
- *   Audio.voices                     number of scheduled / sounding voices (get).
+ *   Audio.voices                     number of sounding / scheduled / queued sounds (get).
  *   Audio.context / Audio.output     the live AudioContext and its final GainNode, or null (meters, visualisers).
  *   Audio.debug                      set true to console.error swallowed exceptions (dev pages / tests only).
- *   Audio.createRig(ctx, { random, volume = 1, destination }) -> rig
+ *   Audio.createRig(ctx, { random, volume = 1, destination, defer = false, lazy = false, lead = 0.006 }) -> rig
  *       Builds the whole thing — noise buffers, reverb, master chain — on ANY BaseAudioContext (an
- *       OfflineAudioContext for instance). rig.play(name, opts) -> voice | null, rig.setVolume(v),
- *       rig.setMuted(bool), rig.stopAll(), rig.voices, rig.input (bus), rig.output (final GainNode).
- *   Audio.render(events, { sampleRate = 44100, seed, volume = 1, tail = 250, duration }) -> Promise<AudioBuffer | null>
+ *       OfflineAudioContext for instance). rig.play(name, opts) -> Voice | { queued: true } | null,
+ *       rig.setVolume(v), rig.setMuted(bool), rig.stopAll(), rig.pending(), rig.voices, rig.input (bus),
+ *       rig.output (final GainNode). defer / lazy / lead are what the live context uses: triggers far ahead are
+ *       built just before they sound, the reverb is built by rig.warm() instead of at once, and "now" means
+ *       `lead` seconds from currentTime (the device buffer plus a margin, so no attack is ever cut short).
+ *   Audio.render(events, { sampleRate = 44100, seed, volume = 1, tail = 250, duration, cold = false }) -> Promise<AudioBuffer | null>
  *       Renders through the exact production graph in an OfflineAudioContext. `events` is a name, or an array of
  *       names / [name, opts] / { name, opts }. `seed` makes the random variation reproducible. tail and duration
- *       are in ms. Resolves null when offline rendering is unavailable. Never rejects.
+ *       are in ms. The result is what a context that has been running for a while produces; `cold: true` renders
+ *       the first moments of a brand new context instead (the compressor is still bypassed then, see createRig).
+ *       Resolves null when offline rendering is unavailable. Never rejects.
  *
  * Signal path
  * -----------
  *   voice (sources -> filters -> envelopes -> voice gain -> [pan]) --+--> bus -> compressor -> soft limiter -> volume -> out
  *                                                                    +--> reverb send -> small-room convolver -> bus
  *   The limiter is a tanh soft-clip that is transparent below 0.7 and can never exceed 0.97, so the output cannot
- *   clip no matter how many sounds pile up. On top of that at most MAX_VOICES sounds overlap, the same sound
- *   asked for twice in the same instant collapses to one, and a sound stacking on top of itself is turned down
- *   a little each time (so a fast foundation cascade stays gentle).
+ *   clip no matter how many sounds pile up. On top of that at most 12 sounds overlap (the least important one is
+ *   pushed out), the same sound asked for twice in the same instant collapses to one, at most 96 sounds can be
+ *   waiting in the schedule, and a sound stacking on top of itself is turned down a little each time (so a fast
+ *   foundation cascade stays gentle).
+ *   For the first 160 ms of a context's life the compressor is bypassed (it starts with its gain collapsed), so
+ *   the sound of the very gesture that unlocks audio is not swallowed.
+ *
+ * Levels (volume 1, centre pan; see dev/audio-demo.html "Measure all"): card sounds peak around 0.35-0.6, tonal
+ * accents around 0.15-0.4; at the default volume of 0.6 everything is 6.6 dB below that.
  */
 (function (root) {
   'use strict';
@@ -79,7 +113,7 @@
   ];
 
   // ------------------------------------------------------------------ tuning
-  const LOOKAHEAD = 0.006; // s. Schedule a hair ahead so an attack is never truncated by "start time already passed".
+  const LOOKAHEAD = 0.006; // s. The least a sound is scheduled ahead (see `lead` in createRig).
   const MAX_VOICES = 12; // sounds allowed to overlap at any instant
   const MAX_PENDING = 96; // scheduled-but-unfinished voices (bounds the node count of long staggers)
   const MAX_DELAY = 30; // s
@@ -98,6 +132,20 @@
   const CLIP_KNEE = 0.7; // the limiter is exactly linear below this...
   const CLIP_CEIL = 0.97; // ...and approaches this asymptotically
   const CLIP_RANGE = 2; // input magnitude mapped onto the ends of the shaper curve
+  const COMP_WARMUP = 0.16; // s after its creation during which the compressor is bypassed (see createRig)
+  const NOISE_SECONDS = 0.7; // length of the looping noise buffers
+
+  // Look-ahead scheduling on the live context. A trigger that lies further ahead than DEFER_AFTER is only noted
+  // (its exact start time on the audio clock is fixed right away) and its nodes are built BUILD_AHEAD before it
+  // sounds. A 28-card deal scheduled in one go then costs one cheap loop instead of 300 nodes in a single frame.
+  // BUILD_AHEAD is also how long the main thread may stall before a queued sound comes out late.
+  const DEFER_AFTER = 0.4; // s
+  const BUILD_AHEAD = 0.3; // s
+  const PUMP_MS = 40; // how often the queue is looked at
+  const MAX_QUEUE = 256; // noted-but-not-yet-built triggers
+  const LATE = 0.1; // s. A queued trigger found this far in the past (the page froze) is dropped, not played late
+  const QUEUED = Object.freeze({ queued: true }); // what rig.play() returns for a deferred trigger
+  const RENDER_WARMUP = 0.25; // s of silence rendered (and cut off) before an offline render, to get past that
 
   // D major pentatonic, in semitones above A3. Thirteen steps: dominant (A3) up to the tonic (D6).
   const A3 = 220;
@@ -154,7 +202,7 @@
   // ------------------------------------------------------------------ shared buffers
   /**
    * Looping noise the card sounds are cut from. Filtering that never changes is baked in here so that a burst
-   * needs only one biquad at run time.
+   * needs only one biquad at run time. (Buffers are plain data: they are not tied to the context.)
    *   'soft'  : white noise with the fizz (> ~9 kHz) and the rumble taken off — taps, ticks, knocks.
    *   'grain' : darker, and amplitude-modulated by a fast random envelope: the faint crackle of paper fibres
    *             dragging over felt — slides, swishes, whooshes.
@@ -162,12 +210,15 @@
    */
   function makeNoise(ctx, rnd, grainy) {
     const sr = ctx.sampleRate;
-    const n = Math.floor(sr * 1.2);
+    const n = Math.floor(sr * NOISE_SECONDS);
     const buffer = ctx.createBuffer(1, n, sr);
     const d = buffer.getChannelData(0);
     const aLow = 1 - Math.exp((-2 * Math.PI * (grainy ? 6500 : 9000)) / sr);
     const aHigh = 1 - Math.exp((-2 * Math.PI * (grainy ? 260 : 180)) / sr);
     const hop = Math.max(1, Math.round(sr / 1900)); // grain rate
+    // An inline generator seeded from `rnd`: this loop runs inside the gesture that unlocks audio, and a
+    // function call per sample would make that first tap several times more expensive.
+    let seed = (rnd() * 4294967296) >>> 0;
     let lp1 = 0;
     let lp2 = 0;
     let dc = 0;
@@ -175,9 +226,15 @@
     let target = 0;
     let sum = 0;
     for (let i = 0; i < n; i++) {
-      let x = rnd() * 2 - 1;
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      let x = seed / 2147483648 - 1;
       if (grainy) {
-        if (i % hop === 0) target = rnd() < 0.5 ? rnd() : rnd() * 0.12;
+        if (i % hop === 0) {
+          // Half of the grains are loud (0..1), half are nearly silent (0..0.12).
+          seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+          const r = seed / 4294967296;
+          target = r < 0.5 ? r * 2 : (r - 0.5) * 0.24;
+        }
         env += (target - env) * 0.22;
         x *= 0.3 + 0.7 * env;
       }
@@ -195,21 +252,27 @@
   }
 
   /**
-   * Impulse response of a small, soft room: a few milliseconds of build-up, then noise that decays in about
-   * half a second and gets darker as it goes. Only the tonal accents send a noticeable amount into it.
+   * Impulse response of a small, soft room: a few milliseconds of build-up, then noise that decays in under
+   * half a second and gets darker as it goes. Only the tonal accents send into it.
    */
   function makeImpulse(ctx, rnd) {
     const sr = ctx.sampleRate;
-    const n = Math.floor(sr * 0.5);
+    const n = Math.floor(sr * 0.4);
     const buffer = ctx.createBuffer(2, n, sr);
+    const fall = Math.exp(-1 / (sr * 0.07)); // per-sample decay
+    const rise = Math.max(1, Math.floor(sr * 0.004));
+    const dark = Math.floor(sr * 0.3);
+    let seed = (rnd() * 4294967296) >>> 0;
     for (let ch = 0; ch < 2; ch++) {
       const d = buffer.getChannelData(ch);
       let lp = 0;
+      let env = 1;
       for (let i = 0; i < n; i++) {
-        const t = i / sr;
-        const a = 0.5 - 0.36 * Math.min(1, t / 0.3);
-        lp += a * (rnd() * 2 - 1 - lp);
-        d[i] = lp * Math.exp(-t / 0.075) * Math.min(1, t / 0.004);
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+        const a = i < dark ? 0.5 - 0.36 * (i / dark) : 0.14;
+        lp += a * (seed / 2147483648 - 1 - lp);
+        d[i] = lp * env * (i < rise ? i / rise : 1);
+        env *= fall;
       }
     }
     return buffer;
@@ -298,58 +361,108 @@
   };
 
   /**
-   * A burst of filtered noise.
-   *   at, dur     seconds (at is relative to the voice start)
-   *   src         'soft' (default) | 'grain'
-   *   gain        level; band-pass bursts are compensated for their bandwidth, so equal gains sound about equally loud
-   *   f, q, type  biquad ('bandpass' by default). f2 [, f3]: the frequency glides to f2 over `sweep` seconds
-   *               (default dur), or out to f2 and on to f3 with the turn at `turn` (0..1, default 0.5)
-   *   shape, attack, release, peak   see envelope()
-   *   to          destination node inside the voice (default: the voice output)
+   * Bursts of filtered noise: ONE looping noise source feeding one or more band layers (a tap and the knock
+   * under it share their source, which is a third fewer nodes than one source each).
+   *   at          seconds after the voice start
+   *   kind        'soft' (default) | 'grain', see makeNoise()
+   *   list        layers, each:
+   *     dur         seconds
+   *     gain        level; band-pass layers are compensated for their bandwidth, so equal gains sound about equally loud
+   *     f, q, type  biquad ('bandpass' by default). f2 [, f3]: the frequency glides to f2 over `sweep` seconds
+   *                 (default dur), or out to f2 and on to f3 with the turn at `turn` (0..1, default 0.5)
+   *     shape, attack, release, peak   see envelope()
+   *     to          destination node inside the voice (default: the voice output)
    */
-  Voice.prototype.noise = function (o) {
+  Voice.prototype.layers = function (at, kind, list) {
     const rig = this.rig;
     const ctx = rig.ctx;
-    const t = this.start + (o.at || 0);
-    const dur = o.dur;
-    const buffer = o.src === 'grain' ? rig.grain : rig.soft;
+    const t = this.start + at;
+    const buffer = kind === 'grain' ? rig.grain : rig.soft;
     const src = ctx.createBufferSource();
     src.buffer = buffer;
     src.loop = true;
-
-    const filter = ctx.createBiquadFilter();
-    const q = o.q || 1;
-    const f1 = rig.hz(o.f);
-    let mean = f1;
-    filter.type = o.type || 'bandpass';
-    filter.Q.value = q;
-    filter.frequency.value = f1; // already in place before t: the first samples must not see the default
-    if (o.f2) {
-      const f2 = rig.hz(o.f2);
-      const sweep = Math.min(o.sweep || dur, dur);
-      filter.frequency.setValueAtTime(f1, t);
-      if (o.f3) {
-        filter.frequency.exponentialRampToValueAtTime(f2, t + sweep * (o.turn || 0.5));
-        filter.frequency.exponentialRampToValueAtTime(rig.hz(o.f3), t + sweep);
-      } else {
-        filter.frequency.exponentialRampToValueAtTime(f2, t + sweep);
+    let longest = 0;
+    for (let i = 0; i < list.length; i++) {
+      const o = list[i];
+      const dur = o.dur;
+      const filter = ctx.createBiquadFilter();
+      const q = o.q || 1;
+      const f1 = rig.hz(o.f);
+      let mean = f1;
+      filter.type = o.type || 'bandpass';
+      filter.Q.value = q;
+      filter.frequency.value = f1; // already in place before t: the first samples must not see the default
+      if (o.f2) {
+        const f2 = rig.hz(o.f2);
+        const sweep = Math.min(o.sweep || dur, dur);
+        filter.frequency.setValueAtTime(f1, t);
+        if (o.f3) {
+          filter.frequency.exponentialRampToValueAtTime(f2, t + sweep * (o.turn || 0.5));
+          filter.frequency.exponentialRampToValueAtTime(rig.hz(o.f3), t + sweep);
+        } else {
+          filter.frequency.exponentialRampToValueAtTime(f2, t + sweep);
+        }
+        mean = Math.sqrt(f1 * f2);
       }
-      mean = Math.sqrt(f1 * f2);
+      let level = o.gain;
+      // Noise power through a band-pass grows with its bandwidth (f / Q): normalise it away.
+      if (filter.type === 'bandpass') level *= clamp(Math.sqrt((BP_REF * q) / mean), 0.6, 4);
+      const amp = ctx.createGain();
+      envelope(amp.gain, t, dur, level, o);
+      src.connect(filter);
+      filter.connect(amp);
+      amp.connect(o.to || this.out);
+      if (dur > longest) longest = dur;
     }
-    let level = o.gain;
-    // Noise power through a band-pass grows with its bandwidth (f / Q): normalise it away.
-    if (filter.type === 'bandpass') level *= clamp(Math.sqrt((BP_REF * q) / mean), 0.6, 4);
-
-    const amp = ctx.createGain();
-    envelope(amp.gain, t, dur, level, o);
-    src.connect(filter);
-    filter.connect(amp);
-    amp.connect(o.to || this.out);
-
-    const stopAt = t + dur + 0.005;
+    const stopAt = t + longest + 0.005;
     src.start(t, rig.rnd() * (buffer.duration - 0.02));
     src.stop(stopAt);
     this.track(src, stopAt);
+  };
+
+  /** One burst of filtered noise: a single layer (see layers()), with `o.at` and `o.src` saying when and from which noise. */
+  Voice.prototype.noise = function (o) {
+    this.layers(o.at || 0, o.src, [o]);
+  };
+
+  /**
+   * A run of tiny ticks through ONE shared band-pass whose frequency glides from f to f2 over `span` seconds:
+   * two nodes per tick instead of three, which adds up when there are forty of them (the riffle).
+   *   o       { at, span, f, f2, q, to }
+   *   ticks   [{ at, dur, gain }], `at` relative to o.at
+   */
+  Voice.prototype.ticks = function (o, ticks) {
+    const rig = this.rig;
+    const ctx = rig.ctx;
+    const t = this.start + (o.at || 0);
+    const filter = ctx.createBiquadFilter();
+    const f1 = rig.hz(o.f);
+    const f2 = rig.hz(o.f2 || o.f);
+    filter.type = 'bandpass';
+    filter.Q.value = o.q;
+    filter.frequency.value = f1;
+    if (f2 !== f1) {
+      filter.frequency.setValueAtTime(f1, t);
+      filter.frequency.exponentialRampToValueAtTime(f2, t + o.span);
+    }
+    filter.connect(o.to || this.out);
+    const comp = clamp(Math.sqrt((BP_REF * o.q) / Math.sqrt(f1 * f2)), 0.6, 4);
+    const buffer = rig.soft;
+    for (let i = 0; i < ticks.length; i++) {
+      const tick = ticks[i];
+      const at = t + tick.at;
+      const src = ctx.createBufferSource();
+      const amp = ctx.createGain();
+      src.buffer = buffer;
+      src.loop = true;
+      envelope(amp.gain, at, tick.dur, tick.gain * comp, { attack: 0.0008 });
+      src.connect(amp);
+      amp.connect(filter);
+      const stopAt = at + tick.dur + 0.005;
+      src.start(at, rig.rnd() * (buffer.duration - 0.02));
+      src.stop(stopAt);
+      this.track(src, stopAt);
+    }
   };
 
   /**
@@ -367,8 +480,13 @@
     osc.type = o.wave || 'sine';
     osc.frequency.value = rig.hz(o.f);
     if (o.f2) {
-      osc.frequency.setValueAtTime(rig.hz(o.f), t);
-      osc.frequency.exponentialRampToValueAtTime(rig.hz(o.f2), t + Math.min(o.glide || dur, dur));
+      // The glide is anchored one render quantum after the start. Chromium's oscillator is not sample-exact
+      // when its frequency is being automated inside the quantum it starts in (its phase then depends on
+      // where in the quantum the start falls); a constant first quantum makes every trigger identical.
+      const glide = Math.min(o.glide || dur, dur);
+      const lead = Math.min(129 / ctx.sampleRate, glide * 0.5);
+      osc.frequency.setValueAtTime(rig.hz(o.f), t + lead);
+      osc.frequency.exponentialRampToValueAtTime(rig.hz(o.f2), t + glide);
     }
     const amp = ctx.createGain();
     envelope(amp.gain, t, dur, o.gain, o);
@@ -444,8 +562,10 @@
   /** A card landing: the paper tap, the knock of the felt-covered table under it, optionally a low thud. */
   function pat(v, at, k, gain, thud) {
     const j = v.rig.jit;
-    v.noise({ at: at, dur: 0.075, gain: gain, f: 1900 * k * j(0.12), q: 0.9, attack: 0.0015 });
-    v.noise({ at: at, dur: 0.11, gain: 0.7 * gain, f: 470 * k * j(0.15), q: 2, attack: 0.002 });
+    v.layers(at, 'soft', [
+      { dur: 0.075, gain: gain, f: 1900 * k * j(0.12), q: 0.9, attack: 0.0015 },
+      { dur: 0.11, gain: 0.7 * gain, f: 470 * k * j(0.15), q: 2, attack: 0.002 },
+    ]);
     if (thud) {
       v.tone({ at: at, f: 165 * k * j(0.1), f2: 98 * k, glide: 0.05, dur: 0.11, gain: 0.14 * gain * thud, attack: 0.003 });
     }
@@ -454,8 +574,10 @@
   /** The lighter version: a card's edge snapping flat. */
   function snap(v, at, k, gain) {
     const j = v.rig.jit;
-    v.noise({ at: at, dur: 0.055, gain: 0.7 * gain, f: 3200 * k * j(0.1), q: 1.2, attack: 0.001 });
-    v.noise({ at: at, dur: 0.08, gain: 0.45 * gain, f: 540 * k * j(0.12), q: 2, attack: 0.002 });
+    v.layers(at, 'soft', [
+      { dur: 0.055, gain: 0.7 * gain, f: 3200 * k * j(0.1), q: 1.2, attack: 0.001 },
+      { dur: 0.08, gain: 0.45 * gain, f: 540 * k * j(0.12), q: 2, attack: 0.002 },
+    ]);
   }
 
   /**
@@ -482,7 +604,7 @@
    *   level  overall gain (the calibration knob: see dev/audio-demo.html "Measure all")
    *   prio   who survives when the polyphony cap is hit (higher wins)
    *   gap    s. A second request for the same sound within this of an existing one is dropped
-   *   wet    reverb send
+   *   wet    reverb send (0 for the dry, close-up card sounds: one node less per trigger)
    *   len(o) -> nominal length in seconds: an upper bound of what build() schedules
    *   build(v, o)  schedules the sources on voice v (v.start is the context time of the trigger)
    * }
@@ -490,27 +612,28 @@
   const SOUNDS = {
     // A card leaving the deck — a bright, dry "fft" — and its edge flicking free.
     deal: {
-      level: 2.35,
+      level: 1.21,
       prio: 1,
       gap: 0.012,
-      wet: 0.04,
+      wet: 0,
       len: function () {
-        return 0.145;
+        return 0.13;
       },
       build: function (v) {
         const j = v.rig.jit;
         const k = v.pitch * j(0.07);
-        v.noise({ src: 'grain', dur: 0.07, gain: 0.8, f: 2900 * k, f2: 5200 * k, sweep: 0.055, q: 0.8, shape: 'bell', peak: 0.3 });
-        snap(v, 0.05 * j(0.1), k * 1.1, 0.8);
+        // Kept shorter than a typical deal stagger (~45 ms) so a run of them reads as separate cards, not one hiss.
+        v.noise({ src: 'grain', dur: 0.05, gain: 0.8, f: 2900 * k, f2: 5200 * k, sweep: 0.04, q: 0.8, shape: 'bell', peak: 0.3 });
+        snap(v, 0.036 * j(0.1), k * 1.1, 0.8);
       },
     },
 
     // Turning a card over: air under the card ("fwip"), then it lands ("tk").
     flip: {
-      level: 1.76,
+      level: 1.26,
       prio: 1,
       gap: 0.02,
-      wet: 0.05,
+      wet: 0,
       len: function () {
         return 0.195;
       },
@@ -524,10 +647,10 @@
 
     // Lifting a card off the pile: light, high, no body.
     pick: {
-      level: 1.75,
+      level: 0.86,
       prio: 1,
       gap: 0.03,
-      wet: 0.03,
+      wet: 0,
       len: function () {
         return 0.07;
       },
@@ -541,10 +664,10 @@
 
     // Setting a card down: the fullest of the card sounds, a soft "pat".
     place: {
-      level: 3.5,
+      level: 1.29,
       prio: 2,
       gap: 0.02,
-      wet: 0.05,
+      wet: 0,
       len: function () {
         return 0.12;
       },
@@ -558,10 +681,10 @@
 
     // A card dragged across the felt.
     slide: {
-      level: 0.8,
+      level: 0.69,
       prio: 1,
       gap: 0.03,
-      wet: 0.04,
+      wet: 0,
       len: function (o) {
         return span(o, 0.19, 0.08, 1.2) + 0.01;
       },
@@ -576,10 +699,10 @@
 
     // Stock to waste: slides off the stock, snaps down face-up.
     draw: {
-      level: 1.85,
+      level: 1.1,
       prio: 1,
       gap: 0.02,
-      wet: 0.05,
+      wet: 0,
       len: function () {
         return 0.17;
       },
@@ -595,10 +718,10 @@
 
     // The waste swept back onto the stock: a falling run of ticks over a swish, squared up with a pat.
     recycle: {
-      level: 1.33,
+      level: 1.29,
       prio: 2,
       gap: 0.1,
-      wet: 0.05,
+      wet: 0,
       len: function (o) {
         return span(o, 0.42, 0.2, 1.5) + 0.12;
       },
@@ -608,17 +731,12 @@
         const k = v.pitch * j(0.06);
         const d = span(o, 0.42, 0.2, 1.5);
         const n = clamp(Math.round(d / 0.042), 5, 16);
+        const run = [];
         for (let i = 0; i < n; i++) {
           const u = i / (n - 1);
-          v.noise({
-            at: d * 0.74 * Math.pow(u, 0.8) + rig.rnd() * 0.005,
-            dur: 0.04,
-            gain: 0.35 + 0.3 * u,
-            f: (4300 - 1800 * u) * k * j(0.08),
-            q: 2.2,
-            attack: 0.001,
-          });
+          run.push({ at: d * 0.74 * Math.pow(u, 0.8) + rig.rnd() * 0.005, dur: 0.04, gain: 0.35 + 0.3 * u });
         }
+        v.ticks({ span: d * 0.74, f: 4300 * k * j(0.06), f2: 2500 * k, q: 2.2 }, run);
         v.noise({ src: 'grain', dur: d * 0.8, gain: 0.4, f: 2700 * k, f2: 1500 * k, q: 0.7, shape: 'bell', peak: 0.55 });
         pat(v, d * 0.8, k * 0.9, 0.9, 1);
       },
@@ -626,7 +744,7 @@
 
     // A card reaching its foundation: a soft landing and a mallet note whose pitch is the card's rank.
     foundation: {
-      level: 1.6,
+      level: 0.76,
       prio: 3,
       gap: 0.015,
       wet: 0.22,
@@ -651,7 +769,7 @@
 
     // "No": a soft, low double knock. Dull rather than harsh — it is heard often.
     invalid: {
-      level: 0.93,
+      level: 0.75,
       prio: 2,
       gap: 0.08,
       wet: 0.06,
@@ -675,7 +793,7 @@
 
     // "Look here": two small bells, a rising fourth (E5 -> A5).
     hint: {
-      level: 0.9,
+      level: 0.83,
       prio: 2,
       gap: 0.1,
       wet: 0.28,
@@ -691,10 +809,10 @@
 
     // The last move sucked back: a swish played backwards, then the card settles.
     undo: {
-      level: 1.1,
+      level: 1.01,
       prio: 1,
       gap: 0.03,
-      wet: 0.04,
+      wet: 0,
       len: function () {
         return 0.21;
       },
@@ -708,10 +826,10 @@
 
     // A riffle: many tiny ticks falling faster and faster from two hands, the bridge, and the deck squared up.
     shuffle: {
-      level: 1.48,
+      level: 1.41,
       prio: 2,
       gap: 0.2,
-      wet: 0.06,
+      wet: 0,
       len: function (o) {
         return span(o, 0.72, 0.4, 2.5) + 0.12;
       },
@@ -722,19 +840,18 @@
         const d = span(o, 0.72, 0.4, 2.5);
         const riffle = d * 0.64;
         const n = clamp(Math.round(riffle / 0.012), 18, 64);
-        const hands = [v.side(-0.32), v.side(0.32)];
+        const runs = [[], []]; // cards fall alternately from the left and the right hand
         for (let i = 0; i < n; i++) {
           const u = i / (n - 1);
-          v.noise({
-            to: hands[i & 1],
+          runs[i & 1].push({
             at: riffle * Math.pow(u, 0.72) + rig.rnd() * 0.004,
             dur: 0.022 + rig.rnd() * 0.014,
             gain: (0.3 + 0.35 * rig.rnd()) * (0.65 + 0.35 * u),
-            f: (2500 + 1700 * u) * k * j(0.16),
-            q: 2.4,
-            attack: 0.0006,
           });
         }
+        // The two packets never sound quite alike, and both rise in pitch as they thin out.
+        v.ticks({ span: riffle, f: 2400 * k * j(0.06), f2: 4000 * k, q: 2.4, to: v.side(-0.32) }, runs[0]);
+        v.ticks({ span: riffle, f: 2750 * k * j(0.06), f2: 4500 * k, q: 2.4, to: v.side(0.32) }, runs[1]);
         v.noise({ src: 'grain', dur: riffle * 1.05, gain: 0.3, f: 1700 * k, f2: 3000 * k, q: 0.6, shape: 'bell', peak: 0.7 });
         v.noise({ src: 'grain', at: riffle + 0.03, dur: d * 0.2, gain: 0.55, f: 1900 * k, f2: 3500 * k, q: 0.8, shape: 'bell', peak: 0.4 });
         pat(v, d * 0.9, k * 0.95, 0.85, 1);
@@ -743,10 +860,10 @@
 
     // Buttons: a small wooden "tok".
     click: {
-      level: 2.7,
+      level: 0.94,
       prio: 2,
       gap: 0.03,
-      wet: 0.05,
+      wet: 0,
       len: function () {
         return 0.06;
       },
@@ -759,7 +876,7 @@
 
     // A panel opening: air moving up and a rising fifth (D5 -> A5).
     open: {
-      level: 0.7,
+      level: 0.83,
       prio: 2,
       gap: 0.08,
       wet: 0.25,
@@ -768,7 +885,7 @@
       },
       build: function (v) {
         const k = v.pitch * v.rig.jit(0.05);
-        v.noise({ src: 'grain', dur: 0.2, gain: 0.45, f: 700 * k, f2: 2600 * k, sweep: 0.16, q: 1, shape: 'bell', peak: 0.45 });
+        v.noise({ src: 'grain', dur: 0.2, gain: 0.3, f: 700 * k, f2: 2600 * k, sweep: 0.16, q: 1, shape: 'bell', peak: 0.45 });
         bell(v, 0.02, note(17) * v.pitch, 0.14, 0.2);
         bell(v, 0.09, note(24) * v.pitch, 0.16, 0.28);
       },
@@ -776,7 +893,7 @@
 
     // ...and closing: the mirror image.
     close: {
-      level: 0.76,
+      level: 0.86,
       prio: 2,
       gap: 0.08,
       wet: 0.25,
@@ -785,7 +902,7 @@
       },
       build: function (v) {
         const k = v.pitch * v.rig.jit(0.05);
-        v.noise({ src: 'grain', dur: 0.18, gain: 0.45, f: 2500 * k, f2: 700 * k, sweep: 0.15, q: 1, shape: 'bell', peak: 0.35 });
+        v.noise({ src: 'grain', dur: 0.18, gain: 0.3, f: 2500 * k, f2: 700 * k, sweep: 0.15, q: 1, shape: 'bell', peak: 0.35 });
         bell(v, 0.01, note(24) * v.pitch, 0.14, 0.18);
         bell(v, 0.08, note(17) * v.pitch, 0.16, 0.26);
       },
@@ -793,7 +910,7 @@
 
     // Auto-complete begins: a quick run up the scale (D5 .. D6) on a breath of air.
     autocomplete: {
-      level: 1.13,
+      level: 1.19,
       prio: 3,
       gap: 0.2,
       wet: 0.3,
@@ -805,13 +922,13 @@
         for (let i = 0; i < run.length; i++) {
           bell(v, i * 0.052, note(run[i]) * v.pitch, 0.12 + 0.012 * i, i === run.length - 1 ? 0.42 : 0.24);
         }
-        v.noise({ src: 'grain', dur: 0.36, gain: 0.35, f: 1200 * v.pitch, f2: 4800 * v.pitch, q: 0.9, shape: 'bell', peak: 0.6 });
+        v.noise({ src: 'grain', dur: 0.36, gain: 0.26, f: 1200 * v.pitch, f2: 4800 * v.pitch, q: 0.9, shape: 'bell', peak: 0.6 });
       },
     },
 
     // The win: a short fanfare (A4 D5 F#5 A5 . F#5 A5 D6) resolving on a strummed D major chord with twinkles above.
     win: {
-      level: 1.4,
+      level: 1.44,
       prio: 4,
       gap: 0.5,
       wet: 0.35,
@@ -831,7 +948,7 @@
           v.tone({ at: 0.76 + i * 0.02, f: note(chord[i]) * p, dur: 1.5, gain: 0.07, attack: 0.03 });
         }
         v.tone({ at: 0.76, f: note(-7) * p, dur: 1.2, gain: 0.1, attack: 0.02 }); // D3 underneath
-        v.noise({ src: 'grain', at: 0.4, dur: 0.4, gain: 0.3, f: 900 * p, f2: 5200 * p, q: 0.9, shape: 'bell', peak: 0.8 });
+        v.noise({ src: 'grain', at: 0.4, dur: 0.4, gain: 0.22, f: 900 * p, f2: 5200 * p, q: 0.9, shape: 'bell', peak: 0.8 });
         const twinkle = [36, 38, 41, 45]; // A6 B6 D7 F#7
         for (let i = 0; i < 6; i++) {
           bell(v, 0.92 + i * 0.12 + rig.rnd() * 0.04, note(twinkle[Math.floor(rig.rnd() * twinkle.length)]) * p, 0.035, 0.3);
@@ -841,10 +958,10 @@
 
     // The smallest sound: counters rolling, the clock.
     tick: {
-      level: 2.45,
+      level: 0.79,
       prio: 0,
       gap: 0.02,
-      wet: 0.03,
+      wet: 0,
       len: function () {
         return 0.04;
       },
@@ -857,7 +974,7 @@
 
     // Cards sweeping through the air (gathering the deck, the celebration).
     whoosh: {
-      level: 0.46,
+      level: 0.45,
       prio: 1,
       gap: 0.05,
       wet: 0.08,
@@ -908,6 +1025,11 @@
     const opt = options || {};
     const rnd = typeof opt.random === 'function' ? opt.random : Math.random;
     const nyquist = ctx.sampleRate / 2;
+    // How far ahead of currentTime an "immediate" sound starts. The audio thread renders a whole device buffer
+    // at a time, so a start time closer than about one buffer can already be in the past when the new nodes
+    // reach it: the sound then begins late, with the first milliseconds of its envelope gone — which is most of
+    // the attack of a 30 ms tick. The live context therefore passes a lead derived from its buffer size.
+    const lead = clamp(num(opt.lead, LOOKAHEAD), 0.002, 0.05);
 
     const rig = {
       ctx: ctx,
@@ -923,63 +1045,76 @@
       },
       soft: makeNoise(ctx, rnd, false),
       grain: makeNoise(ctx, rnd, true),
+      offset: 0, // s added to every trigger time (offline renders start after a warm-up)
+      defer: !!opt.defer, // build far-ahead triggers later (see DEFER_AFTER); only the live context does
       input: null,
       output: null,
       verb: null,
     };
 
-    // ---- master chain: bus -> compressor -> (trim) -> soft limiter -> volume -> destination
+    // ---- master chain: bus -> compressor -> soft limiter -> volume -> destination
     const bus = ctx.createGain();
+    const mix = ctx.createGain(); // what the limiter sees; unity gain for quiet signals
     const master = ctx.createGain();
     let volume = clamp(num(opt.volume, 1), 0, 1);
     let muted = false;
     master.gain.value = Math.pow(volume, 1.5);
 
-    let tail = bus;
-    let makeup = 1;
+    let compressed = false;
     if (typeof ctx.createDynamicsCompressor === 'function') {
       try {
         const comp = ctx.createDynamicsCompressor();
+        const wet = ctx.createGain(); // the compressed path, with the automatic make-up gain taken back out
+        const dry = ctx.createGain(); // straight past the compressor, only while it wakes up
         comp.threshold.value = COMP.threshold;
         comp.knee.value = COMP.knee;
         comp.ratio.value = COMP.ratio;
         comp.attack.value = COMP.attack;
         comp.release.value = COMP.release;
-        tail.connect(comp);
-        tail = comp;
-        makeup = COMP_MAKEUP;
+        // A DynamicsCompressorNode is born with its gain collapsed and takes ~120 ms to open up (measured in
+        // Chromium; the other engines share the algorithm). Left alone that swallows the very first sound: the
+        // one made by the gesture that unlocked audio. So at first the bus goes straight to the limiter, then
+        // crossfades onto the compressor once it has settled.
+        const t = ctx.currentTime;
+        dry.gain.setValueAtTime(1, t);
+        dry.gain.setValueAtTime(1, t + COMP_WARMUP);
+        dry.gain.linearRampToValueAtTime(0, t + COMP_WARMUP + 0.03);
+        wet.gain.setValueAtTime(0, t);
+        wet.gain.setValueAtTime(0, t + COMP_WARMUP);
+        wet.gain.linearRampToValueAtTime(1 / COMP_MAKEUP, t + COMP_WARMUP + 0.03);
+        bus.connect(comp);
+        comp.connect(wet);
+        wet.connect(mix);
+        bus.connect(dry);
+        dry.connect(mix);
+        compressed = true;
       } catch (err) {
         report('compressor', err);
       }
     }
-    let limited = false;
+    if (!compressed) bus.connect(mix);
+
+    let last = mix;
     if (typeof ctx.createWaveShaper === 'function') {
       try {
-        const pre = ctx.createGain();
         const shaper = ctx.createWaveShaper();
-        pre.gain.value = 1 / (makeup * CLIP_RANGE);
         shaper.curve = makeClipCurve();
-        tail.connect(pre);
-        pre.connect(shaper);
-        tail = shaper;
-        limited = true;
+        mix.gain.value = 1 / CLIP_RANGE; // the curve spans +-CLIP_RANGE
+        mix.connect(shaper);
+        last = shaper;
       } catch (err) {
         report('limiter', err);
       }
     }
-    if (!limited && makeup !== 1) {
-      const trim = ctx.createGain();
-      trim.gain.value = 1 / makeup;
-      tail.connect(trim);
-      tail = trim;
-    }
-    tail.connect(master);
+    last.connect(master);
     master.connect(opt.destination || ctx.destination);
     rig.input = bus;
     rig.output = master;
 
     // ---- reverb return
-    if (typeof ctx.createConvolver === 'function') {
+    /** Builds the reverb. Done at once unless the rig was created with { lazy: true } (see the live context). */
+    rig.warm = function () {
+      if (rig.verb || typeof ctx.createConvolver !== 'function') return;
       try {
         const verbIn = ctx.createGain();
         const conv = ctx.createConvolver();
@@ -993,7 +1128,8 @@
       } catch (err) {
         report('reverb', err);
       }
-    }
+    };
+    if (!opt.lazy) rig.warm();
 
     function applyVolume() {
       const g = muted ? 0 : Math.pow(volume, 1.5);
@@ -1014,13 +1150,39 @@
       applyVolume();
     };
 
-    /** Fades out everything sounding and cancels everything scheduled. */
-    rig.stopAll = function () {
-      const now = ctx.currentTime;
-      const list = rig.voices.slice();
-      rig.voices.length = 0; // the faded voices detach themselves when their sources end
-      for (let i = 0; i < list.length; i++) list[i].kill(now);
-    };
+    // ---- scheduling
+    const rate = ctx.sampleRate;
+    const queue = []; // deferred triggers: { name, at, opts }
+    let timer = 0;
+    let stalled = 0; // consecutive looks at the queue with the clock frozen
+
+    /**
+     * Onto the sample grid (a whisker inside the frame, so every browser's time-to-frame rounding agrees):
+     * sounds staggered by `delay` then come out as identical waveforms exactly `delay` apart.
+     */
+    function onGrid(t) {
+      return (Math.round(t * rate) + 0.001) / rate;
+    }
+
+    let latch = -1; // the context time the current run of play() calls is scheduling against
+
+    function unlatch() {
+      latch = -1;
+    }
+
+    /**
+     * "Now" for scheduling. AudioContext.currentTime is advanced by the audio thread and can tick in the middle of
+     * a loop of play() calls; if every call read it afresh, a staggered burst would get a hiccup of one clock step
+     * (about 10 ms) wherever that happened. So the first call of a synchronous run fixes the time and the others
+     * share it, until the call stack unwinds.
+     */
+    function scheduleTime() {
+      const t = ctx.currentTime;
+      if (latch >= 0 && t >= latch && t - latch < 0.05) return latch;
+      latch = t;
+      Promise.resolve().then(unlatch);
+      return t;
+    }
 
     function prune(now) {
       for (let i = rig.voices.length - 1; i >= 0; i--) {
@@ -1028,27 +1190,13 @@
       }
     }
 
-    /**
-     * Schedules a sound. Returns the Voice, or null when it was not played (unknown name, zero volume, or
-     * dropped by the limiter). Never throws.
-     */
-    rig.play = function (name, options) {
-      if (!has(name)) return null;
+    /** Builds the voice for `name` starting at context time t0, if the limiter lets it in. Never throws. */
+    function schedule(name, o, t0) {
       let voice = null;
       try {
         const def = SOUNDS[name];
-        const o = options && typeof options === 'object' ? options : {};
-        const pitch = clamp(num(o.pitch, 1), 0.25, 4);
-        const volumeOpt = clamp(num(o.volume, 1), 0, 2);
-        if (volumeOpt < 0.0005) return null;
-        const pan = clamp(num(o.pan, 0), -1, 1);
         const now = ctx.currentTime;
-        // Snapped to the sample grid (a whisker inside the frame, so every browser's time-to-frame rounding
-        // agrees): sounds staggered by `delay` then come out as identical waveforms exactly `delay` apart.
-        const rate = ctx.sampleRate;
-        const t0 = (Math.round((now + LOOKAHEAD + clamp(num(o.delay, 0) / 1000, 0, MAX_DELAY)) * rate) + 0.001) / rate;
         const t1 = t0 + def.len(o);
-
         prune(now);
         const voices = rig.voices;
         if (voices.length >= MAX_PENDING) return null;
@@ -1071,12 +1219,13 @@
           victim.kill(t0);
         }
 
-        voice = new Voice(rig, name, def.prio, t0, pitch);
+        voice = new Voice(rig, name, def.prio, t0, clamp(num(o.pitch, 1), 0.25, 4));
         def.build(voice, o);
 
         // Without a panner the mono voice would reach both speakers at full level: match the centre of the
         // equal-power pan law so a sound does not jump in level when it starts to move.
-        let level = def.level * volumeOpt * rig.jit(0.08) / Math.sqrt(1 + DUCK * stacked);
+        const pan = clamp(num(o.pan, 0), -1, 1);
+        let level = (def.level * clamp(num(o.volume, 1), 0, 2) * rig.jit(0.08)) / Math.sqrt(1 + DUCK * stacked);
         let outlet = voice.out;
         if (pan !== 0 && typeof ctx.createStereoPanner === 'function') {
           voice.panner = ctx.createStereoPanner();
@@ -1115,6 +1264,76 @@
         }
         return null;
       }
+    }
+
+    /** Builds whatever in the queue is about to sound, and keeps looking while anything is left. */
+    function pump() {
+      timer = 0;
+      try {
+        const now = ctx.currentTime;
+        if (ctx.state && ctx.state !== 'running') {
+          // A frozen clock. The context may just be starting up, so wait a little; then forget the queue.
+          if (++stalled > 40) queue.length = 0;
+        } else {
+          stalled = 0;
+          for (let i = 0; i < queue.length; ) {
+            const q = queue[i];
+            if (q.at - now > BUILD_AHEAD) {
+              i++;
+              continue;
+            }
+            queue.splice(i, 1);
+            if (q.at < now - LATE) continue;
+            schedule(q.name, q.opts, q.at > now + lead ? q.at : onGrid(now + lead));
+          }
+        }
+      } catch (err) {
+        report('pump', err);
+      }
+      if (queue.length && !timer) timer = root.setTimeout(pump, PUMP_MS);
+    }
+
+    /**
+     * Schedules a sound. Returns the Voice; QUEUED ({ queued: true }) when the rig defers and the trigger is far
+     * enough ahead to be built later; null when it was not played (unknown name, zero volume, dropped by the
+     * limiter). Never throws.
+     */
+    rig.play = function (name, options) {
+      if (!has(name)) return null;
+      try {
+        const o = options && typeof options === 'object' ? options : {};
+        if (clamp(num(o.volume, 1), 0, 2) < 0.0005) return null;
+        const now = scheduleTime();
+        const t0 = onGrid(now + rig.offset + lead + clamp(num(o.delay, 0) / 1000, 0, MAX_DELAY));
+        if (rig.defer && t0 - now > DEFER_AFTER && typeof root.setTimeout === 'function') {
+          if (queue.length >= MAX_QUEUE) return null;
+          const gap = SOUNDS[name].gap;
+          for (let i = 0; i < queue.length; i++) {
+            if (queue[i].name === name && Math.abs(queue[i].at - t0) < gap) return null; // the same sound, the same instant
+          }
+          queue.push({ name: name, at: t0, opts: { pitch: o.pitch, volume: o.volume, pan: o.pan, duration: o.duration, rank: o.rank } });
+          if (!timer) timer = root.setTimeout(pump, PUMP_MS);
+          return QUEUED;
+        }
+        return schedule(name, o, t0);
+      } catch (err) {
+        report('play("' + name + '")', err);
+        return null;
+      }
+    };
+
+    /** Fades out everything sounding and cancels everything scheduled or queued. */
+    rig.stopAll = function () {
+      const now = ctx.currentTime;
+      const list = rig.voices.slice();
+      queue.length = 0;
+      rig.voices.length = 0; // the faded voices detach themselves when their sources end
+      for (let i = 0; i < list.length; i++) list[i].kill(now);
+    };
+
+    /** Voices built and not yet finished, plus triggers still waiting in the queue. */
+    rig.pending = function () {
+      return rig.voices.length + queue.length;
     };
 
     return rig;
@@ -1142,6 +1361,23 @@
     return !!(root.document && root.document.visibilityState === 'hidden');
   }
 
+  /** Runs fn when the main thread has a moment (never inside the current task, unless there is no other way). */
+  function whenIdle(fn) {
+    try {
+      if (typeof root.requestIdleCallback === 'function') root.requestIdleCallback(fn, { timeout: 2000 });
+      else if (typeof root.setTimeout === 'function') root.setTimeout(fn, 400);
+      else fn();
+    } catch (err) {
+      fn();
+    }
+  }
+
+  /** True while a user gesture is being handled (transient activation), as far as the browser tells us. */
+  function inGesture() {
+    const ua = root.navigator && root.navigator.userActivation;
+    return !!(ua && ua.isActive);
+  }
+
   /** 1: the page has been activated by the user, 0: it has not, -1: the browser cannot tell us. */
   function activation() {
     const ua = root.navigator && root.navigator.userActivation;
@@ -1156,23 +1392,38 @@
   function wake(fromGesture) {
     const AC = ContextClass();
     if (!AC || !enabled || failures >= 3) return false;
-    const act = activation();
-    // act === 0 inside a gesture handler: e.g. a touch pointerdown, which is not an activation in Chromium.
-    // The pointerup / touchend that follows is, and brings us back here.
-    if (act === 0 || (act === -1 && !fromGesture)) return false;
+    let created = null;
     try {
       let fresh = false;
+      if (ctx && ctx.state === 'closed') {
+        // Somebody closed it under us: start over with a new one.
+        ctx = null;
+        live = null;
+      }
       if (!ctx) {
-        let created = null;
+        // Create only when the context will be allowed to start. 0 inside a gesture handler means e.g. a touch
+        // pointerdown, which is not an activation in Chromium: the pointerup / touchend that follows is, and
+        // brings us back here. When the browser cannot tell (-1), trust nothing but a gesture.
+        const act = activation();
+        if (act === 0 || (act === -1 && !fromGesture)) return false;
         try {
           created = new AC({ latencyHint: 'interactive' });
         } catch (err) {
           created = new AC();
         }
-        const rig = createRig(created, { volume: volume });
+        // lazy: the reverb is not needed for the first tick, and building it would double the cost of this gesture.
+        const rig = createRig(created, {
+          volume: volume,
+          defer: true,
+          lazy: true,
+          // One and a half device buffers: measured in Chromium (10 ms buffer), ticks started less than
+          // 14 ms ahead lost up to 12 dB of their attack on some triggers; from 14 ms on, none did.
+          lead: clamp(num(created.baseLatency, 0.008) * 1.5 + 0.003, 0.008, 0.035),
+        });
         ctx = created;
         live = rig;
         fresh = true;
+        whenIdle(rig.warm);
         try {
           // The classic iOS unlock: start any source from inside the gesture.
           const blip = ctx.createBufferSource();
@@ -1197,8 +1448,14 @@
     } catch (err) {
       report('wake', err);
       if (!live) {
+        // The context could not be built. Count it (after a few attempts we stop trying) and do not leak it.
         failures++;
         ctx = null;
+        try {
+          if (created && typeof created.close === 'function') settle(created.close());
+        } catch (err2) {
+          /* ignore */
+        }
       }
       return false;
     }
@@ -1272,7 +1529,8 @@
     try {
       if (on) {
         if (live) live.setMuted(false);
-        wake(false);
+        // Usually called from the click on a sound toggle: then the click's own confirmation sound can play.
+        wake(inGesture());
       } else if (live) {
         live.stopAll();
         live.setMuted(true);
@@ -1383,21 +1641,44 @@
         seconds += LOOKAHEAD + 0.01 + num(opt.tail, 250) / 1000; // 0.01: the compressor's look-ahead delay
         if (num(opt.duration, 0) > 0) seconds = opt.duration / 1000;
         const sampleRate = num(opt.sampleRate, 44100);
-        const offline = new Offline(2, Math.max(1, Math.ceil(seconds * sampleRate)), sampleRate);
+        // Unless asked for a cold start, render some silence first and cut it off afterwards, so the result is
+        // what a context that has been running for a while produces (see COMP_WARMUP).
+        const skip = opt.cold ? 0 : Math.round(RENDER_WARMUP * sampleRate);
+        const offline = new Offline(2, skip + Math.max(1, Math.ceil(seconds * sampleRate)), sampleRate);
         const rig = createRig(offline, {
           random: opt.seed === undefined || opt.seed === null ? Math.random : mulberry32(opt.seed),
           volume: num(opt.volume, 1),
         });
+        rig.offset = skip / sampleRate;
         for (let i = 0; i < list.length; i++) rig.play(list[i][0], list[i][1]);
-        const fail = function (err) {
-          report('render', err);
-          resolve(null);
+        let settled = false;
+        const finish = function (rendered) {
+          if (settled) return; // old WebKit only fires the event; elsewhere the promise and the event both arrive
+          settled = true;
+          try {
+            if (!skip || !rendered) {
+              resolve(rendered || null);
+              return;
+            }
+            const out = offline.createBuffer(rendered.numberOfChannels, rendered.length - skip, sampleRate);
+            for (let c = 0; c < rendered.numberOfChannels; c++) out.getChannelData(c).set(rendered.getChannelData(c).subarray(skip));
+            resolve(out);
+          } catch (err) {
+            report('render', err);
+            resolve(null);
+          }
         };
         offline.oncomplete = function (e) {
-          resolve(e.renderedBuffer); // old WebKit only has the event; elsewhere this resolves first, harmlessly
+          finish(e.renderedBuffer);
         };
         const p = offline.startRendering();
-        if (p && typeof p.then === 'function') p.then(resolve, fail);
+        if (p && typeof p.then === 'function') {
+          p.then(finish, function (err) {
+            report('render', err);
+            settled = true;
+            resolve(null);
+          });
+        }
       } catch (err) {
         report('render', err);
         resolve(null);
@@ -1455,7 +1736,7 @@
     voices: {
       enumerable: true,
       get: function () {
-        return live ? live.voices.length : 0;
+        return live ? live.pending() : 0;
       },
     },
     context: {

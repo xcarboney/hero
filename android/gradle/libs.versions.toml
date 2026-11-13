@@ -1,0 +1,19 @@
+[versions]
+# A set that builds together, warning-free, on the pinned Gradle 8.14.3 wrapper.
+# AGP: 8.13.x is the last line for Gradle 8; AGP 9 needs Gradle 9.
+agp = "8.13.2"
+# Kotlin: 2.4.x works but warns on every build that Gradle 8.14.3 is deprecated for it.
+kotlin = "2.3.21"
+androidx-activity = "1.13.0"
+# androidx.core: 1.19+ requires compileSdk 37 and AGP 9.1+.
+androidx-core = "1.18.0"
+androidx-webkit = "1.18.0"
+
+[libraries]
+androidx-activity = { module = "androidx.activity:activity", version.ref = "androidx-activity" }
+androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "androidx-core" }
+androidx-webkit = { module = "androidx.webkit:webkit", version.ref = "androidx-webkit" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }

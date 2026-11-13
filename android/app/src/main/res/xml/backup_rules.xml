@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Auto Backup rules for Android 6-11 (android:fullBackupContent).
+
+    The game in progress, the statistics and the settings live in the WebView's localStorage
+    (keys prefixed "sol."), which Chromium keeps in a LevelDB under app_webview/. Only that
+    database is backed up: the rest of app_webview/ is caches and per-device WebView state that
+    should not be restored onto another device.
+-->
+<full-backup-content>
+    <include domain="root" path="app_webview/Default/Local Storage" />
+    <!-- Location used by old WebView versions (before the "Default" profile directory). -->
+    <include domain="root" path="app_webview/Local Storage" />
+</full-backup-content>

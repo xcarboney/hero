@@ -322,13 +322,43 @@
     };
   }
 
+  /** A copy of one history record that shares nothing with the original. */
+  function copyRecord(r) {
+    const tr = r.transfers;
+    const transfers = new Array(tr.length);
+    for (let i = 0; i < tr.length; i++) transfers[i] = { card: tr[i].card, from: tr[i].from, to: tr[i].to };
+    const fl = r.flips;
+    const flips = new Array(fl.length);
+    for (let i = 0; i < fl.length; i++) {
+      flips[i] = fl[i].reveal === true ? { card: fl[i].card, faceUp: fl[i].faceUp, reveal: true } : { card: fl[i].card, faceUp: fl[i].faceUp };
+    }
+    const out = {
+      type: r.type,
+      transfers: transfers,
+      flips: flips,
+      scoreBefore: r.scoreBefore,
+      scoreAfter: r.scoreAfter,
+      movesBefore: r.movesBefore,
+      movesAfter: r.movesAfter,
+      recyclesBefore: r.recyclesBefore,
+      recyclesAfter: r.recyclesAfter,
+      won: r.won,
+    };
+    if (r.auto === true) out.auto = true;
+    return out;
+  }
+
   /**
-   * Independent copy of a state. Piles, faces and the history array are copied; the history records
-   * themselves are shared (the engine never mutates a record once it is created), which keeps this
-   * cheap enough for a solver to call on every node.
+   * Deep copy of a state: piles, faces, and every history record are copied, so nothing done to
+   * the copy (or to its records) can reach the original. The cost grows with the length of the
+   * history (about 0.3 us plus 0.1 us per record); a search should clone once and then use
+   * apply() + apply({ type: 'undo' }) on that one copy, which is far cheaper than cloning per node.
    */
   function clone(state) {
     const p = state.piles;
+    const h = state.history;
+    const history = new Array(h.length);
+    for (let i = 0; i < h.length; i++) history[i] = copyRecord(h[i]);
     return {
       v: state.v,
       id: state.id,
@@ -356,7 +386,7 @@
       recycles: state.recycles,
       elapsedMs: state.elapsedMs,
       won: state.won,
-      history: state.history.slice(),
+      history: history,
     };
   }
 
@@ -1039,9 +1069,17 @@
     history.length = count - 1;
     rewindRecord(dest, src, state.faceUp, record);
 
+    // The undo's transfers are listed so that they can be replayed one at a time ("take the card
+    // out of `from`, put it on top of `to`") and give exactly the piles the undo leaves behind:
+    // a run goes back the way it came, as a block, bottom -> top; the cards of a draw or a recycle
+    // went over one by one, so they come back last-moved-first.
     const n = tr.length;
     const transfers = new Array(n);
-    for (let i = 0; i < n; i++) transfers[i] = { card: tr[n - 1 - i].card, from: to, to: from };
+    if (record.type === 'move') {
+      for (let i = 0; i < n; i++) transfers[i] = { card: tr[i].card, from: to, to: from };
+    } else {
+      for (let i = 0; i < n; i++) transfers[i] = { card: tr[n - 1 - i].card, from: to, to: from };
+    }
     const fl = record.flips;
     const m = fl.length;
     const flips = new Array(m);
@@ -1412,6 +1450,8 @@
   const deepCache = new Map();
   let dsPool = null; // Int8Array: DEEP_MAX_NODES parent maps
   let dsFirst = null; // Int16Array: first move of the path to each node (card * 64 + new parent), -1 at the root
+  let dsUp = null; // Int16Array: the node each node was reached from
+  let dsVia = null; // Int16Array: the move (card * 64 + new parent) that led from dsUp[n] to node n
   let dsH1 = null;
   let dsH2 = null;
   let dsZ1 = null; // Zobrist keys per (card, parent)
@@ -1433,6 +1473,8 @@
     if (dsPool) return;
     dsPool = new Int8Array(DEEP_MAX_NODES * 52);
     dsFirst = new Int16Array(DEEP_MAX_NODES);
+    dsUp = new Int16Array(DEEP_MAX_NODES);
+    dsVia = new Int16Array(DEEP_MAX_NODES);
     dsH1 = new Int32Array(DEEP_MAX_NODES);
     dsH2 = new Int32Array(DEEP_MAX_NODES);
     dsZ1 = new Int32Array(52 * P_CODES);
@@ -1465,6 +1507,73 @@
       s += String.fromCharCode(48 + d);
     }
     return s;
+  }
+
+  /** Stores a search result under a position key, dropping the oldest entry when the cache is full. */
+  function cacheResult(key, result) {
+    deepCache.delete(key); // (re-inserting moves the key to the young end)
+    if (deepCache.size >= DEEP_CACHE_SIZE) deepCache.delete(deepCache.keys().next().value);
+    deepCache.set(key, result);
+  }
+
+  /** A search move (card * 64 + new parent) as an action in the position `state`; null when it does not fit. */
+  function searchMoveToAction(state, code) {
+    const card = code >> 6;
+    const q = code & 63;
+    if (q === P_FOUND) return { type: 'move', card: card, to: FOUNDATION_OF[card] };
+    for (let t = 0; t < 7; t++) {
+      const pile = tableauPile(state.piles, t);
+      const n = pile.length;
+      if (q === P_EMPTY ? n === 0 : n > 0 && pile[n - 1] === q) return { type: 'move', card: card, to: TABLEAU[t] };
+    }
+    return null;
+  }
+
+  /**
+   * The search found a way forward that takes several moves (`codes`, first move first). Remember,
+   * for every position along it, the move that continues it. Someone following the hints is then
+   * led down that same path to its end, instead of depending on a fresh search from every position
+   * on the way — which can run out of budget where the first one did not, and would leave them
+   * with nothing better than "put the card back" (and hints going round in circles).
+   */
+  function cachePath(state, codes) {
+    const p = state.piles;
+    const work = {
+      v: 1,
+      id: '',
+      seed: 0,
+      drawCount: state.drawCount,
+      piles: {
+        stock: p.stock.slice(),
+        waste: p.waste.slice(),
+        f0: p.f0.slice(),
+        f1: p.f1.slice(),
+        f2: p.f2.slice(),
+        f3: p.f3.slice(),
+        t0: p.t0.slice(),
+        t1: p.t1.slice(),
+        t2: p.t2.slice(),
+        t3: p.t3.slice(),
+        t4: p.t4.slice(),
+        t5: p.t5.slice(),
+        t6: p.t6.slice(),
+      },
+      faceUp: state.faceUp.slice(),
+      score: 0,
+      moves: 0,
+      undos: 0,
+      recycles: 0,
+      elapsedMs: 0,
+      won: false,
+      history: [],
+    };
+    for (let i = 0; i + 1 < codes.length; i++) {
+      const step = searchMoveToAction(work, codes[i]);
+      if (step === null || applyMove(work, step.card, step.to, false) === null) return;
+      const next = searchMoveToAction(work, codes[i + 1]);
+      if (next === null) return;
+      cacheResult(positionKey(work), { status: 'found', action: next });
+    }
   }
 
   /** Search helper: could stock/waste card `e` be played in the position at `base`? (dsChild / dsFh are current) */
@@ -1569,6 +1678,8 @@
     let count = 1;
     let head = 0;
     let found = -1; // encoded first move towards a goal the player can act on right now
+    let goalNode = 0; // the node the goal was found at...
+    let goalMove = -1; // ...and the uncovering move made there (-1: the goal is the position itself)
     let viaDraw = false; // a stock card becomes playable, but it has to be drawn first
     let stopAt = DEEP_MAX_NODES; // once drawing is known to work, only look a little further for better
     let budget = false;
@@ -1598,6 +1709,7 @@
       if (head > 0) {
         if (wasteTop >= 0 && deepPlayable(wasteTop, base, empties)) {
           found = firstMove;
+          goalNode = head;
           break;
         }
         for (let i = 0; !viaDraw && i < others.length; i++) {
@@ -1645,6 +1757,8 @@
           if (uncovers) {
             // goal: this move turns over a hidden card
             found = firstMove >= 0 ? firstMove : code;
+            goalNode = head;
+            goalMove = code;
             break expand;
           }
           const zc = c * P_CODES;
@@ -1673,6 +1787,8 @@
           h1s[count] = nh1;
           h2s[count] = nh2;
           first[count] = firstMove >= 0 ? firstMove : code;
+          dsUp[count] = head;
+          dsVia[count] = code;
           count++;
         }
       }
@@ -1684,6 +1800,11 @@
       const q = found & 63;
       const to = q === P_FOUND ? FOUNDATION_OF[card] : q === P_EMPTY ? TABLEAU[rootEmpty] : TABLEAU[dsRootPile[q]];
       result = { status: 'found', action: { type: 'move', card: card, to: to } };
+      // a path of several moves: remember how it goes on from each position along it
+      const codes = [];
+      if (goalMove >= 0) codes.push(goalMove);
+      for (let n = goalNode; n > 0; n = dsUp[n]) codes.push(dsVia[n]);
+      if (codes.length > 1) cachePath(state, codes.reverse());
     } else if (viaDraw) {
       result = { status: 'found', action: { type: 'draw' } };
     } else if (budget) {
@@ -1691,17 +1812,8 @@
     } else {
       result = { status: 'none', action: null };
     }
-    if (deepCache.size >= DEEP_CACHE_SIZE) deepCache.delete(deepCache.keys().next().value); // drop the oldest
-    deepCache.set(key, result);
+    cacheResult(key, result);
     return result;
-  }
-
-  /** Was `card` the card moved by the most recent action? */
-  function isLastMoved(state, card) {
-    const history = state.history;
-    if (history.length === 0) return false;
-    const record = history[history.length - 1];
-    return record.type === 'move' && record.transfers[0].card === card;
   }
 
   /**
@@ -1873,8 +1985,6 @@
     for (let i = 0; i < raw.length; i++) {
       const h = raw[i];
       if (h.prio === H_LATER) {
-        // never suggest reversing the move that was just made when we cannot tell where it leads
-        if (status === 'budget' && isLastMoved(state, h.kind === H_SPLIT ? h.aux : h.card)) continue;
         if (deepHint) {
           out.push(deepHint);
           deepHint = null;

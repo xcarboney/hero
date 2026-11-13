@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- API 30+: draw under display cutouts on every edge. -->
+    <style name="Theme.Solitaire" parent="Base.Theme.Solitaire">
+        <item name="android:windowLayoutInDisplayCutoutMode">always</item>
+    </style>
+
+</resources>

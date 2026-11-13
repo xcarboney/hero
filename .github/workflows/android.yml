@@ -1,0 +1,62 @@
+name: Android
+
+# Tests the web game, lints the Android shell and builds a debug APK that bundles the game.
+# The APK is attached to the run as the artifact "solitaire-debug-apk".
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer run for the same branch or pull request supersedes the one in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Test, lint and build debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Run the web game's unit tests
+        run: node --test solitaire/tests/*.test.js
+
+      - name: Set up JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # Validates the checked-in wrapper jar and caches the Gradle user home between runs
+      # ("basic" is the open-source cache provider built on actions/cache).
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+
+      - name: Lint and build the debug APK
+        working-directory: android
+        run: ./gradlew lint assembleDebug
+
+      - name: Upload the debug APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: solitaire-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error

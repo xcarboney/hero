@@ -1017,7 +1017,9 @@ describe('undo', () => {
     const beforeMove = snap(m);
     const mv = Engine.apply(m, move('9H', 't1'));
     const um = Engine.apply(m, UNDO);
-    assert.deepEqual(um.transfers, [C('7D'), C('8S'), C('9H')].map((card) => ({ card, from: 't1', to: 't0' })));
+    // (reviewer) a run comes back as the block it left as, bottom -> top: replaying the undo's
+    // transfers one by one must rebuild the column in its original order
+    assert.deepEqual(um.transfers, [C('9H'), C('8S'), C('7D')].map((card) => ({ card, from: 't1', to: 't0' })));
     assert.deepEqual(um.flips, [{ card: C('AC'), faceUp: false, reveal: true }]);
     assert.equal(um.undone, mv);
     assert.deepEqual(Object.assign(snap(m), { undos: 0 }), beforeMove);
@@ -2035,10 +2037,12 @@ describe('random playouts', () => {
             assert.equal(s.recycles, record.undone.recyclesBefore);
             assert.deepEqual([record.scoreBefore, record.scoreAfter], [before.score, s.score]);
             assert.deepEqual([record.movesBefore, record.movesAfter], [before.moves, s.moves]);
-            // inverse transfers, in reverse order, with the faces flipped back
+            // inverse transfers with the faces flipped back: draws and recycles in reverse order
+            // (the cards went one at a time), a moved run bottom -> top again (it goes back as a block)
+            const undoneOrder = record.undone.type === 'move' ? record.undone.transfers : record.undone.transfers.slice().reverse();
             assert.deepEqual(
               record.transfers,
-              record.undone.transfers.slice().reverse().map((t) => ({ card: t.card, from: t.to, to: t.from }))
+              undoneOrder.map((t) => ({ card: t.card, from: t.to, to: t.from }))
             );
             assert.deepEqual(record.flips.map((f) => [f.card, f.faceUp]), record.undone.flips.slice().reverse().map((f) => [f.card, !f.faceUp]));
             for (const f of record.flips) assert.equal(s.faceUp[f.card], f.faceUp);

@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Solitaire 3D app icon: the one source of every PWA icon in this folder.
+
+  Same artwork as the Android launcher icon (android/app/src/main/res/drawable/ic_launcher_*.xml):
+  two fanned cards, a gold card back behind an ivory ace of spades, on the table felt. The card
+  paths are the launcher's, in its 108-unit coordinate space, placed by the transform on #art.
+
+  Two variants live in this file:
+    icon.svg            a rounded felt plate with transparent corners   (manifest purpose "any")
+    icon.svg#maskable   the felt bleeds to the edges of the square       (manifest purpose "maskable")
+  The #maskable rectangle is hidden unless it is the URL's target. The artwork does not move
+  between the variants: it fits a circle of radius 189 around the centre, inside the maskable
+  safe zone (radius 204.8 = 40% of 512), so no launcher mask can clip it.
+
+  The PNGs are rendered from this file by `node solitaire/icons/render.js`. Edit here, render again.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Solitaire 3D</title>
+  <defs>
+    <!-- The felt, lit from slightly above the centre (the launcher's background layer). -->
+    <radialGradient id="felt" gradientUnits="userSpaceOnUse" cx="256" cy="199" r="540">
+      <stop offset="0" stop-color="#11604a"/>
+      <stop offset="1" stop-color="#05241b"/>
+    </radialGradient>
+  </defs>
+  <style>
+    #maskable:target { display: inline; }
+  </style>
+
+  <rect x="21" y="21" width="470" height="470" rx="107" fill="url(#felt)"/>
+  <rect id="maskable" display="none" width="512" height="512" fill="url(#felt)"/>
+
+  <!-- (52.85, 53.7) is the centre of the smallest circle around the cards, in launcher units. -->
+  <g id="art" transform="translate(256 256) scale(6.3) translate(-52.85 -53.7)">
+    <!-- Card back, fanned to the left. -->
+    <g transform="rotate(-13 54 80)">
+      <path fill="#f3c969" d="M41.5,31h25a4.5,4.5 0 0 1 4.5,4.5v37a4.5,4.5 0 0 1 -4.5,4.5h-25a4.5,4.5 0 0 1 -4.5,-4.5v-37a4.5,4.5 0 0 1 4.5,-4.5z"/>
+      <path fill="none" stroke="#c99a2e" stroke-width="1.5" d="M43,34.5h22a2.5,2.5 0 0 1 2.5,2.5v34a2.5,2.5 0 0 1 -2.5,2.5h-22a2.5,2.5 0 0 1 -2.5,-2.5v-34a2.5,2.5 0 0 1 2.5,-2.5z"/>
+    </g>
+    <!-- Card face, fanned to the right: soft drop shadow, ivory card, spade. -->
+    <g transform="rotate(8 54 80)">
+      <path fill="#000000" fill-opacity="0.28" d="M40,32.5h25a4.5,4.5 0 0 1 4.5,4.5v37a4.5,4.5 0 0 1 -4.5,4.5h-25a4.5,4.5 0 0 1 -4.5,-4.5v-37a4.5,4.5 0 0 1 4.5,-4.5z"/>
+      <path fill="#fdfbf5" d="M41.5,31h25a4.5,4.5 0 0 1 4.5,4.5v37a4.5,4.5 0 0 1 -4.5,4.5h-25a4.5,4.5 0 0 1 -4.5,-4.5v-37a4.5,4.5 0 0 1 4.5,-4.5z"/>
+      <path fill="#1d2230" d="M54,42c-6.75,6.75 -9.75,9.75 -9.75,14.25a5.25,5.25 0 0 0 8.25,3.75c-0.75,3 -1.5,4.5 -3,6h9c-1.5,-1.5 -2.25,-3 -3,-6a5.25,5.25 0 0 0 8.25,-3.75c0,-4.5 -3,-7.5 -9.75,-14.25z"/>
+    </g>
+  </g>
+</svg>
