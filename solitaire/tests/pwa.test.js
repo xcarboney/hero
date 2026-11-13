@@ -298,9 +298,9 @@ test('icons: maskable PNGs are opaque and keep the artwork inside the safe zone'
     for (let y = 0; y < png.height; y++) {
       for (let x = 0; x < png.width; x++) {
         const outside = Math.hypot(x + 0.5 - centre, y + 0.5 - centre) > safe;
-        const felt = isFelt(png.at(x, y));
-        if (outside) assert.ok(felt, `${icon.src}: pixel ${x},${y} outside the safe zone is not table felt`);
-        else if (!felt) art++;
+        if (isFelt(png.at(x, y))) continue;
+        if (outside) assert.fail(`${icon.src}: pixel ${x},${y} outside the safe zone is not table felt`);
+        art++;
       }
     }
     assert.ok(art > png.width * png.height * 0.2, `${icon.src}: the cards should fill a good part of the safe zone`);
@@ -451,7 +451,7 @@ test('sw message: SKIP_WAITING activates a waiting worker, nothing else does', (
 /**
  * A window with just what js/pwa.js touches. `href` is the page URL.
  * options: native (a SolitaireNative bridge), readyState, serviceWorker (false = unavailable),
- * waiting (a waiting worker in the registration), modes (display modes that match).
+ * waiting (a waiting worker in the registration), modes (display modes that match at load).
  */
 function loadPwa(href, options = {}) {
   const page = new URL(href);
@@ -490,7 +490,6 @@ function loadPwa(href, options = {}) {
       head: head,
       baseURI: page.href,
       readyState: options.readyState || 'complete',
-      fullscreenElement: null,
       currentScript: { src: new URL('js/pwa.js', page).href },
       createElement: (tag) => ({ tag: tag, attrs: {}, setAttribute(name, value) { this.attrs[name] = value; } }),
       addEventListener: on,
@@ -648,7 +647,7 @@ test('pwa: install offer -> canInstall -> promptInstall() -> installed, with cha
   off();
   page.fire('beforeinstallprompt', installOffer('accepted'));
   assert.strictEqual(seen.length, 3, 'off() unsubscribes');
-  assert.strictEqual(onBus.length, 3, 'installed already: a late offer changes canInstall only');
+  assert.strictEqual(onBus.length, 4, 'the bus still hears the next change');
 });
 
 test('pwa: promptInstall() resolves false when the player dismisses or the browser throws', async () => {
@@ -685,15 +684,18 @@ test('pwa: installed reflects the display mode of an app window', () => {
   assert.strictEqual(page.PWA.installed, true);
   assert.deepStrictEqual(seen, [true]);
 
-  // A tab that went full screen through the Fullscreen API is not an installed app.
+  // A tab that goes full screen through the Fullscreen API is not an installed app.
   const tab = loadPwa(PAGE);
-  tab.document.fullscreenElement = {};
+  tab.PWA.onChange((state) => seen.push(state.installed));
   tab.setMode('fullscreen', true);
   assert.strictEqual(tab.PWA.installed, false);
-  tab.document.fullscreenElement = null;
-  tab.fire('fullscreenchange');
-  tab.setMode('fullscreen', false);
-  assert.strictEqual(tab.PWA.installed, false);
+  assert.deepStrictEqual(seen, [true], 'and nothing is announced');
+
+  // A desktop browser already in full-screen mode at load looks like the app until it offers to install.
+  const kiosk = loadPwa(PAGE, { modes: ['fullscreen'] });
+  kiosk.fire('beforeinstallprompt', installOffer('accepted'));
+  assert.strictEqual(kiosk.PWA.installed, false);
+  assert.strictEqual(kiosk.PWA.canInstall, true);
 });
 
 test('pwa: onChange rejects a non-function and survives a throwing listener', () => {

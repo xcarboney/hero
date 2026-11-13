@@ -75,7 +75,7 @@
   function snapshot() {
     const canInstall = promptEvent !== null;
     // A browser that offers installation is not showing the installed app (this also covers a
-    // desktop browser window switched to full screen, which matches display-mode: fullscreen).
+    // desktop browser that was already in full-screen mode when the page loaded).
     return { canInstall: canInstall, installed: installedHere || (!canInstall && inAppWindow()) };
   }
 
@@ -180,11 +180,11 @@
     for (const mode of APP_DISPLAY_MODES) {
       const query = root.matchMedia('(display-mode: ' + mode + ')');
       modeQueries.push({ mode: mode, query: query });
+      if (mode === 'fullscreen') launchedFullscreen = query.matches;
       // Installing on desktop moves the tab into an app window: the display mode changes live.
       if (query.addEventListener) query.addEventListener('change', update);
       else if (query.addListener) query.addListener(update);
     }
-    doc.addEventListener('fullscreenchange', update);
   }
   last = snapshot(); // the state at load is the baseline, not a change
 
