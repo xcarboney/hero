@@ -16,7 +16,9 @@
  * The whole show is one function of time (one SOL.Anim tween drives a director that computes all 52 poses per
  * frame), so it follows the speed setting, can be cut at any frame, and adapts while it runs:
  *   - STAGE: it plays in whatever part of the screen is free. When the win screen slides up from the bottom
- *     ('game:pause' { reason: 'modal' }) the show glides into the space above it; when it closes, back.
+ *     ('game:pause' { reason: 'modal' }) the show glides into the space above it; when it closes, back. The
+ *     sheet is measured once the browser has laid it out (a frame and a task after it opened — and once more a
+ *     third of a second later), never inside a frame of the show and never by forcing a layout.
  *   - a re-layout (rotation, resize) moves the stage and the foundations under it.
  * Cost: transforms only. The cards themselves are rotated (rx / ry / rot / scale on .card — no animated
  * --flip, no --lift, no shadows) and stay flat, single-layer elements throughout (see "FLAT card" in
@@ -200,8 +202,8 @@
   // ------------------------------------------------------------------ the stage
   /**
    * Top edge (viewport px) of a sheet docked to the bottom of the screen — the win screen on phones — or null.
-   * One layout read, made when a dialog opens (never inside the frame loop); offsets, not client rects, so a
-   * sheet that is still sliding in is measured where it will come to rest.
+   * A layout read: only ever called from measureSoon(), after the browser has laid the sheet out by itself.
+   * Offsets, not client rects, so a sheet that is still sliding in is measured where it will come to rest.
    */
   function measureSheet() {
     try {
@@ -223,6 +225,33 @@
     } catch (err) {
       return null;
     }
+  }
+
+  /**
+   * Measures the sheet `frames` frames from now — and then once the browser has rendered that frame: in a
+   * task of its own, after the frame's style / layout / paint. The read is free there. Made the moment the
+   * dialog opens, or inside the director's frame, it would force the style and layout of the freshly inserted
+   * sheet on the spot — a long task in the middle of the show. `again`: a second look that many frames later
+   * (the sheet may still have been on its way into the document).
+   */
+  function measureSoon(sh, frames, again) {
+    const A = SOL.Anim;
+    const gen = ++sh.measureGen;
+    let left = frames;
+    const step = function () {
+      if (show !== sh || gen !== sh.measureGen) return;
+      if (--left > 0) {
+        A.nextFrame().then(step);
+        return;
+      }
+      root.setTimeout(function () {
+        if (show !== sh || gen !== sh.measureGen) return;
+        sh.sheetTop = measureSheet();
+        aimStage(sh);
+        if (again > 0) measureSoon(sh, again, 0);
+      }, 0);
+    };
+    A.nextFrame().then(step);
   }
 
   /** Recomputes the stage the show should play in (table space) from the layout, the viewport and the sheet. */
@@ -288,8 +317,7 @@
       vw: root.innerWidth,
       vh: root.innerHeight,
       sheetTop: null,
-      measure: 0, // frames until the sheet is measured (0 = nothing pending)
-      measureAgain: 0,
+      measureGen: 0, // bumped to schedule / call off a measurement of the sheet (see measureSoon)
       st: { cx: 0, cy: 0, a: 0, b: 0 },
       aim: { cx: 0, cy: 0, a: 0, b: 0 },
       last: 0,
@@ -322,19 +350,18 @@
       sh.burst.push(null);
       sh.order.push(i);
     }
-    if (G && typeof G.isPaused === 'function' && G.isPaused()) sh.measure = 1;
+    if (G && typeof G.isPaused === 'function' && G.isPaused()) measureSoon(sh, 1, 0);
     if (SOL.Bus) {
       offs.push(
         SOL.Bus.on('game:pause', function (e) {
           if (!show || !e || e.reason !== 'modal') return;
           if (e.paused) {
-            // measured on the next frames: the sheet may still be on its way into the document
-            show.measure = 1;
-            show.measureAgain = 20;
+            // measured after the next frame, and again a third of a second later: the sheet may still be on
+            // its way into the document
+            measureSoon(show, 1, 20);
           } else {
             show.sheetTop = null;
-            show.measure = 0;
-            show.measureAgain = 0;
+            show.measureGen++; // (a measurement that is still pending is called off)
             aimStage(show);
           }
         })
@@ -345,7 +372,7 @@
           show.L = layout;
           show.vw = root.innerWidth;
           show.vh = root.innerHeight;
-          if (show.sheetTop !== null) show.measure = 2;
+          if (show.sheetTop !== null) measureSoon(show, 2, 0);
           aimStage(show);
         })
       );
@@ -395,15 +422,7 @@
       const f = fx();
       sh.frame++;
 
-      // ---- the stage follows its target
-      if (sh.measure > 0 && --sh.measure === 0) {
-        sh.sheetTop = measureSheet();
-        aimStage(sh);
-      }
-      if (sh.measureAgain > 0 && --sh.measureAgain === 0) {
-        sh.sheetTop = measureSheet();
-        aimStage(sh);
-      }
+      // ---- the stage follows its target (the sheet is measured outside the frame loop: see measureSoon)
       const follow = 1 - Math.exp(-Math.min(dt, 60) / 230);
       const st = sh.st;
       st.cx += (sh.aim.cx - st.cx) * follow;
