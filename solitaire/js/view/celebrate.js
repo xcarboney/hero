@@ -70,7 +70,7 @@
     pulseMs: 240,
     burst: 5180, // …and bursts
     burstMs: 560,
-    home: 6250, // the first aces leave for home
+    home: 6200, // the first aces leave for home
     homeGap: 74, // between two ranks
     homeMs: 430, // one card's way home
     tail: 240, // after the last landing
@@ -152,12 +152,6 @@
     else if (a <= -180) a += 360;
     return a;
   }
-  /** Deterministic "random" 0..1 per card and channel. */
-  function hash(k, c) {
-    const v = Math.sin(k * 12.9898 + c * 78.233) * 43758.5453;
-    return v - Math.floor(v);
-  }
-
   function stopEmitters() {
     for (let i = 0; i < stops.length; i++) {
       try {
@@ -403,7 +397,8 @@
       // ---- the shape of the vortex right now
       const focal = clamp(cw * 12, 800, 1800); // the same perspective as #cards (board.css)
       const R0 = Math.max(cw * 1.5, Math.min(st.a - cw * 0.6, cw * 3.5));
-      const Hh = Math.max(ch * 1.2, Math.min(st.b * 2 - ch * 1.5, ch * 4.6));
+      // (height budget: the tilted rings reach R * sin(tilt) above and below the axis ends, plus a card)
+      const Hh = Math.max(ch * 1.2, Math.min(st.b * 2 - ch * 1.25 - R0 * 0.8, ch * 4.6));
       const Rring = Math.max(cw * 1.5, Math.min(st.a - cw * 0.66, st.b * 1.5, cw * 3.3));
       const w = inOutCubic(clamp((t - T.unwind) / (T.ring - T.unwind), 0, 1)); // 0 helix … 1 ring
       const turns = lerp(2.35, 51 / 52, w);
@@ -511,32 +506,21 @@
               sortNeeded = true;
             }
           } else if (t >= T.burst) {
-            // ---- the ring bursts: where does this card go?
+            // ---- the ring bursts into a bloom: three counter-turning rings of cards, tops pointing outwards
             sh.phase[id] = ph = 3;
-            const ddx = x + cw / 2 - st.cx;
-            const ddy = (y + ch / 2 - st.cy) * 1.7; // (undo the squash of the tilted ring: directions spread evenly)
-            const len = Math.hypot(ddx, ddy) || 1;
-            const ux = ddx / len;
-            const uy = ddy / len;
-            const edge = Math.min((st.a - cw * 0.5) / Math.max(0.001, Math.abs(ux)), (st.b - ch * 0.56) / Math.max(0.001, Math.abs(uy)));
-            const reach = [1, 0.56, 0.8, 0.36][k % 4] * (0.9 + 0.1 * hash(k, 1));
-            const size = [1.18, 0.8, 1, 0.68][k % 4];
-            const dirSpin = k % 2 ? 1 : -1;
+            const ring = rank <= 2 ? 0 : rank <= 6 ? 1 : 2;
+            const n = ring === 0 ? 8 : ring === 1 ? 16 : 28;
+            const j = (rank - (ring === 0 ? 1 : ring === 1 ? 3 : 7)) * 4 + suit;
             const ryNow = wrap180(ry);
             sh.from[id] = { x: x, y: y, rot: 0, rx: rx, ry: ryNow, scale: sc };
             sh.burst[id] = {
-              x: st.cx + ux * edge * reach - cw / 2,
-              y: st.cy + uy * edge * reach - ch / 2,
-              ux: ux,
-              uy: uy,
-              rot: (hash(k, 2) - 0.5) * 56,
-              rx: (hash(k, 3) - 0.5) * 26,
-              ry: 360 * Math.round((ryNow + dirSpin * 430) / 360) + (hash(k, 4) - 0.5) * 30,
-              scale: size,
-              cx: st.cx,
-              cy: st.cy,
+              ring: ring,
+              a0: (j / n) * TAU - PI / 2 + (ring === 1 ? PI / n : 0),
+              // one and a bit turns about its own axis on the way out, ending face to the player
+              ry: 360 * Math.round((ryNow + (k % 2 ? 1 : -1) * 430) / 360),
+              rot0: null,
             };
-            s.z = showZ + Math.round(size * 40) + (k % 4);
+            s.z = showZ + ring * 40 + j;
           }
         }
 
@@ -554,14 +538,26 @@
             const p = clamp((t - T.burst) / T.burstMs, 0, 1);
             const e = outQuart(p);
             const hang = Math.max(0, t - T.burst) / 1000;
-            const drift = cw * 0.22 * hang;
-            // (the stage may have moved since the burst: the constellation moves with it)
-            x = lerp(fr.x, b.x, e) + b.ux * drift + (st.cx - b.cx);
-            y = lerp(fr.y, b.y, e) + b.uy * drift + ch * 0.05 * Math.sin(hang * 5 + k) + (st.cy - b.cy);
-            sc = lerp(fr.scale, b.scale, e);
-            rot = lerp(fr.rot, b.rot, e) + 4 * Math.sin(hang * 3.1 + k * 1.7);
-            rx = lerp(fr.rx, b.rx, e) + 9 * Math.sin(hang * 4.3 + k);
-            ry = lerp(fr.ry, b.ry, e) + 14 * Math.sin(hang * 3.7 + k * 0.6) * e;
+            // the bloom: radii and card sizes from the free stage, so it fills a phone and a desktop alike
+            const M = Math.min(st.a, st.b);
+            const ring = b.ring;
+            const r = M * (ring === 0 ? 0.29 : ring === 1 ? 0.56 : 0.84) * (1 + 0.035 * Math.sin(hang * 4.2 + ring * 1.3));
+            const size =
+              ring === 0
+                ? Math.min(0.9, (M * 0.24) / ch)
+                : clamp(((TAU * r) / (ring === 1 ? 16 : 28)) * (ring === 1 ? 1.05 : 1.22) / cw, 0.45, 1.3);
+            const ang = b.a0 + (ring === 1 ? -1 : 1) * (0.5 * hang * (1 - 0.25 * hang)) * (ring === 0 ? 1.6 : 1);
+            const seatX = st.cx + Math.cos(ang) * r - cw / 2;
+            const seatY = st.cy + Math.sin(ang) * r - ch / 2;
+            const seatRot = ang * DEG + 90;
+            if (b.rot0 === null) b.rot0 = seatRot - wrap180(seatRot); // keeps the turn into the seat the short way round
+            x = lerp(fr.x, seatX, e);
+            y = lerp(fr.y, seatY, e);
+            sc = lerp(fr.scale, size, e);
+            rot = lerp(0, seatRot - b.rot0, e);
+            // glitter: every card rocks a little on its own
+            rx = lerp(fr.rx, 0, e) + 11 * Math.sin(hang * 6.1 + k * 1.3) * e;
+            ry = lerp(fr.ry, b.ry, e) + 16 * Math.sin(hang * 4.7 + k * 0.7) * e;
           }
         }
 
