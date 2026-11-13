@@ -49,7 +49,8 @@ import java.util.Locale
  *  - native -> page: `SOL.App.setInsets({top,right,bottom,left})` in CSS px, after every page
  *    load and whenever the insets change; `SOL.App.onBack()` for the back button.
  *  - page -> native: the `SolitaireNative` JavaScript interface ([NativeBridge]): haptics,
- *    keep-screen-on, full screen, gesture exclusion, the durable key/value store, exit.
+ *    keep-screen-on, full screen, gesture exclusion, the durable key/value store, the
+ *    open-source notices, exit.
  *
  * Full screen (the page's 'fullscreen' setting, on by default): the status and navigation bars
  * are hidden and a swipe from the edge only shows them for a moment. That is what keeps a card
@@ -370,7 +371,7 @@ class MainActivity : ComponentActivity() {
         }
         if (BuildConfig.DEBUG) WebView.setWebContentsDebuggingEnabled(true)
 
-        val nativeBridge = NativeBridge(bridgeHost, storage)
+        val nativeBridge = NativeBridge(bridgeHost, storage, ::readOpenSourceNotices)
         view.webViewClient = GameClient()
         view.addJavascriptInterface(nativeBridge, JS_INTERFACE_NAME)
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
@@ -388,6 +389,17 @@ class MainActivity : ComponentActivity() {
         view.requestFocus()
         view.loadUrl(GameSite.START_URL)
     }
+
+    /**
+     * The text behind SolitaireNative.openSourceLicenses(): one small file in the APK's assets
+     * ([OpenSourceNotices]). Called on the WebView's bridge thread; AssetManager may be used
+     * from any thread, and the application's outlives every Activity instance. An IOException
+     * is the caller's to handle ([GuardedNotices] answers the page with "").
+     */
+    private fun readOpenSourceNotices(): String =
+        applicationContext.assets.open(OpenSourceNotices.ASSET)
+            .bufferedReader(Charsets.UTF_8)
+            .use { it.readText() }
 
     private fun destroyWebView() {
         val view = webView ?: return

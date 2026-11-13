@@ -76,8 +76,8 @@
  *                                    in the air until Board.apply(…, { source: 'drag' }) or Board.dragCancel().
  *                                    Judged where the finger holds the card at the last dragMove position (not
  *                                    where the last frame drew it):
- *                                    target: the legal pile with the largest overlap (or null — also while the
- *                                    card still covers most of its own place, TUNE.dropLeave);
+ *                                    target: the legal pile with the largest overlap (or null — also while
+ *                                    most of the card is still over its own pile, TUNE.dropLeave);
  *                                    over: the pile the lead card mostly covers, legal or not (or null).
  *   Board.dragCancel({ invalid } = {})                              the held run returns (invalid: with a shake)
  *   Board.isDragging() -> boolean
@@ -260,7 +260,7 @@
     tiltMaxZ: 8, // clamps (deg)
     tiltMaxY: 14,
     tiltMaxX: 12,
-    dropLeave: 0.65, // a held card that still covers more than this share of its own place has not left it
+    dropLeave: 0.65, // a held card with more than this share of itself still over its own pile has not left it
     dropStiffness: 620, // the magnetic snap onto a legal pile
     dropDamping: 36,
     dropRunSoften: 46, // each further card of a dropped run lands this much softer (stiffness)
@@ -3118,14 +3118,9 @@
       target = own;
     }
     if (targetA < area * 0.18) target = null;
-    if (target) {
-      // A card that has hardly left its place — it still covers most of it — is put back, not moved: a tap
-      // that slipped past the slop, or a drag that was called off, is not a drop on the pile next door.
-      const lead = d.sprites[0];
-      const kx = L.cardW - Math.abs(x0 - lead.tx);
-      const ky = L.cardH - Math.abs(y0 - lead.ty);
-      if (kx > 0 && ky > 0 && kx * ky > area * TUNE.dropLeave) target = null;
-    }
+    // A card that has hardly left its own pile — most of it is still over it — is put back, not moved: a tap
+    // that slipped past the slop, or a drag that was called off, is not a drop on the pile next door.
+    if (target && overlap(x0, y0, x1, y1, pileZone(d.from)) > area * TUNE.dropLeave) target = null;
     if (overA < area * 0.3) over = null;
     return { target: target, over: over };
   }

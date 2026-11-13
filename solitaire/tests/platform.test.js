@@ -4,7 +4,8 @@
  *
  * Covered here: the 'fullscreen' setting reaching SolitaireNative.setFullscreen (on load and on
  * change, only inside the app), the gesture exclusion strips along #table, an older shell that
- * lacks the newer bridge methods, a bridge that throws, and the API that existed before.
+ * lacks the newer bridge methods, a bridge that throws, the API that existed before, and haptics
+ * holding back in a browser until the first user gesture (never inside the app).
  *
  * platform.js reads globalThis.SolitaireNative when it loads and keeps module-level state, so
  * every scenario installs its fakes and then loads fresh copies of bus.js, store.js and

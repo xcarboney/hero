@@ -178,8 +178,8 @@
   border: 1px solid rgba(255, 255, 255, 0.13);
   background: rgba(255, 255, 255, 0.07);
   color: var(--ink);
-  font: 700 10px/1 var(--font-ui);
-  letter-spacing: 0.12em;
+  font: 700 11px/1 var(--font-ui);              /* 11px is the floor for any text in the UI (see the header) */
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 .ui-badge__icon {
@@ -211,9 +211,9 @@
 }
 .ui-stat__label {
   position: relative;
-  height: 11px;
-  font: 700 8.5px/11px var(--font-ui);
-  letter-spacing: 0.17em;
+  height: 12px;
+  font: 700 11px/12px var(--font-ui);
+  letter-spacing: 0.08em;                        /* capitals only: 12px of line is enough, 12 + 1 + 23 fit the bar */
   text-transform: uppercase;
   color: var(--ink-dim);
 }
@@ -298,7 +298,7 @@
   top: 50%;
   padding: 0 6px;
   border-radius: 7px;
-  font: 800 10px/13px var(--font-ui);
+  font: 800 11px/13px var(--font-ui);
   letter-spacing: 0;
   white-space: nowrap;
   opacity: 0;
@@ -462,7 +462,7 @@
 }
 .ui-tb__label {
   position: relative;
-  font: 600 10.5px/12px var(--font-ui);
+  font: 600 11px/12px var(--font-ui);
   letter-spacing: 0.03em;
   white-space: nowrap;
   color: var(--ink-dim);
@@ -990,7 +990,7 @@
 
 .ui-sec {
   margin: 18px 6px 8px;
-  font: 700 10.5px/1 var(--font-ui);
+  font: 700 11px/1 var(--font-ui);
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--gold);
@@ -1695,8 +1695,8 @@ button.ui-row:active {
   color: var(--ink-dim);
 }
 .ui-ring__cap {
-  font: 700 8.5px/1 var(--font-ui);
-  letter-spacing: 0.16em;
+  font: 700 11px/1 var(--font-ui);
+  letter-spacing: 0.04em;                        /* "Win rate" has to fit inside the ring, under the number */
   text-transform: uppercase;
   color: var(--ink-dim);
 }
@@ -1714,8 +1714,8 @@ button.ui-row:active {
   min-width: 0;
 }
 .ui-fig__label {
-  font: 700 9.5px/1.1 var(--font-ui);
-  letter-spacing: 0.11em;
+  font: 700 11px/1.1 var(--font-ui);
+  letter-spacing: 0;                             /* untracked: "Average moves" stays on one line in a 360px sheet */
   text-transform: uppercase;
   color: var(--ink-dim);
 }
@@ -2035,7 +2035,7 @@ button.ui-row:active {
 }
 .ui-win__cap {
   margin-top: 4px;
-  font: 700 10px/1 var(--font-ui);
+  font: 700 11px/1 var(--font-ui);
   letter-spacing: 0.2em;
   text-transform: uppercase;
   color: var(--ink-dim);
@@ -2061,8 +2061,8 @@ button.ui-row:active {
   white-space: nowrap;
 }
 .ui-win__part small {
-  font: 700 9.5px/1 var(--font-ui);
-  letter-spacing: 0.12em;
+  font: 700 11px/1 var(--font-ui);
+  letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--ink-dim);
 }

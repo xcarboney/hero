@@ -142,9 +142,9 @@ html.insp-covered .fx-layer {
 }
 
 .insp-btn__label {
-  font-size: 10px;
+  font-size: 11px;                               /* the floor for any text on a phone; "Previous" still fits a 45px button */
   line-height: 1;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.01em;
   color: var(--ink-dim, rgba(246, 241, 228, 0.68));
 }
 
@@ -977,7 +977,7 @@ html[data-effects="low"] .insp-gal__ring::after {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1;
   letter-spacing: 0.14em;
   text-transform: uppercase;

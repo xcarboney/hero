@@ -154,3 +154,79 @@ androidComponents {
         variant.sources.assets?.addGeneratedSourceDirectory(bundleWebGame, BundleWebGame::outputDir)
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Open-source notices. The APK tells its user which libraries it bundles and under which licence:
+// src/main/assets/open_source_licenses.txt, which the game shows in Settings under "Open-source
+// licences" (NativeBridge.openSourceLicenses). The list in that file is written by hand, after
+// looking at the licence of each library, so the build checks it against what is really packaged.
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Fails when the libraries listed in the notices file (its lines `- group:artifact`) are not
+ * exactly the ones on the release runtime classpath. That happens when a dependency is added,
+ * removed or renamed, also a transitive one after a version bump; the notices then have to follow.
+ */
+abstract class CheckOpenSourceNotices : DefaultTask() {
+
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val noticesFile: RegularFileProperty
+
+    /** `group:artifact` of every library that is packaged into the app. */
+    @get:Input
+    abstract val packaged: SetProperty<String>
+
+    /** Written on success, so that an unchanged list is not checked again. */
+    @get:OutputFile
+    abstract val result: RegularFileProperty
+
+    @TaskAction
+    fun check() {
+        val file = noticesFile.get().asFile
+        val listed = file.readLines().filter { it.startsWith("- ") }.map { it.removePrefix("- ").trim() }.toSet()
+        val missing = (packaged.get() - listed).sorted()
+        val stale = (listed - packaged.get()).sorted()
+        if (missing.isNotEmpty() || stale.isNotEmpty()) {
+            throw GradleException(
+                buildString {
+                    append("The open-source notices do not match the libraries in the app: $file\n")
+                    if (missing.isNotEmpty()) {
+                        append("Packaged but not listed (check the licence of each, then add a line \"- group:artifact\";\n")
+                        append("a licence other than Apache 2.0 also needs its text in the file):\n")
+                        missing.forEach { append("  - $it\n") }
+                    }
+                    if (stale.isNotEmpty()) {
+                        append("Listed but no longer packaged (remove the line):\n")
+                        stale.forEach { append("  - $it\n") }
+                    }
+                    append("The packaged libraries: ./gradlew :app:dependencies --configuration releaseRuntimeClasspath")
+                },
+            )
+        }
+        result.get().asFile.writeText(listed.sorted().joinToString(separator = "\n", postfix = "\n"))
+    }
+}
+
+androidComponents {
+    // Debug and release package the same libraries; the release classpath is the one that ships.
+    onVariants(selector().withBuildType("release")) { variant ->
+        val checkOpenSourceNotices = tasks.register<CheckOpenSourceNotices>("checkOpenSourceNotices") {
+            group = "verification"
+            description = "Checks that the open-source notices list exactly the libraries packaged into the app."
+            noticesFile.set(layout.projectDirectory.file("src/main/assets/open_source_licenses.txt"))
+            // Every module that contributes a file (a jar or an aar). Platforms (BOMs) and the
+            // umbrella modules of multiplatform libraries have none and are not libraries in the APK.
+            packaged.set(
+                variant.runtimeConfiguration.incoming.artifacts.resolvedArtifacts.map { artifacts ->
+                    artifacts.mapNotNull { it.id.componentIdentifier as? ModuleComponentIdentifier }
+                        .map { "${it.group}:${it.module}" }
+                        .toSet()
+                },
+            )
+            result.set(layout.buildDirectory.file("checkOpenSourceNotices/libraries.txt"))
+        }
+        // Part of every build, debug included: an APK must not be produced with stale notices.
+        tasks.named("preBuild") { dependsOn(checkOpenSourceNotices) }
+    }
+}

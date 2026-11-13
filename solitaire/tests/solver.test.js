@@ -1,7 +1,7 @@
 /*
  * Tests for SOL.Solver (js/core/solver.js).
  *
- * Run with:   node --test "/home/user/hero/solitaire/tests/*.test.js"
+ * Run with:   node --test "solitaire/tests/*.test.js"      (from the repository root)
  *
  * What is covered:
  *   - soundness: every solution solve() returns, on 2 x 150 fresh deals, on positions in the
@@ -13,12 +13,19 @@
  *     limits mean the defaults; results are deterministic and do not depend on what ran before;
  *   - bad input never throws;
  *   - findWinnableSeed: certified seeds really are winnable, the seed sequence, the budget;
- *   - findWinnableSeedAsync: resolves, yields between slices (slice lengths are measured), a
- *     search paused across slices gives exactly the result of the uninterrupted one, never rejects;
+ *   - findWinnableSeedAsync: resolves, yields between slices, a search paused across slices
+ *     gives exactly the result of the uninterrupted one, never rejects;
  *   - the file loads as a classic script (no require / module), as index.html loads it.
  *
+ * Time. The suite must pass on a busy machine (other test files, a shared CI runner), where a
+ * process can be kept waiting at any moment. So no test depends on how long something really
+ * took, beyond "at least its budget" and a very loose upper bound (BUSY_MS). Where time is the
+ * subject (maxMs, budgetMs, sliceMs) the search runs on a test clock that only moves when the
+ * solver looks at it (testClock): when it stops, how long a slice is and how many slices fit in
+ * a budget are then exact numbers, the same on every machine and every run.
+ *
  * The measurements quoted in the solver's header come from the last test. It is skipped unless
- * asked for:   SOLVER_BENCH=1 node --test "/home/user/hero/solitaire/tests/solver.test.js"
+ * asked for:   SOLVER_BENCH=1 node --test "solitaire/tests/solver.test.js"
  * (SOLVER_BENCH=1000 sets the number of deals; the default is 400 per draw mode).
  */
 'use strict';
@@ -38,6 +45,49 @@ const Solver = require(path.join(CORE, 'solver.js'));
 /** Limits under which only the node count decides: results are exactly reproducible. */
 function nodesOnly(maxNodes) {
   return { maxNodes: maxNodes, maxMs: 600000 };
+}
+
+/**
+ * The only upper bound these tests put on real time. They run next to other work (the other test
+ * files, whatever else the machine or the CI runner is doing), and a process that is kept waiting
+ * for the CPU must not fail a test. So what a search did is asserted through its own results
+ * (nodes, reason, tried, certified) and, where time itself is the subject, on a test clock
+ * (testClock below), where it is exact. Real time only has to stay below the limit plus this
+ * much: a search that ignored its limit would run for minutes (the tests give it maxNodes 1e9).
+ */
+const BUSY_MS = 5000;
+
+/**
+ * A clock for the solver that only moves when it is looked at: every reading is `stepMs` later
+ * than the one before, and advance(ms) lets time pass without a reading (a pause between two
+ * slices). What a search does on it depends on its own accounting alone (how often it looks at
+ * the clock, when it stops, when it yields), not on how fast or how busy the machine is, so the
+ * numbers are exact and the same on every run.
+ *
+ * It works because the solver reads `performance.now()` through the global object at the moment
+ * of every call. Use a `stepMs` that is a power of two (1/16, 1/32): every reading is then an
+ * exact number and "the first reading at or after the deadline" is not a matter of rounding.
+ * Always restore() in a finally block; `time` is the current time without a reading.
+ */
+function testClock(stepMs) {
+  const own = Object.getOwnPropertyDescriptor(performance, 'now');
+  const clock = {
+    time: 0,
+    reads: 0,
+    advance: function (ms) {
+      clock.time += ms;
+    },
+    restore: function () {
+      if (own) Object.defineProperty(performance, 'now', own);
+      else delete performance.now;
+    },
+  };
+  performance.now = function () {
+    clock.reads++;
+    clock.time += stepMs;
+    return clock.time;
+  };
+  return clock;
 }
 
 function deal(seed, drawCount) {
@@ -546,8 +596,8 @@ describe('solve: limits', () => {
           assertResultShape(r, maxNodes);
           assert.equal(r.solved, false, 'a win takes at least 52 nodes');
           assert.equal(r.reason, 'nodes');
-          assert.equal(r.nodes, maxNodes);
-          assert.ok(took < 50, 'returned quickly (' + took.toFixed(2) + ' ms)');
+          assert.equal(r.nodes, maxNodes); // it did exactly that much work and no more
+          assert.ok(took < BUSY_MS, 'returned (' + took.toFixed(2) + ' ms)');
         }
       }
     }
@@ -596,10 +646,43 @@ describe('solve: limits', () => {
         assert.equal(r.solved, false);
         assert.equal(r.reason, 'time');
         assert.ok(r.ms >= maxMs - 0.001, 'it used its time (' + r.ms.toFixed(2) + ' of ' + maxMs + ' ms)');
-        // (generous: the machine running the tests may be busy; the solver itself checks the
-        //  clock every 16 search steps)
-        assert.ok(took < maxMs + 150, 'stopped near the limit: ' + took.toFixed(1) + ' ms for maxMs ' + maxMs);
-        assert.ok(r.nodes < 200000);
+        // What it did in that time: a small part of the search (a busy machine only makes it less).
+        assert.ok(r.nodes > 0 && r.nodes < 200000, r.nodes + ' nodes');
+        // How long that really took is only bounded loosely here (see BUSY_MS); the test below
+        // puts the same search on a test clock, where "stopped at the limit" is exact.
+        assert.ok(took < maxMs + BUSY_MS, 'stopped: ' + took.toFixed(1) + ' ms for maxMs ' + maxMs);
+      }
+    }
+  });
+
+  test('on a test clock: the search stops at its first look at the clock after maxMs', () => {
+    const STEP = 1 / 16; // ms per look at the clock
+    for (const drawCount of [1, 3]) {
+      const st = deal(hardSeed(drawCount), drawCount);
+      for (const maxMs of [2, 10, 30]) {
+        const runs = [];
+        for (let i = 0; i < 2; i++) {
+          const clock = testClock(STEP);
+          try {
+            const r = Solver.solve(st, { maxNodes: 1e9, maxMs: maxMs });
+            runs.push({ r: r, reads: clock.reads });
+          } finally {
+            clock.restore();
+          }
+        }
+        const r = runs[0].r;
+        const reads = runs[0].reads;
+        assert.equal(r.solved, false);
+        assert.equal(r.reason, 'time');
+        // One reading at the start, one per look, one for `ms`: the look that found the time used
+        // up was the first one at or after maxMs, so `ms` is maxMs plus that last reading.
+        assert.equal(reads, maxMs / STEP + 2, 'looks at the clock for maxMs ' + maxMs);
+        assert.equal(r.ms, maxMs + STEP);
+        // It looks at the clock every 16 search steps (and once before the first).
+        assert.ok(r.nodes > 0 && r.nodes <= 16 * (reads - 2), r.nodes + ' nodes in ' + reads + ' looks');
+        // Nothing but the clock decided: the same again.
+        assert.equal(runs[1].reads, reads);
+        assert.deepEqual(runs[1].r, r);
       }
     }
   });
@@ -612,7 +695,9 @@ describe('solve: limits', () => {
     assertResultShape(r, Solver.DEFAULTS.maxNodes);
     assert.equal(r.solved, false);
     assert.ok(r.reason === 'nodes' || r.reason === 'time');
-    assert.ok(took < Solver.DEFAULTS.maxMs + 150, took.toFixed(1) + ' ms');
+    if (r.reason === 'nodes') assert.equal(r.nodes, Solver.DEFAULTS.maxNodes);
+    else assert.ok(r.ms >= Solver.DEFAULTS.maxMs - 0.001, r.ms.toFixed(2) + ' ms by its own clock');
+    assert.ok(took < Solver.DEFAULTS.maxMs + BUSY_MS, took.toFixed(1) + ' ms');
   });
 
   test('limits that are not finite numbers mean the defaults; negative ones mean zero', () => {
@@ -777,7 +862,7 @@ describe('findWinnableSeed', () => {
       const r = Solver.findWinnableSeed();
       const took = performance.now() - t0;
       assertSeedResult(r, 1);
-      assert.ok(took < Solver.DEFAULTS.budgetMs + 150, took.toFixed(1) + ' ms');
+      assert.ok(took < Solver.DEFAULTS.budgetMs + BUSY_MS, took.toFixed(1) + ' ms');
       if (r.certified) certified++;
     }
     assert.ok(certified >= 18, certified + ' of 20 certified');
@@ -852,7 +937,10 @@ describe('findWinnableSeed', () => {
       const r2 = Solver.findWinnableSeed({ budgetMs: bad, startSeed: 7, maxNodes: 10 });
       const took = performance.now() - t0;
       assert.equal(r2.certified, false);
-      assert.ok(took >= Solver.DEFAULTS.budgetMs - 1 && took < Solver.DEFAULTS.budgetMs + 150, took.toFixed(1) + ' ms');
+      // 10 nodes certify nothing, so it searched until the budget was used up: the default one
+      // (at least that long whatever the machine is doing; BUSY_MS for the other side)
+      assert.ok(r2.tried > 10, r2.tried + ' deals');
+      assert.ok(took >= Solver.DEFAULTS.budgetMs - 1 && took < Solver.DEFAULTS.budgetMs + BUSY_MS, took.toFixed(1) + ' ms');
     }
   });
 
@@ -879,7 +967,8 @@ describe('findWinnableSeed', () => {
       assertSeedResult(r, drawCount);
       assert.equal(r.certified, false);
       assert.ok(r.tried > 10, 'it kept trying (' + r.tried + ' deals)');
-      assert.ok(took >= 39 && took < 40 + 150, took.toFixed(1) + ' ms for a 40 ms budget');
+      // never early; how late is only bounded loosely here (BUSY_MS), and exactly in the next test
+      assert.ok(took >= 39 && took < 40 + BUSY_MS, took.toFixed(1) + ' ms for a 40 ms budget');
       assert.equal(r.seed, (1000 + r.tried * 0x9e3779b9) >>> 0, 'the seed after the last one examined');
 
       // one deal that takes longer than the whole budget
@@ -890,7 +979,45 @@ describe('findWinnableSeed', () => {
       assert.equal(h.certified, false);
       assert.equal(h.tried, 1);
       assert.notEqual(h.seed, hard, 'a deal the solver gave up on is not handed back');
-      assert.ok(took1 < 25 + 150, took1.toFixed(1) + ' ms for a 25 ms budget');
+      assert.ok(took1 >= 24 && took1 < 25 + BUSY_MS, took1.toFixed(1) + ' ms for a 25 ms budget');
+    }
+  });
+
+  test('on a test clock: the budget ends the search at its first look at the clock after budgetMs', () => {
+    const STEP = 1 / 32; // ms per look at the clock
+    const hunt = function (opts) {
+      const clock = testClock(STEP);
+      try {
+        const r = Solver.findWinnableSeed(opts);
+        return { r: r, reads: clock.reads };
+      } finally {
+        clock.restore();
+      }
+    };
+    for (const drawCount of [1, 3]) {
+      // No deal can be certified with 10 nodes: deal after deal, until the budget is used up. The
+      // first reading sets the deadline; the search is over at the first one at or after it, and
+      // when that one was taken inside a deal the search confirms it with one more.
+      const fast = hunt({ drawCount: drawCount, budgetMs: 40, maxNodes: 10, startSeed: 1000 });
+      const expected = 1 + 40 / STEP;
+      assert.ok(fast.reads === expected || fast.reads === expected + 1, fast.reads + ' looks at the clock for 40 ms');
+      assert.equal(fast.r.certified, false);
+      // every deal costs at least two looks (one before it is dealt, one when its search starts)
+      assert.ok(fast.r.tried > 10 && fast.r.tried <= fast.reads / 2, fast.r.tried + ' deals in ' + fast.reads + ' looks');
+      assert.equal(fast.r.seed, (1000 + fast.r.tried * 0x9e3779b9) >>> 0, 'the seed after the last one examined');
+      assert.deepEqual(hunt({ drawCount: drawCount, budgetMs: 40, maxNodes: 10, startSeed: 1000 }), fast, 'the same again');
+
+      // One deal that takes longer than the whole budget: the same deadline, one deal tried.
+      const hard = hardSeed(drawCount);
+      const slow = hunt({ drawCount: drawCount, budgetMs: 25, maxNodes: 1e9, startSeed: hard });
+      assert.equal(slow.reads, 1 + 25 / STEP + 1);
+      assert.deepEqual(slow.r, { seed: (hard + 0x9e3779b9) >>> 0, certified: false, tried: 1 });
+
+      // A deal that is certified is found with the same nodes as without any time limit.
+      const good = findSeed(drawCount, Solver.DEFAULTS.seedMaxNodes, (res) => res.solved);
+      const won = hunt({ drawCount: drawCount, startSeed: good });
+      assert.deepEqual({ seed: won.r.seed, certified: won.r.certified, tried: won.r.tried }, { seed: good, certified: true, tried: 1 });
+      assert.deepEqual(won.r.moves, Solver.solve(deal(good, drawCount), nodesOnly(Solver.DEFAULTS.seedMaxNodes)).moves);
     }
   });
 
@@ -907,24 +1034,29 @@ describe('findWinnableSeed', () => {
 describe('findWinnableSeedAsync', () => {
   /**
    * Runs fn() with setTimeout wrapped: counts the zero-delay timers (the solver's yields) and
-   * measures every slice (from a timer firing to the next yield, or to `stop()`).
+   * measures every slice (from a timer firing to the next yield, or to the result).
+   *
+   * @param clock  a testClock() to measure on, without reading it (default: the real clock)
+   * @param pause  with a test clock: how much time passes between two slices
    */
-  async function watchTimers(fn) {
+  async function watchTimers(fn, clock, pause) {
     const real = globalThis.setTimeout;
+    const time = clock ? () => clock.time : () => performance.now();
     const watch = { yields: 0, slices: [], sliceStart: -1 };
     globalThis.setTimeout = function (cb, ms, ...rest) {
       if (ms !== 0) return real(cb, ms, ...rest);
-      if (watch.sliceStart >= 0) watch.slices.push(performance.now() - watch.sliceStart);
+      if (watch.sliceStart >= 0) watch.slices.push(time() - watch.sliceStart);
       watch.sliceStart = -1;
       watch.yields++;
       return real(function () {
-        watch.sliceStart = performance.now();
+        if (clock && pause) clock.advance(pause);
+        watch.sliceStart = time();
         cb();
       }, 0);
     };
     try {
       watch.result = await fn();
-      if (watch.sliceStart >= 0) watch.slices.push(performance.now() - watch.sliceStart);
+      if (watch.sliceStart >= 0) watch.slices.push(time() - watch.sliceStart);
     } finally {
       globalThis.setTimeout = real;
     }
@@ -969,8 +1101,8 @@ describe('findWinnableSeedAsync', () => {
       const t0 = performance.now();
       const p = Solver.findWinnableSeedAsync({ drawCount: 3, budgetMs: 20000 });
       const took = performance.now() - t0;
-      assert.equal(deals, 0, 'nothing dealt yet');
-      assert.ok(took < 20, 'the call returned at once (' + took.toFixed(2) + ' ms)');
+      assert.equal(deals, 0, 'nothing dealt yet'); // which is what "the call returns at once" means
+      assert.ok(took < BUSY_MS, 'the call returned (' + took.toFixed(2) + ' ms)');
       let settled = false;
       p.then(() => {
         settled = true;
@@ -998,52 +1130,114 @@ describe('findWinnableSeedAsync', () => {
     }
   });
 
-  test('yields between slices: slices stay near sliceMs and the event loop keeps turning', async () => {
-    // One deal that would take much longer than the budget of 300 ms, in 5 ms slices. The bounds
-    // are generous for a busy test machine; a search that did not yield would show one single
-    // slice of 300 ms and no heartbeat at all.
+  test('yields between slices: the event loop keeps turning while a long search runs', async () => {
+    // One deal that would take much longer than the budget of 300 ms, in 5 ms slices. A search
+    // that did not yield would be one single slice with no heartbeat between its timers. How
+    // long a slice lasts in real time is not asserted here: on a busy machine the process is
+    // kept waiting in the middle of one. The next test measures the slices on a test clock.
     const hard = hardSeed(3);
     let beats = 0;
     let lastBeat = performance.now();
     let longestGap = 0;
-    let running = true;
+    let nextBeat = null;
     (function beat() {
       const t = performance.now();
       if (t - lastBeat > longestGap) longestGap = t - lastBeat;
       lastBeat = t;
       beats++;
-      if (running) setImmediate(beat);
+      nextBeat = setImmediate(beat);
     })();
     const t0 = performance.now();
     const watch = await watchTimers(() => Solver.findWinnableSeedAsync({ drawCount: 3, startSeed: hard, budgetMs: 300, sliceMs: 5, maxNodes: 1e9 }));
     const took = performance.now() - t0;
-    running = false;
+    clearImmediate(nextBeat); // no beat may run on into the next test: it would read that test's clock
     const r = watch.result;
     assert.equal(r.certified, false);
     assert.equal(r.tried, 1);
     assert.notEqual(r.seed, hard);
-    assert.ok(took >= 299 && took < 300 + 200, 'resolved when the budget ran out (' + took.toFixed(1) + ' ms)');
-    assert.ok(watch.yields >= 6, 'many slices (' + watch.yields + ')');
+    assert.ok(took >= 299 && took < 300 + BUSY_MS, 'resolved when the budget ran out (' + took.toFixed(1) + ' ms)');
+    assert.ok(watch.yields >= 3, 'the search was cut into slices (' + watch.yields + ')');
     assert.equal(watch.slices.length, watch.yields);
-    const sorted = watch.slices.slice().sort((a, b) => a - b);
-    const median = sorted[Math.floor(sorted.length / 2)];
-    assert.ok(median <= 5 + 3, 'a typical slice is sliceMs long (median ' + median.toFixed(2) + ' ms)');
-    assert.ok(sorted[sorted.length - 1] < 150, 'no slice overran (longest ' + sorted[sorted.length - 1].toFixed(2) + ' ms)');
     assert.ok(beats >= watch.yields, 'other work ran between the slices (' + beats + ' beats)');
-    assert.ok(longestGap < 150, 'the event loop was never blocked for long (' + longestGap.toFixed(2) + ' ms)');
+    // the search never held the event loop for the whole of its budget, pauses and all
+    assert.ok(longestGap < took, 'longest gap between two beats ' + longestGap.toFixed(2) + ' of ' + took.toFixed(1) + ' ms');
+  });
+
+  test('on a test clock: a slice ends sliceMs after it began, and the pauses count towards the budget', async () => {
+    const STEP = 1 / 16; // ms per look at the clock
+    const SLICE = 5;
+    const PAUSE = 3; // between two slices
+    const BUDGET = 300;
+    const hard = hardSeed(3);
+    const run = async function () {
+      const clock = testClock(STEP);
+      try {
+        const watch = await watchTimers(
+          () => Solver.findWinnableSeedAsync({ drawCount: 3, startSeed: hard, budgetMs: BUDGET, sliceMs: SLICE, maxNodes: 1e9 }),
+          clock,
+          PAUSE
+        );
+        watch.elapsed = clock.time - STEP; // since the reading that set the deadline: the very first
+        return watch;
+      } finally {
+        clock.restore();
+      }
+    };
+    const watch = await run();
+    assert.deepEqual(watch.result, { seed: (hard + 0x9e3779b9) >>> 0, certified: false, tried: 1 });
+    // A slice: the reading that starts it, the search until the first look at the clock at or
+    // after sliceMs, one more reading to see that the budget is not used up. Never longer.
+    const full = SLICE + 2 * STEP;
+    assert.equal(watch.slices.length, watch.yields);
+    watch.slices.forEach((ms, i) => {
+      if (i < watch.slices.length - 1) assert.equal(ms, full, 'slice ' + i);
+      else assert.ok(ms > 0 && ms <= full, 'the last slice is cut short by the budget (' + ms + ' ms)');
+    });
+    // The budget runs from the call and through the pauses: 300 ms of slice + pause, not 300 ms
+    // of search (which would be 59 slices).
+    assert.equal(watch.yields, Math.ceil((BUDGET - PAUSE) / (full + PAUSE)));
+    assert.equal(watch.yields, 37);
+    // It resolved at its first look at the clock after the deadline: at the latest one pause
+    // and the two readings that begin a slice after it.
+    assert.ok(watch.elapsed >= BUDGET && watch.elapsed <= BUDGET + PAUSE + 2 * STEP, watch.elapsed + ' ms on the test clock');
+
+    // nothing but the clock decided: the same again
+    const again = await run();
+    assert.deepEqual(again.result, watch.result);
+    assert.deepEqual(again.slices, watch.slices);
+    assert.equal(again.elapsed, watch.elapsed);
   });
 
   test('the budget is wall-clock time; budgetMs: 0 resolves at the first slice', async () => {
-    // deal after deal fails at once (10 nodes are never enough): the slices still end on time
+    // deal after deal fails at once (10 nodes are never enough): the budget still ends the search
     const t0 = performance.now();
-    const watch = await watchTimers(() => Solver.findWinnableSeedAsync({ budgetMs: 60, maxNodes: 10, startSeed: 5, sliceMs: 4 }));
+    const r = await Solver.findWinnableSeedAsync({ budgetMs: 60, maxNodes: 10, startSeed: 5, sliceMs: 4 });
     const took = performance.now() - t0;
-    const r = watch.result;
-    assert.ok(watch.yields >= 3, 'it yielded between deals (' + watch.yields + ' timers)');
     assert.equal(r.certified, false);
-    assert.ok(r.tried > 10);
+    assert.ok(r.tried > 10, r.tried + ' deals');
     assert.equal(r.seed, (5 + r.tried * 0x9e3779b9) >>> 0);
-    assert.ok(took >= 59 && took < 60 + 150, took.toFixed(1) + ' ms for a 60 ms budget');
+    assert.ok(took >= 59 && took < 60 + BUSY_MS, took.toFixed(1) + ' ms for a 60 ms budget');
+
+    // The same on a test clock (2 ms pass between two slices): the slices end on time although
+    // no single deal ever runs into the end of one, and the pauses are part of the 60 ms.
+    const STEP = 1 / 32;
+    const clock = testClock(STEP);
+    let watch;
+    try {
+      watch = await watchTimers(() => Solver.findWinnableSeedAsync({ budgetMs: 60, maxNodes: 10, startSeed: 5, sliceMs: 4 }), clock, 2);
+    } finally {
+      clock.restore();
+    }
+    assert.equal(watch.result.certified, false);
+    assert.ok(watch.result.tried > 10, watch.result.tried + ' deals');
+    assert.equal(watch.result.seed, (5 + watch.result.tried * 0x9e3779b9) >>> 0);
+    // The clock is looked at before every deal and when its search starts, so a slice ends at
+    // the latest one reading after sliceMs (plus the reading that starts it and the one after).
+    watch.slices.forEach((ms, i) => {
+      if (i < watch.slices.length - 1) assert.ok(ms >= 4 + 2 * STEP && ms <= 4 + 3 * STEP, 'slice ' + i + ': ' + ms + ' ms');
+      else assert.ok(ms > 0 && ms <= 4 + 3 * STEP, 'the last slice: ' + ms + ' ms');
+    });
+    assert.equal(watch.yields, 10, 'ten slices of 4 ms with 2 ms between them in 60 ms');
 
     const z = await Solver.findWinnableSeedAsync({ budgetMs: 0, startSeed: 31337 });
     assert.deepEqual(z, { seed: 31337, certified: false, tried: 0 });

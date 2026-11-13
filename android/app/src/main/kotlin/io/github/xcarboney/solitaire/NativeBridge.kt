@@ -15,12 +15,20 @@ import android.webkit.JavascriptInterface
  *
  * The storage methods are different: the page needs their answer at once, so they run on the
  * bridge thread against [storage], which is thread-safe and never makes a caller wait for a
- * disk write (see [KeyValueFileStore]).
+ * disk write (see [KeyValueFileStore]). [openSourceLicenses] answers on the bridge thread too:
+ * it reads one small file from the APK, once.
  *
  * Only the methods annotated with [JavascriptInterface] are visible to JavaScript. R8 keeps
  * their names (app/proguard-rules.pro).
+ *
+ * @param readNotices reads the open-source notices ([OpenSourceNotices]); called on the bridge
+ *   thread, at most until it has returned the text once.
  */
-internal class NativeBridge(private val host: Host, storage: KeyValueFileStore) {
+internal class NativeBridge(
+    private val host: Host,
+    storage: KeyValueFileStore,
+    readNotices: () -> String,
+) {
 
     /** What the bridge can ask of the Activity. Every method is called on the UI thread. */
     interface Host {
@@ -35,6 +43,9 @@ internal class NativeBridge(private val host: Host, storage: KeyValueFileStore) 
 
     /** The store as this bridge's page may use it: not at all once [release]d or untrusted. */
     private val storage = GuardedStore(storage)
+
+    /** The open-source notices, under the same rule as [storage]. */
+    private val notices = GuardedNotices(readNotices)
 
     @Volatile
     private var released = false
@@ -57,12 +68,14 @@ internal class NativeBridge(private val host: Host, storage: KeyValueFileStore) 
      *
      * Like the URL check it is a second line of defence. The first is that a foreign page can
      * never load: no INTERNET permission, every request answered locally, navigation locked.
-     * The flag itself lives in [GuardedStore], which is what the unit tests cover.
+     * The flag itself lives in [GuardedStore] (and, for [openSourceLicenses], in
+     * [GuardedNotices]), which is what the unit tests cover.
      */
     var pageTrusted: Boolean
         get() = storage.pageTrusted
         set(value) {
             storage.pageTrusted = value
+            notices.pageTrusted = value
         }
 
     /** `SolitaireNative.haptic(kind)`. Unknown kinds (and non-strings) are ignored. */
@@ -143,10 +156,21 @@ internal class NativeBridge(private val host: Host, storage: KeyValueFileStore) 
     @JavascriptInterface
     fun storageKeys(): String = storage.keysJson()
 
+    /**
+     * `SolitaireNative.openSourceLicenses()` -> the notices of the open-source libraries in the
+     * APK: which libraries, then the full text of their licence, as plain text with lines of at
+     * most 77 characters ([OpenSourceNotices]). "" when the text cannot be read. The page shows
+     * it in Settings under "Open-source licences" and offers that entry only when this method
+     * exists.
+     */
+    @JavascriptInterface
+    fun openSourceLicenses(): String = notices.text()
+
     /** Makes the bridge inert once its WebView is gone; late calls from the page are dropped. */
     fun release() {
         released = true
         storage.released = true
+        notices.released = true
         mainThread.removeCallbacksAndMessages(null)
     }
 
