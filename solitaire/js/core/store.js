@@ -95,6 +95,7 @@
     leftHanded: { def: false, ok: (v) => typeof v === 'boolean' },
     showTimer: { def: true, ok: (v) => typeof v === 'boolean' },
     effects: { def: 'high', ok: (v) => v === 'high' || v === 'low' },
+    haptics: { def: true, ok: (v) => typeof v === 'boolean' },
   };
 
   /** animSpeed -> multiplier handed to SOL.Anim.setSpeed (durations are divided by it). */
