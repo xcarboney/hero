@@ -4,9 +4,14 @@
  * #overlay-root, and toasts in #toast-root.
  *
  * Designed for an Android phone in portrait first (bottom sheets, thumb-sized targets), then scaled up:
- *   < 640px wide          sheets slide up from the bottom edge, can be dragged down, scroll inside
- *   >= 640px wide         the same markup becomes a centred dialog with a 3D open / close
- *   short landscape       slimmer HUD and toolbar, the Auto-complete pill moves into the toolbar
+ *   < 640px wide          sheets slide up from the bottom edge, can be dragged down, scroll inside;
+ *                         the Auto-complete pill floats above the toolbar
+ *   >= 640px wide         the same markup becomes a centred dialog with a 3D open / close; the pill and the
+ *                         "no more moves" card sit inside the toolbar's own height
+ *   short landscape       slimmer HUD and toolbar, pill and card inside the toolbar as well
+ *
+ * Chrome height: HUD 40px + toolbar 56px (15% of a 360x640 screen; 34px + 48px on a phone held sideways),
+ * plus the safe-area insets base.css adds. Toolbar targets are 48px, everything else at least 44px.
  *
  * Rules this file keeps (contract section 14):
  *   - no backdrop-filter and no filter anywhere: the "glass" is layered translucent gradients and
@@ -69,6 +74,13 @@
   user-select: none;
   -webkit-touch-callout: none;
   -webkit-tap-highlight-color: transparent;
+}
+/* Nothing here scrolls or zooms: taps only (a pinch on the bars must not zoom the page in a browser). */
+.hud,
+.toolbar,
+.ui-stuck,
+.ui-toast__card {
+  touch-action: none;
 }
 
 .ui-icon {
@@ -673,6 +685,15 @@
       display: none;
     }
   }
+  /* smaller than any phone held sideways (or one with deep side cutouts): the pill is its icon alone */
+  @container ui-tb (max-width: 469px) {
+    .ui-auto__label {
+      display: none;
+    }
+    .ui-auto {
+      padding: 0 13px;
+    }
+  }
 }
 /* (= wide, and not the short landscape case above) */
 @media (min-width: 640px) and (orientation: portrait), (min-width: 640px) and (min-height: 500.02px) {
@@ -787,7 +808,7 @@
   align-items: center;
   gap: 10px;
   min-height: 48px;
-  padding: 0 10px 6px 20px;
+  padding: 0 max(10px, var(--safe-r)) 6px max(20px, calc(var(--safe-l) + 4px));
   touch-action: none;
 }
 .ui-sheet__head::after {                          /* shadow under the header once the body is scrolled */
@@ -856,7 +877,8 @@
   touch-action: none;
 }
 .ui-sheet__content {
-  padding: 2px 16px calc(18px + var(--safe-b));
+  /* a sheet spans the screen: on a small phone held sideways its content keeps clear of the side cutouts */
+  padding: 2px max(16px, var(--safe-r)) calc(18px + var(--safe-b)) max(16px, var(--safe-l));
 }
 
 /* centred dialog */
@@ -1164,6 +1186,11 @@ button.ui-row:active {
   touch-action: manipulation;
   cursor: pointer;
 }
+.ui-seg__opt::after {                             /* 40px tall inside the track: the touch target is 46px */
+  content: "";
+  position: absolute;
+  inset: -3px 0;
+}
 .ui-seg__opt[aria-checked="true"] {
   color: var(--ui-gold-ink);
   font-weight: 700;
@@ -1407,6 +1434,44 @@ button.ui-row:active {
     --card-w: 62px;
     grid-template-columns: repeat(6, minmax(0, 1fr));
     gap: 8px 4px;
+  }
+}
+
+/* A mouse gets hover feedback (never needed to use anything; touch devices do not match this query) */
+@media (hover: hover) and (pointer: fine) {
+  .ui-btn:hover:not(:disabled) {
+    background-color: rgba(255, 255, 255, 0.14);
+  }
+  .ui-btn--quiet:hover:not(:disabled) {
+    background-color: rgba(255, 255, 255, 0.07);
+    color: var(--ink);
+  }
+  .ui-btn--primary:hover:not(:disabled) {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85), 0 0 0 3px rgba(243, 201, 105, 0.28), 0 6px 16px rgba(0, 0, 0, 0.32);
+  }
+  .ui-btn--danger:hover:not(:disabled) {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 0 0 3px rgba(255, 107, 107, 0.3), 0 6px 16px rgba(0, 0, 0, 0.32);
+  }
+  .ui-sheet__close:hover {
+    background-color: rgba(255, 255, 255, 0.16);
+  }
+  button.ui-row:hover {
+    background-color: rgba(255, 255, 255, 0.045);
+  }
+  .ui-tile:hover {
+    border-color: rgba(243, 201, 105, 0.4);
+    background-color: rgba(255, 255, 255, 0.085);
+  }
+  .ui-hero:hover {
+    border-color: rgba(243, 201, 105, 0.75);
+  }
+  .ui-seg__opt:hover:not([aria-checked="true"]),
+  .ui-swatch:hover,
+  .ui-back:hover {
+    color: var(--ink);
+  }
+  .ui-auto:hover {
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9), inset 0 -1px 0 rgba(120, 80, 0, 0.35), 0 8px 20px rgba(0, 0, 0, 0.45);
   }
 }
 
@@ -1685,7 +1750,8 @@ button.ui-row:active {
   line-height: 33px;
 }
 .ui-fig__value.is-none {
-  color: var(--ink-faint);
+  color: var(--ink-dim);                         /* "no record yet": quieter than a number, still readable */
+  font-weight: 500;
 }
 .ui-stats__grid {
   display: grid;
@@ -2007,9 +2073,13 @@ button.ui-row:active {
   opacity: 0;
   will-change: transform, opacity;
 }
+.ui-win__plus,
+.ui-win__sum > .ui-win__part:not(.ui-win__part--bonus) {
+  opacity: 0;                                    /* shown by ui.js when the bonus lands */
+  transition: opacity 220ms linear;
+}
 .ui-win__plus {
   color: var(--ink-dim);
-  opacity: 0;
 }
 .ui-win__badges {
   display: flex;
@@ -2093,7 +2163,7 @@ button.ui-row:active {
   gap: 6px 10px;
   max-width: 560px;
   margin: 0 auto;
-  padding: 8px 8px 8px 12px;
+  padding: 7px 8px 7px 12px;
   border: 1px solid rgba(243, 201, 105, 0.45);
   border-radius: 20px;
   background: linear-gradient(180deg, var(--ui-panel-1) 0%, var(--ui-panel-2) 100%);
@@ -2113,15 +2183,15 @@ button.ui-row:active {
   flex: none;
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 9px;
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
   background: rgba(243, 201, 105, 0.16);
   color: var(--gold);
 }
 .ui-stuck__icon .ui-icon {
-  width: 17px;
-  height: 17px;
+  width: 16px;
+  height: 16px;
 }
 .ui-stuck__title {
   font: 700 14.5px/1.2 var(--font-ui);
@@ -2140,6 +2210,14 @@ button.ui-row:active {
   border-radius: 13px;
   font-size: 13.5px;
   white-space: nowrap;
+}
+/* wide enough for one row: the card fits inside the toolbar's own height and covers nothing of the table */
+@media (min-width: 640px) {
+  .ui-stuck {
+    bottom: calc(var(--safe-b) + 3px);
+    padding: 2px 4px 2px 12px;
+    border-radius: 18px;
+  }
 }
 
 /* ================================================================== toasts */
@@ -2187,8 +2265,8 @@ button.ui-row:active {
   animation: ui-toast-in 380ms var(--ease-back) both;
 }
 .ui-toast.is-leaving .ui-toast__card {
-  /* still takes taps while it fades: the second tap of a double tap must not reach the cards underneath */
   animation: ui-toast-out 240ms ease-in both;
+  pointer-events: none;                          /* (a toast that was tapped away raises ui.js's shield instead) */
 }
 .ui-toast.is-bump .ui-toast__card {
   animation: ui-toast-bump 300ms var(--ease-out);

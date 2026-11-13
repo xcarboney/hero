@@ -628,7 +628,10 @@
       for (const o of C.objs) o.dirty = true;
       C.floorKey = '';
     }
-    if (G.live) layoutGallery();
+    if (G.live) {
+      endTabTurn(); // a panel in mid-turn is transformed and cannot be measured: the turn ends here and now
+      layoutGallery();
+    }
   }
 
   // ------------------------------------------------------------------ frame loop + global listeners
@@ -1888,7 +1891,10 @@
           pinLayout(o, false);
         },
       });
-      s.coverWait.then(function () {
+      // (out of the gallery the screen is covered already, but the gallery is still fading away behind the
+      //  card and the card is being painted for the first time: the turn waits just as long there)
+      const ready = C.fromGallery ? A.wait(COVER_MS * A.speed) : s.coverWait;
+      ready.then(function () {
         if (o.dead || o.retired || !o.pendingSpin) return;
         // one full turn on the way in, carried by a spring so it lands with a little life
         springRot(o, { yaw: REST_YAW + 360 * turn, pitch: REST_PITCH }, { yaw: turn * 700, pitch: -40 }, 48, 11.5);
@@ -2833,7 +2839,8 @@
           d = it.from;
           const p = clamp((m.t - 0.012 * Math.min(6, Math.abs(d))) / 0.27, 0, 1);
           dy = cw * 0.62 * p * p;
-          alpha = 1 - p;
+          alpha = clamp(1.6 * (1 - p), 0, 1); // solid for the first part of the drop: the cards overlap, and a
+          // stack of half-transparent cards shows every card through the one in front of it
         } else if (it.from !== undefined) {
           // stayers glide to their new place
           const p = clamp(m.t / 0.7, 0, 1);
@@ -2843,7 +2850,7 @@
           const p = clamp((m.t - 0.36 - 0.034 * Math.min(6, Math.abs(d))) / 0.4, 0, 1);
           const e = 1 - Math.pow(1 - p, 3);
           dy = -cw * 0.46 * (1 - e);
-          alpha = p;
+          alpha = clamp(p * 2.6, 0, 1); // (solid early, for the same reason)
         }
       }
       placeItem(it, d, dy, alpha);

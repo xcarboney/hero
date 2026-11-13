@@ -25,7 +25,9 @@
  *   Extras (not in the contract, safe to ignore):
  *   UI.newGame(opts) -> Promise<boolean>   the "New game" flow: asks only when a started, unfinished game would
  *                                   be abandoned, then calls SOL.Game.newGame(opts). Resolves true when a deal
- *                                   was started. The keyboard shortcut for a new game should go through this.
+ *                                   was started; false when the player kept playing, or when the very same
+ *                                   deal was already asked for and has not begun yet (a repeating key).
+ *                                   The keyboard shortcut for a new game should go through this.
  *   UI.openGallery(tab = 'cards')   SOL.Inspector.openGallery({ tab }) with a toast when the inspector is missing
  *   UI.showWin(payload)             opens the win screen right now ('game:won' does it by itself after ~2.5 s)
  *   UI.showStuck() / UI.hideStuck() the "no more moves" card ('game:stuck' shows it)
@@ -55,6 +57,19 @@
  *   (SOL.Platform.isNativeApp), where it has an effect.
  * - "New game" (toolbar, win screen, stuck card, Deal now, restart) goes through startDeal(): the New button
  *   stays disabled from the request until the controller's 'game:new' (or its promise settling).
+ * - Stray taps never act. A panel ignores taps for a moment after it opens (160 ms everywhere, 380 ms within
+ *   56px of the tap that opened it; 320 ms when it opened by itself, 600 ms for the win screen), so the second
+ *   tap of a double tap cannot press what has just slid under the finger. After a tap closes a panel (or
+ *   answers the "no more moves" card, or dismisses a toast) the whole screen ignores taps for 340 ms
+ *   (.ui-shield), so that second tap cannot reach the toolbar or the cards underneath either. A held
+ *   Enter / Space only counts once on anything that opens or answers a panel. Keyboard, Android back and
+ *   script-driven closes are not delayed by any of this.
+ * - The HUD can never overlap itself or run off the screen: fitHud() measures it when the room or the number
+ *   of characters on show changes, drops the word "Draw" when it is tight and, for absurd values, scales the
+ *   bar down to the width there is. Everyday values never trigger either.
+ * - The Auto-complete pill floats above the toolbar on a phone in portrait and sits inside the toolbar, at its
+ *   outer end, from 640px wide and on a phone held sideways (ui.css decides; the labels step aside when both
+ *   do not fit).
  *
  * Motion
  * ------
@@ -68,6 +83,9 @@
  *   thumb, rolling digits, ripples, toasts); base.css collapses those under reduced motion.
  * - HUD and toolbar adapt to the width they really have (container queries on .ui-hud-box / .ui-tb-box), so
  *   side insets count; see ui.css for the measured thresholds.
+ * - The real cards the UI shows (menu fan, card-back tile, back picker) are flattened to one compositor layer
+ *   each by ui.css; the six picker cards are created one frame after the settings sheet, which does not wait
+ *   for them.
  */
 (function (root) {
   'use strict';
@@ -366,7 +384,7 @@
   const GUARD_NEAR_MS = 380; // ...and for this long when it lands where the opening tap did (a double tap)
   const GUARD_NEAR_PX = 56;
   const GUARD_SELF_MS = 320; // a panel that opened by itself (no tap): ignore taps on it for this long
-  const SHIELD_MS = 300; // after a panel closes on a tap, the screen ignores taps for this long
+  const SHIELD_MS = 340; // after a panel closes on a tap, the screen ignores taps for this long
   let lastTap = null; // { x, y, t } of the pointer click being handled (or just handled)
   let shieldEl = null;
   let shieldTimer = 0;
@@ -377,6 +395,7 @@
   const toasts = []; // visible toasts, oldest -> newest
   const stuck = { el: null, muted: false, fresh: false, anim: null };
   let dealPending = false; // a deal was requested and has not begun yet (startDeal)
+  let dealKey = ''; // ...and which one (method + options), so the very same request is not sent twice
   let dealToken = 0;
   let dealTimer = 0;
   let winToken = 0;
@@ -1589,6 +1608,21 @@
    * Released by 'game:new', by the controller's promise settling either way, or after 10 s at the latest
    * (a button that never comes back would be worse than a double deal).
    */
+  function dealKeyOf(method, opts) {
+    let o = '';
+    try {
+      o = JSON.stringify(opts || null);
+    } catch (err) {
+      o = '?';
+    }
+    return method + ':' + o;
+  }
+
+  /** The same deal has already been asked for and has not begun: a key that repeats, a second call. */
+  function sameDealPending(method, opts) {
+    return dealPending && dealKey === dealKeyOf(method, opts);
+  }
+
   function startDeal(method, opts) {
     const token = ++dealToken;
     const release = () => {
@@ -1598,6 +1632,7 @@
       renderToolbar();
     };
     dealPending = true;
+    dealKey = dealKeyOf(method, opts);
     root.clearTimeout(dealTimer);
     dealTimer = root.setTimeout(release, 10000);
     renderToolbar();
@@ -1608,6 +1643,7 @@
 
   /** The one "New game" flow. Asks only when a started, unfinished game would be abandoned. */
   function newGame(opts) {
+    if (sameDealPending('newGame', opts)) return Promise.resolve(false);
     const go = function () {
       closeAll();
       hideStuck(false);
@@ -1625,6 +1661,7 @@
   }
 
   function restartDeal() {
+    if (sameDealPending('restartDeal')) return Promise.resolve(false);
     const go = function () {
       closeAll();
       hideStuck(false);
@@ -1919,6 +1956,7 @@
       const v = Math.round(clamp(Number(sGet('volume', 0.6)) || 0, 0, 1) * 100);
       if (doc.activeElement !== range || Number(range.value) !== v) range.value = String(v);
       range.style.setProperty('--v', v + '%');
+      range.setAttribute('aria-valuetext', v + ' percent');
       rangeValue.textContent = v + '%';
       const on = sGet('sound', true) !== false;
       range.disabled = !on;
@@ -2468,11 +2506,12 @@
           h('h2.ui-win__title', { id: ly.titleId }, 'You won!'),
           totalEl,
           h('div.ui-win__cap', { 'aria-hidden': 'true' }, 'Final score'),
-          h('p.visually-hidden', null,
+          h('p.visually-hidden', { id: ly.titleId + '-sum' },
             'Final score ' + total + (bonus > 0 ? ', including a time bonus of ' + bonus : '') + '.'),
           bonus > 0 ? h('div.ui-win__sum', null, base, plus, bonusEl) : null,
           badges);
         const side = h('div.ui-win__side');
+        ly.sheet.setAttribute('aria-describedby', ly.titleId + '-sum'); // read out with the dialog's title
         c.appendChild(main);
         c.appendChild(side);
         side.appendChild(h('div.ui-win__facts', null,
@@ -2502,7 +2541,7 @@
               closeLayer(ly);
             },
           }, 'Watch the cards')));
-        els = { total: totalEl, plus: plus, bonus: bonusEl, badges: Array.prototype.slice.call(badges.children) };
+        els = { total: totalEl, base: base, plus: plus, bonus: bonusEl, badges: Array.prototype.slice.call(badges.children) };
       },
     });
     if (els) runWinSequence(layer, els, score, bonus, total);
@@ -2547,6 +2586,8 @@
       if (bonus > 0) {
         await wait(220);
         if (!alive()) return;
+        // "Score 760 + Time bonus 4,375" arrives as one line (the score alone would only repeat the big number)
+        els.base.style.opacity = '1';
         els.plus.style.opacity = '1';
         haptic('success');
         try {
@@ -2623,7 +2664,7 @@
             // The card itself was the question: a stuck game is dealt over without another confirm.
             closeAll();
             cancelWin(true);
-            startDeal('newGame');
+            if (!sameDealPending('newGame')) startDeal('newGame');
           },
         }, 'New game'),
         h('button.ui-btn.ui-btn--quiet.ui-press', {
@@ -2722,7 +2763,11 @@
     const node = h('div.ui-toast.ui-toast--' + type, { 'data-type': type }, card);
     const t = { node: node, text: text, type: type, height: 44, timer: 0, gone: false, api: null };
     t.api = { dismiss: () => dismissToast(t) };
-    card.addEventListener('click', () => dismissToast(t));
+    card.addEventListener('click', (e) => {
+      // tapped away: the second tap of a double tap must not land on the card (or button) underneath
+      if (isPointerClick(e)) shield();
+      dismissToast(t);
+    });
     card.addEventListener('animationend', (e) => {
       if (e.animationName === 'ui-toast-bump') node.classList.remove('is-bump');
     });
