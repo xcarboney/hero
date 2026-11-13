@@ -110,6 +110,17 @@
   --card-t: calc(var(--card-w) * 0.025);
 }
 
+/*
+ * Whole-pixel thickness where the browser can round: every wall strip is its own compositor layer, and a layer
+ * with a fractional size gets a half-transparent last row of texels — which shows up as hairline gaps and
+ * steps where walls meet each other and the faces.
+ */
+@supports (width: round(1.5px, 1px)) {
+  .card--thick {
+    --card-t: max(1px, round(calc(var(--card-w) * 0.025), 1px));
+  }
+}
+
 /* ------------------------------------------------------------------ table shadow */
 /*
  * Three static shadows, cross-faded by --lift, so lifting a card never repaints anything (opacity only):
@@ -335,6 +346,15 @@
 }
 
 /*
+ * Low-effects mode (<html data-effects="low">, contract section 14): table cards lose their glare planes, so
+ * whatever an owner writes to --glare-* costs nothing. Thick cards keep theirs — that is one card on screen,
+ * and the moving highlight is the point of looking at it.
+ */
+:root[data-effects="low"] .card:not(.card--thick) .card__glare {
+  display: none;
+}
+
+/*
  * Lighting that needs trigonometry (guarded: a var()-containing declaration with an unknown function would
  * otherwise wipe the property instead of falling back).
  *  - faces darken as --flip turns them edge-on;
@@ -363,7 +383,7 @@
 .card__edges::after {
   content: "";
   position: absolute;
-  inset: 0.5px;
+  inset: 0;
   border-radius: var(--card-radius);
   background: #e4ddcb;
 }
@@ -385,12 +405,13 @@
  * behind the card.
  */
 .card__edge {
+  --_len: calc(var(--card-w) * var(--l));
   position: absolute;
   left: 0;
   top: 0;
   width: var(--card-t);
-  height: calc(var(--card-w) * var(--l));
-  margin: calc(var(--card-w) * var(--l) / -2) 0 0 calc(var(--card-t) / -2);
+  height: var(--_len);
+  margin: calc(var(--_len) / -2) 0 0 calc(var(--card-t) / -2);
   transform: translate3d(calc(var(--card-w) * var(--x)), calc(var(--card-w) * var(--y)), 0) rotateZ(var(--a)) rotateY(90deg);
   background-image:
     linear-gradient(
@@ -404,6 +425,12 @@
       rgba(70, 58, 36, 0.2) 100%
     ),
     linear-gradient(180deg, var(--c0), var(--c1));
+}
+
+@supports (width: round(1.5px, 1px)) {
+  .card__edge {
+    --_len: round(up, calc(var(--card-w) * var(--l)), 1px);   /* whole pixels, for the same reason as --card-t */
+  }
 }
 
 /* ------------------------------------------------------------------ states */

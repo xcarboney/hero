@@ -3843,6 +3843,28 @@ describe('REVIEW (black box, from the contract alone)', () => {
     let capped = 0;
     let positions = 0;
     let unknown = 0;
+    let afterwards = 0;
+    /** The contract, checked the slow way, for a position the engine calls stuck. */
+    function verifyStuck(s, label, deep) {
+      // the cheap, exact part: no foundation move, no uncovering move, no waste move, and nothing
+      // the stock cycle shows can be placed
+      for (const m of allMoves(s)) {
+        assert.notEqual(m.to[0], 'f', label + ': stuck although a foundation move exists');
+        assert.notEqual(where(s, m.card).pile, 'waste', label + ': stuck although the waste card can be played');
+        const r = E.apply(E.clone(s), m);
+        assert.equal(r.flips.length, 0, label + ': stuck although a move uncovers a card');
+      }
+      for (const card of cycleTops(s)) assert.ok(!placeable(s, card), label + ': stuck although the stock brings up a playable card');
+      assert.deepEqual(E.hints(s), [], label + ': stuck, yet there is a hint');
+      // the expensive part: no sequence of non-draw moves changes that
+      if (!deep) return;
+      const found = bruteProgress(s, 800);
+      if (found === 'cap') capped++;
+      else {
+        assert.equal(found, null, label + ': isStuck is true but brute force found: ' + found);
+        confirmed++;
+      }
+    }
     for (let seed = 1; seed <= 250; seed++) {
       for (const drawCount of [1, 3]) {
         const s = E.newGame({ seed: seed * 11 + 5, drawCount });
@@ -3859,24 +3881,20 @@ describe('REVIEW (black box, from the contract alone)', () => {
           const label = 'seed ' + seed + ' draw ' + drawCount + ' step ' + i;
           if (stuck) {
             verdicts++;
-            // the cheap, exact part of the contract: no foundation move, no uncovering move, no
-            // waste move, and nothing the stock cycle shows can be placed
-            for (const m of allMoves(s)) {
-              assert.notEqual(m.to[0], 'f', label + ': stuck although a foundation move exists');
-              assert.notEqual(where(s, m.card).pile, 'waste', label + ': stuck although the waste card can be played');
-              const r = E.apply(E.clone(s), m);
-              assert.equal(r.flips.length, 0, label + ': stuck although a move uncovers a card');
+            verifyStuck(s, label, true);
+            // A stuck game stays stuck. Keep going the way a player would — round the stock, the
+            // odd shuffle — and check every further verdict too (the same layout with the stock
+            // and the waste in another order must not be judged by a stale answer).
+            for (let j = 0; j < 12; j++) {
+              const a = drawOk(s) && rng.next() < 0.7 ? DRAW_A : randomAction(s, rng);
+              if (!a) break;
+              assert.ok(E.apply(s, a));
+              if (E.isStuck(s)) {
+                afterwards++;
+                verifyStuck(s, label + ' +' + (j + 1), j % 6 === 5);
+              }
             }
-            for (const card of cycleTops(s)) assert.ok(!placeable(s, card), label + ': stuck although the stock brings up a playable card');
-            assert.deepEqual(E.hints(s), [], label + ': stuck, yet there is a hint');
-            // the expensive part: no sequence of non-draw moves changes that
-            const found = bruteProgress(s, 800);
-            if (found === 'cap') capped++;
-            else {
-              assert.equal(found, null, label + ': isStuck is true but brute force found: ' + found);
-              confirmed++;
-            }
-            break; // a stuck game stays stuck: one verdict per game is enough
+            break;
           }
           // no hint, yet not called stuck: allowed (the engine may be unsure), but it should be rare
           if (E.hints(s).length === 0) {
@@ -3889,9 +3907,10 @@ describe('REVIEW (black box, from the contract alone)', () => {
         }
       }
     }
-    if (process.env.REVIEW_STATS) console.log({ verdicts, confirmed, capped, positions, unknown });
+    if (process.env.REVIEW_STATS) console.log({ verdicts, afterwards, confirmed, capped, positions, unknown });
     assert.ok(verdicts >= 150, 'stuck verdicts: ' + verdicts);
-    assert.ok(confirmed >= 140, 'confirmed by brute force: ' + confirmed + ' (too large to check: ' + capped + ')');
+    assert.ok(afterwards >= 1000, 'verdicts while going round the stock afterwards: ' + afterwards);
+    assert.ok(confirmed >= 200, 'confirmed by brute force: ' + confirmed + ' (too large to check: ' + capped + ')');
     assert.ok(positions > 25000, String(positions));
     assert.ok(unknown < positions / 20, 'positions without a hint that are not called stuck: ' + unknown);
   });

@@ -129,6 +129,23 @@
  *   The record apply() returns for draw / recycle / move is the very object stored on
  *   state.history: treat records as read-only (copy one before changing it).
  *
+ * DECISIONS (where the build contract is silent, or deliberately not followed to the letter)
+ *   - Once the game is won only undo is legal: canPickup / canDrop / canDraw are false, hints is [].
+ *   - An undo record lists a moved run bottom -> top, not reversed (see REPLAYING A RECORD).
+ *   - hints: kind 5 is "split a run to free a card for its foundation" (no other tableau -> tableau
+ *     move is ever useful); priorities 7 and 8 are additions.
+ *   - isStuck is stronger than the contract's definition: it also proves that taking cards back
+ *     from the foundations cannot reopen the game. It can stay false in a dead position that is
+ *     too big to prove (about 1 game in 70 ends that way: hints is [] and isStuck is false).
+ *   - canAutoComplete also requires every column to descend in rank. That always holds in a game
+ *     played by the rules; it only matters for hand-made positions, where it is what guarantees
+ *     that nextAutoAction ends in a win.
+ *   - deserialize checks more than the contract lists: face rules, counters against the history,
+ *     and the history itself by replaying it. A state changed behind the engine's back (a record
+ *     edited, score or moves written directly) does not load.
+ *   - timeBonus divides by whole seconds. Undo records carry recyclesBefore / recyclesAfter.
+ *   - cardInfo, pileKind and foundationFor return null for an unknown id. legalMoves is an extra.
+ *
  * COST (for the solver; measured on random and hint-led playouts, one desktop core):
  *   apply + undo       about 4.5 million operations per second (0.2 us each), no allocation but the record
  *   legalMoves         about 1 us for the whole position
