@@ -80,7 +80,8 @@
  *   Auto-complete pill, the HUD's flash / chip / bumps (createPulse), the win screen's count-up, the win-rate
  *   ring, the "no more moves" card.
  * - Small state changes are CSS transitions / keyframes on transform and opacity only (switches, segmented
- *   thumb, rolling digits, ripples, toasts); base.css collapses those under reduced motion.
+ *   thumb, rolling digits, ripples, toasts, the card fan in the menu); base.css collapses those under reduced
+ *   motion.
  * - HUD and toolbar adapt to the width they really have (container queries on .ui-hud-box / .ui-tb-box), so
  *   side insets count; see ui.css for the measured thresholds.
  * - The real cards the UI shows (menu fan, card-back tile, back picker) are flattened to one compositor layer
@@ -1302,7 +1303,9 @@
     const guardNear = opener ? layer.openedAt + GUARD_NEAR_MS : 0;
     el.addEventListener('click', (e) => {
       if (!isPointerClick(e)) return;
-      const t = nowMs();
+      // When the tap happened, not when it is handled: on a busy phone a click can wait in the queue while
+      // the panel is being built, and would otherwise look later than it was.
+      const t = e.timeStamp > 0 ? Math.min(nowMs(), e.timeStamp) : nowMs();
       const near = opener && t < guardNear && Math.abs(e.clientX - opener.x) < GUARD_NEAR_PX && Math.abs(e.clientY - opener.y) < GUARD_NEAR_PX;
       if (t < guardAll || near) {
         e.stopPropagation();
@@ -2439,7 +2442,13 @@
     pendingWin = null;
     if (closeOpen) {
       const open = findLayer('win');
-      if (open) closeLayer(open, undefined, { silent: true });
+      if (open) {
+        // ...and whatever was opened from it (Statistics): that belonged to the game that is no longer won
+        for (const above of layers.slice(layers.indexOf(open) + 1).reverse()) {
+          closeLayer(above, undefined, { silent: true, keepPendingWin: true });
+        }
+        closeLayer(open, undefined, { silent: true });
+      }
     }
   }
 

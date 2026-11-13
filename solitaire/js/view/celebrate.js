@@ -109,12 +109,8 @@
   }
   function haptic(kind) {
     try {
-      if (!SOL.Haptics) return;
-      // Before the first tap a browser refuses to vibrate and logs an intervention for every attempt.
-      // The native shell has no such rule.
-      const ua = root.navigator && root.navigator.userActivation;
-      if (ua && !ua.hasBeenActive && !(SOL.Platform && SOL.Platform.isNativeApp)) return;
-      SOL.Haptics.play(kind);
+      // (SOL.Haptics itself holds back before the first user gesture in a browser)
+      if (SOL.Haptics) SOL.Haptics.play(kind);
     } catch (err) {
       /* ignore */
     }

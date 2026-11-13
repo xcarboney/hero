@@ -27,8 +27,10 @@
  *   FX.trail(x, y, { color, size = 2.6, layer })     call once per frame, per flying thing, with its current
  *                                    position: leaves fading motes and the odd twinkle. The gap to the same
  *                                    flyer's previous position is filled in, so fast flights get a continuous tail.
- *   FX.floatText(x, y, text, { color, size = 22, rise = 46, duration = 900 })    "+10" popups (centred on x, y;
- *                                    kept inside the viewport: a popup near an edge stops there)
+ *   FX.floatText(x, y, text, { color, size = 22, rise = 46, duration = 900, plate = false })
+ *                                    "+10" popups (centred on x, y; kept inside the viewport: a popup near an
+ *                                    edge stops there). Outlined text; `plate: true` puts it on a dark pill
+ *                                    instead, for popups that play over a card face.
  *   FX.confetti({ duration = 3500, density = 1, origin, colors }) -> stop()
  *        origin omitted / 'top': rains from above the top edge across the whole width.
  *        origin { x, y, angle = -PI/2, spread = 1.3 }: a cannon firing from that point.
@@ -49,9 +51,11 @@
  *   FX.clear()                       removes every particle / ring / text / shimmer and stops running
  *                                    confetti and fireworks. The ambient layer keeps going.
  *   FX.count() -> number             live particles (ambient motes are not counted)
- *   FX.stats() -> { particles, rings, texts, shimmers, rockets, emitters, sprites, awake, quality, cap, dpr,
- *                   ambient, load, resStep, frameMs, avgFrameMs }       (extra) for tests and tuning.
- *                                    dpr = current front-canvas resolution; load / resStep: see "Load shedding".
+ *   FX.stats() -> { particles, rings, texts, shimmers, rockets, emitters, sprites, awake, idle, quality, cap,
+ *                   dpr, ambient, load, resStep, frameMs, avgFrameMs }  (extra) for tests and tuning.
+ *                                    awake: FX has something to draw; idle: that something is only the ambient
+ *                                    layer, running on its slow clock (see "Guarantees"). dpr = current
+ *                                    front-canvas resolution; load / resStep: see "Load shedding".
  *
  * floatText, shimmer, confetti and fireworks always draw on the front canvas. Front-canvas order, bottom to top:
  * shimmers, particles, rockets, rings, texts.
@@ -68,12 +72,20 @@
  * - Particles live in pre-allocated typed arrays (hard cap: 1000, 500 in 'low'); when the cap is reached new
  *   particles are dropped. The frame loop allocates nothing; shapes are sprites drawn once per (kind, colour),
  *   cached, and blitted with drawImage.
- * - The loop is a SOL.Anim.frame subscription that exists only while there is something to draw; only the
- *   region touched by the previous frame is cleared.
+ * - The loop is a SOL.Anim.frame subscription that exists only while there is something to draw at full rate
+ *   (particles, rings, texts, shimmers, fireworks); only the region touched by the previous frame is cleared.
  * - The ambient layer is built to run for hours: its light pools are composed at 1/8 resolution and repainted
  *   four times a second, its motes advance at ~20fps, and between pool updates only the motes' own boxes are
  *   repainted. It costs well under a millisecond per frame even on a software-rendered canvas.
- * - Suit particles are drawn from canvas paths (no fonts). floatText uses the system UI font.
+ * - The ambient layer alone never keeps the frame loop running: while it is the only thing alive, FX holds no
+ *   frame subscription and a timer asks for one single frame about every 50 ms (the layer's own rate). A table
+ *   at rest therefore runs ~20 animation frames a second, not 60, and the shared SOL.Anim loop sleeps in
+ *   between. The first effect that needs it brings the full-rate loop back within the same call.
+ * - Suit particles are drawn from canvas paths (no fonts). floatText uses the system UI font; each popup is
+ *   drawn once into a canvas of its own (outside the document) and blitted from then on.
+ * - No call and no frame reads layout or computed style, except FX.init() / FX.resize() (the canvas boxes) and
+ *   FX.ambient(true) / a theme change (the tint variables): effects can be started from input handlers and
+ *   animation frames without forcing the browser to recalculate what the caller has just written.
  *
  * Load shedding
  * -------------
@@ -146,6 +158,7 @@
   const PAL_FIREWORK = [GOLD, '#ff7a7a', '#6ee7a8', '#7cc4ff', '#c4a6ff', '#ffb86b', '#ff9bd2'];
   const FONT_STACK = 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
   const TEXT_OUTLINE = 'rgba(6, 14, 12, 0.6)';
+  const TEXT_PLATE = 'rgba(6, 14, 12, 0.72)'; // the pill behind a `plate` popup (as .score-pop in board.css)
 
   // Fallback tints when the theme CSS variables are not available (mirrors css/base.css --felt-glow).
   const THEME_TINTS = {
@@ -235,7 +248,10 @@
   });
   let ringCount = 0;
   const texts = makePool(24, function () {
-    return { x: 0, y: 0, text: '', color: GOLD, size: 22, rise: 46, dur: 1, age: 0, font: '', width: 0 };
+    return {
+      x: 0, y: 0, text: '', color: GOLD, size: 22, rise: 46, dur: 1, age: 0, font: '', width: 0, plate: false,
+      cv: null, cx: null, cw: 0, ch: 0, k: 1, // the text, drawn once: canvas, context, pixel size, its scale
+    };
   });
   let textCount = 0;
   const shimmers = makePool(8, function () {
@@ -287,6 +303,17 @@
   let ambBgH = 0;
   let ambBgAge = Infinity; // ms since the pools were rendered
   let ambFull = true; // the next back-canvas frame must repaint everything
+  // The slow clock: while the ambient layer is the only thing alive it does not hold a frame subscription
+  // (that would run the shared 60 Hz loop, and commit a frame, three times for every picture it paints).
+  // A timer asks for ONE frame every AMB_IDLE_MS instead — see idle().
+  const AMB_IDLE_MS = 50; // its beat: 20 pictures a second, what every third frame of a 60 Hz loop gave it
+  const AMB_IDLE_LEAD_MS = 6; // the frame is asked for this long before its beat (it arrives a little later)
+  let idleOn = false; // the ambient layer is on its slow clock
+  let idleDueAt = 0; // frame time of its next beat
+  let idleTimer = 0; // waiting for the timer…
+  let idleStop = null; // …or for the single frame it asked for (the subscription's stop function)
+  let idleLast = 0; // frame time of the ambient layer's last step
+  let frameAt = 0; // frame time of the last frame() call
   const ambRect = new Float32Array(AMB_MAX * 4); // device-px boxes of the motes drawn last frame
   let ambRectN = 0;
 
@@ -908,13 +935,78 @@
     }
   }
 
+  /** A canvas that is not part of the document. */
+  function scratchCanvas() {
+    if (typeof root.OffscreenCanvas === 'function') {
+      try {
+        return new root.OffscreenCanvas(1, 1);
+      } catch (err) {
+        /* fall through */
+      }
+    }
+    return newCanvas(1, 1);
+  }
+
+  /**
+   * Draws a popup's text once, into a small canvas of its own (kept with the pool entry and reused). The frame
+   * loop only blits it. Nothing here touches the visible canvas: assigning `font` to a canvas that is in the
+   * document makes the browser resolve that canvas' style on the spot — a forced style recalculation (and
+   * often a layout) of everything the board has written in the same frame or input handler, which used to
+   * happen once in floatText() and then for every popup on every frame.
+   */
+  function rasterText(t, dpr) {
+    if (!t.cv) {
+      t.cv = scratchCanvas();
+      t.cx = t.cv.getContext('2d');
+    }
+    const g = t.cx;
+    const size = t.size;
+    if (!g) {
+      t.width = t.text.length * size * 0.6;
+      t.cw = 0;
+      return;
+    }
+    g.font = t.font;
+    const width = g.measureText(t.text).width;
+    t.width = width;
+    const pad = size * (t.plate ? 0.55 : 0.3);
+    const w = Math.max(1, Math.ceil((width + pad * 2) * dpr));
+    const h = Math.max(1, Math.ceil(size * (t.plate ? 1.5 : 1.7) * dpr));
+    t.cv.width = w; // (sizing a canvas clears it and resets its context)
+    t.cv.height = h;
+    t.cw = w;
+    t.ch = h;
+    t.k = dpr;
+    g.setTransform(dpr, 0, 0, dpr, w / 2, h / 2);
+    g.font = t.font;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    if (t.plate) {
+      // a dark pill: the label reads on an ivory card as well as on felt
+      const hh = size * 0.7;
+      const hw = Math.max(hh, width / 2 + size * 0.4);
+      g.beginPath();
+      g.moveTo(hh - hw, -hh);
+      g.lineTo(hw - hh, -hh);
+      g.arc(hw - hh, 0, hh, -PI / 2, PI / 2);
+      g.lineTo(hh - hw, hh);
+      g.arc(hh - hw, 0, hh, PI / 2, PI * 1.5);
+      g.closePath();
+      g.fillStyle = TEXT_PLATE;
+      g.fill();
+    } else {
+      g.lineJoin = 'round';
+      g.strokeStyle = TEXT_OUTLINE;
+      g.lineWidth = size * 0.2;
+      g.strokeText(t.text, 0, 0);
+    }
+    g.fillStyle = t.color;
+    g.fillText(t.text, 0, 0);
+  }
+
   function drawTexts(L) {
     const ctx = L.ctx;
     const dpr = L.dpr;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.lineJoin = 'round';
-    ctx.strokeStyle = TEXT_OUTLINE;
     for (let i = 0; i < textCount; i++) {
       const tx = texts[i];
       const t = tx.age / tx.dur;
@@ -941,15 +1033,13 @@
         else if (x > L.ox + L.w - hw) x = L.ox + L.w - hw;
       }
       const a = t < 0.08 ? t * 12.5 : t > 0.6 ? u * 2.5 : 1;
-      const k = dpr * s;
+      if (tx.cw === 0) continue;
+      // (the text was drawn at the resolution the front canvas had then: `k` also covers a change since)
+      const k = (dpr / tx.k) * s;
       ctx.globalAlpha = a;
       ctx.setTransform(k, 0, 0, k, (x - L.ox) * dpr, (y - L.oy) * dpr);
-      ctx.font = tx.font;
-      ctx.lineWidth = tx.size * 0.2;
-      ctx.strokeText(tx.text, 0, 0);
-      ctx.fillStyle = tx.color;
-      ctx.fillText(tx.text, 0, 0);
-      grow(L, x, y, (tx.width * 0.5 + tx.size * 0.3) * s, tx.size * 0.9 * s);
+      ctx.drawImage(tx.cv, -tx.cw / 2, -tx.ch / 2);
+      grow(L, x, y, (tx.width * 0.5 + tx.size * 0.6) * s, tx.size * 0.9 * s);
     }
   }
 
@@ -1014,7 +1104,9 @@
     const L = layers[BACK];
     ambW = L.w;
     ambH = L.h;
-    ambTint = ambNextTint || readTint();
+    // (the tint is read from CSS when the layer is asked for and when the theme changes — refreshTint() —
+    //  never here: this runs inside a frame)
+    ambTint = ambNextTint || ambTint || readTint();
     ambNextTint = '';
     ambPoolSpr[0] = sprite(S_POOL, ambTint);
     ambPoolSpr[1] = sprite(S_POOL, ambGold);
@@ -1576,7 +1668,9 @@
   }
 
   function wake() {
-    if (stopFrame || !inited) return;
+    if (!inited) return;
+    if (idleOn) idleOff(); // something to draw at full rate (or to re-check): the frame loop takes over again
+    if (stopFrame) return;
     stopFrame = subscribe(frame);
   }
 
@@ -1585,6 +1679,85 @@
     const stop = stopFrame;
     stopFrame = null;
     stop();
+  }
+
+  /**
+   * The slow clock of the ambient layer. When nothing but that layer is alive, frame() hands over to it: the
+   * 60 Hz subscription goes, and a timer asks for a single frame every AMB_IDLE_MS — the rate at which the
+   * layer has always advanced, so nothing looks different, but a table at rest now costs 20 frames a second
+   * instead of 60 (and the shared loop really sleeps in between). Whatever needs the full rate calls wake().
+   */
+  function idle() {
+    sleep();
+    if (idleOn) return;
+    idleOn = true;
+    idleLast = frameAt - ambAcc; // (what the layer had already accumulated is not lost)
+    ambAcc = 0;
+    idleDueAt = frameAt;
+    idleWait(frameAt);
+  }
+
+  /**
+   * Waits for the next beat. The beats are AMB_IDLE_MS apart on the frame clock, whenever the previous frame
+   * really arrived: timers and frames are each a few ms late, and "so long after the last frame" would add
+   * that up to a visibly slower layer (17 pictures a second instead of 20).
+   */
+  function idleWait(t) {
+    idleDueAt += AMB_IDLE_MS;
+    let wait = idleDueAt - t - AMB_IDLE_LEAD_MS;
+    if (!(wait >= 8)) {
+      // far behind (a long task, a throttled timer): start a new beat from here
+      wait = 8;
+      idleDueAt = t + wait + AMB_IDLE_LEAD_MS;
+    } else if (wait > AMB_IDLE_MS) {
+      wait = AMB_IDLE_MS;
+      idleDueAt = t + wait + AMB_IDLE_LEAD_MS;
+    }
+    idleTimer = root.setTimeout(idleDue, wait);
+  }
+
+  function idleOff() {
+    idleOn = false;
+    if (idleTimer) {
+      root.clearTimeout(idleTimer);
+      idleTimer = 0;
+    }
+    if (idleStop) {
+      const stop = idleStop;
+      idleStop = null;
+      stop();
+    }
+  }
+
+  function idleDue() {
+    idleTimer = 0;
+    if (idleOn && !idleStop) idleStop = subscribe(idleFrame);
+  }
+
+  /** The one frame the slow clock asked for: advance and repaint the ambient layer, then wait again. */
+  function idleFrame(dtMs, t) {
+    if (idleStop) {
+      const stop = idleStop;
+      idleStop = null;
+      stop();
+    }
+    if (!idleOn) return;
+    if (typeof t !== 'number' || t !== t) t = now();
+    // (frame times, as in frame(): the layer advances by the time between its frames, whatever the timer did)
+    let dt = t - idleLast;
+    const L = layers[BACK];
+    if (!inited || !L.ctx || isReduced() || fastWork()) {
+      // not a case for the slow clock: let frame() sort it out (it wipes under reduced motion, sleeps when idle)
+      wake();
+      return;
+    }
+    if (!(dt >= 0)) dt = AMB_FRAME_MS;
+    else if (dt > 100) dt = 100;
+    idleLast = t;
+    stepAmbient(L, dt);
+    paintAmbientBack(L, false);
+    if (ambAlpha > 0 || ambientActive()) idleWait(t);
+    else idleOn = false; // faded out: nothing is left to draw at all
   }
 
   function clearLayer(L) {
@@ -1665,7 +1838,8 @@
     return layers[FRONT].n > 0 || ringCount > 0 || textCount > 0 || shimmerCount > 0 || rocketCount > 0 || emitters.length > 0;
   }
 
-  function hasWork() {
+  /** Work that needs every frame: anything but the ambient layer. */
+  function fastWork() {
     return (
       count > 0 ||
       ringCount > 0 ||
@@ -1673,11 +1847,13 @@
       shimmerCount > 0 ||
       rocketCount > 0 ||
       emitters.length > 0 ||
-      ambAlpha > 0 ||
-      ambientActive() ||
       layers[FRONT].dirty ||
       layers[BACK].dirty
     );
+  }
+
+  function hasWork() {
+    return fastWork() || ambAlpha > 0 || ambientActive();
   }
 
   function wipe() {
@@ -1692,7 +1868,8 @@
     emitters.length = 0;
   }
 
-  function frame(dtMs) {
+  function frame(dtMs, tMs) {
+    frameAt = typeof tMs === 'number' && tMs === tMs ? tMs : now();
     if (!inited) {
       sleep();
       return;
@@ -1728,6 +1905,7 @@
     // The front canvas is blank: the moment to go back to full resolution without anybody seeing the switch.
     if (resStep !== 0 && !layers[FRONT].dirty && !frontBusy()) restoreRes();
     if (!hasWork()) sleep();
+    else if (!fastWork()) idle(); // only the ambient layer is left: it carries on at its own slow rate
   }
 
   // ------------------------------------------------------------------ public API
@@ -1861,6 +2039,7 @@
     const back = context(opts.back);
     if (!front && !back) return;
     sleep();
+    idleOff();
     wipe();
     // A second init() while effects are showing: their last frame must not stay painted on the canvases
     // (neither on the ones we are leaving nor on the ones we are taking over).
@@ -1878,6 +2057,7 @@
     ambAlpha = 0;
     resize();
     listen();
+    if (ambWanted) refreshTint(); // FX.ambient(true) came before init(): read the tint now, not in a frame
     if (hasWork()) wake();
   }
 
@@ -2099,9 +2279,8 @@
     t.dur = duration;
     t.age = 0;
     t.font = '800 ' + size + 'px ' + FONT_STACK;
-    const ctx = layers[FRONT].ctx;
-    ctx.font = t.font;
-    t.width = ctx.measureText(text).width;
+    t.plate = o.plate === true;
+    rasterText(t, layers[FRONT].dpr);
     wake();
   }
 
@@ -2216,8 +2395,10 @@
       for (let i = 0; i < count; i++) layers[player[i]].n++;
     }
     if (inited) {
-      resize(); // the resolution cap changed
-      if (hasWork()) wake();
+      // The resolution cap changed: a new backing store for the front canvas, same box. (Not resize(): that
+      // measures the canvases — a layout read — and this is called from frames and input handlers.)
+      allocate(layers[FRONT], frontCap());
+      if (hasWork()) wake(); // the canvas was cleared: redraw whatever is alive
     }
   }
 
@@ -2239,7 +2420,8 @@
       rockets: rocketCount,
       emitters: emitters.length,
       sprites: sprites.length,
-      awake: stopFrame !== null,
+      awake: stopFrame !== null || idleOn,
+      idle: idleOn,
       quality: quality,
       cap: cap,
       dpr: layers[FRONT].ctx ? layers[FRONT].dpr : layers[BACK].dpr,

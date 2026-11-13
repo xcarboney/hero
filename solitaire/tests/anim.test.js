@@ -444,6 +444,81 @@ test('the loop sleeps when nothing is running and wakes on demand', async () => 
   assert.strictEqual(clock.scheduled, 0);
 });
 
+test('a frame is only requested when something is left to run: one frame costs exactly one request', async () => {
+  // A browser schedules (and commits) a frame for every requestAnimationFrame call, cancelled or not. A loop
+  // that asks for the next frame up front and cancels it when nothing is left would turn every single frame
+  // into two — and a low-rate user (the ambient layer of SOL.FX: one frame every 50 ms) into a 60 Hz one.
+  let requests = 0;
+  let delivered = 0;
+  let cancels = 0;
+  const request = clock.request.bind(clock);
+  const cancel = clock.cancel.bind(clock);
+  clock.request = (fn) => {
+    requests++;
+    return request((t) => {
+      delivered++;
+      fn(t);
+    });
+  };
+  clock.cancel = (id) => {
+    cancels++;
+    cancel(id);
+  };
+  const quiet = (what) => {
+    assert.strictEqual(Anim._looping, false, what + ': the loop sleeps');
+    assert.strictEqual(clock.scheduled, 0, what + ': nothing is scheduled');
+    assert.strictEqual(requests, delivered, what + ': every request was a frame that ran');
+    assert.strictEqual(cancels, 0, what + ': no request had to be cancelled');
+  };
+
+  // nextFrame(): one request, one frame
+  let got = 0;
+  Anim.nextFrame().then(() => got++);
+  assert.strictEqual(requests, 1);
+  await advance(16, 16);
+  assert.strictEqual(got, 1);
+  assert.strictEqual(requests, 1, 'nextFrame() did not drag a second frame along');
+  quiet('nextFrame');
+
+  // a subscriber that stops itself in its first frame: the one-shot frame
+  let calls = 0;
+  const stop = Anim.frame(() => {
+    calls++;
+    stop();
+  });
+  await advance(48, 16);
+  assert.strictEqual(calls, 1);
+  assert.strictEqual(requests, 2, 'a one-shot subscriber costs one frame');
+  quiet('one-shot subscriber');
+
+  // a tween: one request per frame it needs, none after its last
+  const h = Anim.tween({ duration: 40 });
+  await advance(100, 10);
+  assert.strictEqual(h.running, false);
+  assert.strictEqual(requests, 6, 'four frames for 40 ms in 10 ms steps');
+  quiet('tween');
+
+  // a wait that ends, and an idle() that resolves: the same
+  let waited = 0;
+  Anim.wait(20).then(() => waited++);
+  await advance(60, 10);
+  assert.strictEqual(waited, 1);
+  assert.strictEqual(requests, 8);
+  quiet('wait');
+
+  // …and the loop still survives a callback that throws
+  let n = 0;
+  const stop2 = Anim.frame(() => {
+    n++;
+    throw new Error('boom');
+  });
+  await advance(48, 16);
+  assert.strictEqual(n, 3, 'a throwing subscriber is called again on the next frames');
+  stop2();
+  await advance(16, 16);
+  quiet('after a throwing subscriber');
+});
+
 test('dt is clamped: a long gap (hidden tab) advances the clock by at most 50ms', async () => {
   const dts = [];
   let v;

@@ -77,7 +77,9 @@
  * Clock
  * -----
  * One requestAnimationFrame loop for everything; it stops when there is nothing left to run and restarts on
- * demand. Per frame, in this order: idle()/nextFrame() promises, waits and staggers, tweens and springs, frame
+ * demand. A frame is only ever requested when something is left to run — never requested up front and
+ * cancelled — so one nextFrame(), or one frame of a subscriber that stops itself, costs exactly one frame
+ * (low-rate users such as the ambient layer of SOL.FX rely on it). Per frame, in this order: idle()/nextFrame() promises, waits and staggers, tweens and springs, frame
  * subscribers. Anything created during a frame first advances on the following frame. A callback that throws is
  * reported once per animation with console.error and never stops the loop or the animation it belongs to.
  * Time is accumulated from clamped frame deltas: after a hidden tab or a long hitch, motion continues from where
@@ -178,23 +180,31 @@
     if (!(dt > 0)) dt = 0;
     else if (dt > MAX_DT) dt = MAX_DT;
 
-    // Ask for the next frame before running anything: whatever happens below, the loop survives.
-    rafId = clock.request(tick);
+    // This frame has been delivered: no request is outstanding while it runs. The next one is asked for
+    // afterwards, and only if something is left to run — never asked for up front and cancelled: a browser
+    // schedules (and commits) a frame for every request, cancelled or not, so a single frame (nextFrame(), a
+    // subscriber that stops itself, the last frame of an animation) would always drag an empty one along.
+    rafId = 0;
     try {
       runFrame(dt, now);
     } catch (err) {
       report('frame', err);
-    }
-    if (
-      anims.length === 0 &&
-      timers.length === 0 &&
-      subs.length === 0 &&
-      frameWaiters.length === 0 &&
-      idleWaiters.length === 0
-    ) {
-      clock.cancel(rafId);
-      rafId = 0;
-      running = false;
+    } finally {
+      // Whatever happened above, the loop survives. (Not running any more, or a request already made:
+      // _reset() / _setClock() was called from a callback and has taken care of the loop.)
+      if (running && rafId === 0) {
+        if (
+          anims.length === 0 &&
+          timers.length === 0 &&
+          subs.length === 0 &&
+          frameWaiters.length === 0 &&
+          idleWaiters.length === 0
+        ) {
+          running = false;
+        } else {
+          rafId = clock.request(tick);
+        }
+      }
     }
   }
 

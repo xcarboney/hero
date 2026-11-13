@@ -134,6 +134,9 @@ button {
   position: fixed;
   inset: 0;
   display: grid;
+  /* one column, exactly as wide as the screen: without it the implicit column grows with the widest
+     unbreakable content of the HUD or the toolbar and takes the table with it */
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr) auto;
   overflow: hidden;
   isolation: isolate;

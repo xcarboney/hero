@@ -1,13 +1,20 @@
 /*
  * SOL.Input — everything the player does on the table: pointer (touch, mouse, pen) and keyboard.
  *
- * Gestures (one pointer at a time; extra fingers are ignored)
+ * Gestures (one pointer at a time: the first one that takes hold of a card the player can see, or of the
+ * stock, owns the table until it lifts and further fingers are ignored. A finger on bare felt, on an empty
+ * slot or on a card that shows its back holds nothing: it starts no gesture and blocks no other finger.)
  *   tap a card            auto-move (SOL.Game.autoMove) when the `tapToMove` setting is on; otherwise a
- *                         double-tap does it. A card that has nowhere to go shakes its head.
+ *                         double-tap does it. A card that has nowhere to go shakes its head. A tap in the
+ *                         same place within DOUBLE_TAP_MS of a tap that moved a card is swallowed if it would
+ *                         act on that card again or on the card it uncovered (the second tap of a habitual
+ *                         double tap must not play a card the player has not looked at yet).
  *   tap the stock         draw / recycle (also the empty stock slot)
  *   drag a card           picks up the card and everything on top of it once the pointer has moved past a
- *                         small slop (touch 10px, pen 6px, mouse 4px). Released over a legal pile it moves
- *                         (the board picks the legal pile with the largest overlap); anywhere else it returns.
+ *                         small slop (touch 10px, pen 6px, mouse 4px). The card is held by the spot where the
+ *                         pointer went down on it. Released over a legal pile it moves (the board picks the
+ *                         legal pile with the largest overlap, judged where the pointer is when it lifts);
+ *                         anywhere else it returns.
  *   long-press a card     ~450ms without moving, face-up cards only: 'heavy' haptic + SOL.Game.inspect(card)
  *   right-click a card    the same, for mice
  *   tap during the deal   hurries the deal up; tap during auto-complete stops the cascade after the card in
@@ -17,15 +24,19 @@
  * Keyboard: Space / D draw, U or Ctrl/Cmd+Z undo, H hint, N new game, A auto-complete, I inspect the card under
  * the pointer, Esc cancels a drag / stops auto-complete / skips the celebration (overlays close themselves).
  *
- * Hit-testing goes through the board's layout model (Board.cardAt / pileAt): no DOM reads, and a card is hit
- * where it is drawn even while it is still gliding.
+ * Hit-testing goes through the board's layout model (Board.cardAt / pileAt): no DOM reads. A card is hit
+ * where it is drawn, also while it glides or flies, and a flying card at its landing place as well; an exact
+ * hit always wins, and a finger that misses every card takes the nearest one within TAP_SLACK px.
+ * A card is only ever played while the player can see its face. The game state turns a card face-up the
+ * moment a move uncovers or draws it; the table turns it a little later. Until its back is out of sight (and
+ * for the whole gesture, if the finger went down before that) it cannot be tapped, dragged or inspected.
  * A drag never survives anything unexpected: pointercancel, lost capture, window blur, the page being hidden,
  * a resize / rotation, the game being paused or locked — the cards go home and the state is clean.
  *
  * Public API
  *   Input.init({ table } = {}) -> boolean    wires the listeners (idempotent)
  *   Input.cancel()                           drops whatever gesture is in progress (cards return)
- *   Input.isActive() -> boolean              a pointer is down on the table
+ *   Input.isActive() -> boolean              a pointer has hold of a card or of the stock
  *   Input.isDragging() -> boolean
  *   Input.pointer                            { x, y, type, inside } last known pointer position (client px) —
  *                                            for hover effects; read only
@@ -43,15 +54,23 @@
   const SLOP = { touch: 10, pen: 6, mouse: 4 };
   const TAP_SLACK = 7; // px of extra reach around a card for fingers
   const DOUBLE_TAP_MS = 380;
+  const DOUBLE_TAP_PX = 28; // two taps closer together than this (and within DOUBLE_TAP_MS) are one double tap
 
   let inited = false;
   let tableEl = null;
   /**
    * The gesture in progress, or null:
-   *   { id, type, x0, y0, x, y, card, pile, phase: 'pending' | 'drag' | 'dead', timer }
+   *   { id, type, t0, x0, y0, x, y, card, pile, phase: 'pending' | 'drag', timer }   (t0, x0, y0: pointer down)
+   * A gesture that can no longer do anything (a drag that could not start, a long-press that fired) ends at
+   * once — `active` goes back to null while the finger is still down, so the table is free for the next one.
    */
   let active = null;
   let lastTap = { card: -1, time: 0 };
+  /**
+   * The last tap that moved a card: when and where, the card, the card it uncovered, and the game state and
+   * its move count right after (see isEcho).
+   */
+  let lastMove = { time: -1e9, x: 0, y: 0, card: -1, bared: -1, state: null, moves: -1 };
   const pointer = { x: -1, y: -1, type: '', inside: false };
 
   function B() {
@@ -72,12 +91,7 @@
   }
   function haptic(kind) {
     try {
-      if (!SOL.Haptics) return;
-      // Before the first tap a browser refuses to vibrate and logs an intervention for every attempt
-      // (the opening deal runs without any gesture). The native shell has no such rule.
-      const ua = root.navigator && root.navigator.userActivation;
-      if (ua && !ua.hasBeenActive && !(SOL.Platform && SOL.Platform.isNativeApp)) return;
-      SOL.Haptics.play(kind);
+      if (SOL.Haptics) SOL.Haptics.play(kind);
     } catch (err) {
       /* ignore */
     }
@@ -138,6 +152,18 @@
     }
   }
 
+  /**
+   * This pointer holds nothing any more (its drag could not start, its long-press fired): the gesture is over
+   * although the finger may still be down, and the table is free for the next pointer.
+   */
+  function letGo(a) {
+    if (active !== a) return;
+    clearTimer();
+    active = null;
+    releaseCapture(a.id);
+    if (a.type === 'mouse') setCursor('');
+  }
+
   /** Ends the current gesture without any game action. Cards in the hand go home. */
   function cancel() {
     const a = active;
@@ -164,8 +190,8 @@
     const g = G();
     const out = { card: -1, pile: null };
     if (!board || !g || !g.state) return out;
-    let card = board.cardAt(x, y, 0);
-    if (card < 0 && type !== 'mouse') card = board.cardAt(x, y, TAP_SLACK);
+    // (an exact hit wins; a finger that misses every card means the nearest one within its slack)
+    let card = board.cardAt(x, y, type === 'mouse' ? 0 : TAP_SLACK);
     out.pile = board.pileAt(x, y, type === 'mouse' ? 0 : TAP_SLACK);
     if (card >= 0) {
       const sp = board.sprite(card);
@@ -183,15 +209,52 @@
   function canPickup(card) {
     const g = G();
     try {
-      return card >= 0 && !!g && !!g.state && SOL.Engine.canPickup(g.state, card);
+      return isFaceUp(card) && SOL.Engine.canPickup(g.state, card);
     } catch (err) {
       return false;
     }
   }
 
+  /**
+   * The player can see this card's face: the game says face-up AND the table has turned it that far. The
+   * state changes the moment a move uncovers a card or a draw turns it; the card on the table follows a
+   * little later (after the reveal delay, or in the middle of its flight from the stock). While its back is
+   * still showing it must not be played.
+   */
   function isFaceUp(card) {
     const g = G();
-    return card >= 0 && !!g && !!g.state && !!g.state.faceUp[card];
+    if (!(card >= 0) || !g || !g.state || !g.state.faceUp[card]) return false;
+    const board = B();
+    const sp = board && typeof board.sprite === 'function' ? board.sprite(card) : null;
+    return !sp || sp.flip < 90;
+  }
+
+  /** The card directly under `card` in its pile — the one a move of `card` uncovers — or -1. */
+  function cardUnder(card) {
+    try {
+      const st = G().state;
+      const at = SOL.Engine.locate(st, card);
+      return at && at.index > 0 ? st.piles[at.pile][at.index - 1] : -1;
+    } catch (err) {
+      return -1;
+    }
+  }
+
+  /**
+   * The tail of a double tap: this tap comes right after, and in the same place as, a tap that moved a card,
+   * and it would act on that card again (still drawn there as it leaves) or on the card that move uncovered.
+   * Many players double-tap by habit; the second tap must not play a card they have not looked at yet.
+   */
+  function isEcho(a) {
+    const m = lastMove;
+    const st = G().state;
+    return (
+      a.t0 - m.time < DOUBLE_TAP_MS && // (counted to the moment the finger came down again)
+      Math.hypot(a.x0 - m.x, a.y0 - m.y) < DOUBLE_TAP_PX &&
+      (a.card === m.card || a.card === m.bared) &&
+      st === m.state &&
+      st.moves === m.moves // nothing has happened since that tap (no undo, no draw, no other move)
+    );
   }
 
   // ------------------------------------------------------------------ pointer events
@@ -204,7 +267,7 @@
       if (e.button !== 0) return; // right button: see onContextMenu
       e.preventDefault(); // no text selection / focus change / native drag
     }
-    if (active) return; // one pointer at a time
+    if (active) return; // one pointer at a time: the one that has hold of a card or of the stock
     const g = G();
     const board = B();
     if (!g || !board) return;
@@ -222,9 +285,16 @@
 
     const type = e.pointerType || 'mouse';
     const h = hit(e.clientX, e.clientY, type);
+    // Only a pointer that takes hold of something owns the table: a card the player can see, or the stock.
+    // A finger on bare felt, on an empty slot or on a card that shows its back (face-down, or uncovered a
+    // moment ago and not turned yet) holds nothing: no tap, no drag and no long-press come of it — also not
+    // when the card turns over while the finger rests on it — and it does not block the next finger either.
+    const seen = isFaceUp(h.card);
+    if (!seen && h.pile !== 'stock') return;
     active = {
       id: e.pointerId,
       type: type,
+      t0: now(),
       x0: e.clientX,
       y0: e.clientY,
       x: e.clientX,
@@ -239,28 +309,24 @@
     } catch (err) {
       /* synthetic or already-released pointer: events still reach the table while the pointer is over it */
     }
-    if (h.card >= 0) {
+    if (seen) {
       if (canPickup(h.card)) board.press(h.card);
-      if (isFaceUp(h.card)) {
-        const a = active;
-        // Gesture timing, not animation: must not scale with the animation speed.
-        a.timer = root.setTimeout(function () {
-          if (active !== a || a.phase !== 'pending') return;
-          a.timer = 0;
-          longPress(a);
-        }, Input.LONG_PRESS_MS);
-      }
+      const a = active;
+      // Gesture timing, not animation: must not scale with the animation speed.
+      a.timer = root.setTimeout(function () {
+        if (active !== a || a.phase !== 'pending') return;
+        a.timer = 0;
+        longPress(a);
+      }, Input.LONG_PRESS_MS);
     }
   }
 
   function longPress(a) {
     const g = G();
-    a.phase = 'dead';
     if (B()) B().unpress();
+    letGo(a);
     if (!g || locked() || !isFaceUp(a.card)) return;
     haptic('heavy');
-    releaseCapture(a.id);
-    active = null;
     g.inspect(a.card);
   }
 
@@ -271,7 +337,8 @@
     pointer.inside = true;
     const a = active;
     if (!a) {
-      if (e.pointerType === 'mouse' || e.pointerType === 'pen') hover(e.clientX, e.clientY, e.pointerType);
+      // (no button down: a press that took hold of nothing is not a hover)
+      if ((e.pointerType === 'mouse' || e.pointerType === 'pen') && !e.buttons) hover(e.clientX, e.clientY, e.pointerType);
       return;
     }
     if (e.pointerId !== a.id) return;
@@ -285,19 +352,22 @@
       if (Math.hypot(a.x - a.x0, a.y - a.y0) < slop) return;
       // it is a drag (or nothing): no tap, no long-press any more
       clearTimer();
-      if (a.card >= 0 && !locked() && canPickup(a.card) && board.dragStart(a.card, a.x, a.y) > 0) {
+      // The card is held by the spot where the finger went down on it (x0, y0) — not by where the pointer
+      // is now that the slop is behind it: the board lets it catch up with the distance moved since.
+      if (a.card >= 0 && !locked() && canPickup(a.card) && board.dragStart(a.card, a.x0, a.y0) > 0) {
         a.phase = 'drag';
+        board.dragMove(a.x, a.y);
         if (a.type === 'mouse') setCursor('grabbing');
       } else {
-        a.phase = 'dead';
         board.unpress();
+        letGo(a);
       }
       return;
     }
     if (a.phase === 'drag') {
       if (!board.isDragging()) {
         // the board dropped the run on its own (resize, a state change): nothing left to steer
-        a.phase = 'dead';
+        letGo(a);
         return;
       }
       // coalesced events are not needed: the board samples the latest position once per frame
@@ -317,6 +387,8 @@
     if (!board || !g) return;
 
     if (a.phase === 'drag') {
+      // the drop is judged where the finger is as it lifts — it may have moved since the last move event
+      if (board.isDragging()) board.dragMove(e.clientX, e.clientY);
       const r = board.isDragging() ? board.dragEnd() : null;
       if (!r) {
         if (board.isDragging()) board.dragCancel();
@@ -343,14 +415,18 @@
       return;
     }
     if (a.card < 0) return;
-    if (!isFaceUp(a.card)) return; // a face-down tableau card: nothing to do
+    if (!isFaceUp(a.card)) return; // a face-down card: nothing to do
     const twice = lastTap.card === a.card && t - lastTap.time < DOUBLE_TAP_MS;
     lastTap.card = a.card;
     lastTap.time = t;
     if (!setting('tapToMove', true) && !twice) return;
     lastTap.card = -1;
     if (a.pile && a.pile.charAt(0) === 'f') return; // taps on foundations do nothing (drags still work)
-    if (!g.autoMove(a.card)) {
+    if (isEcho(a)) return; // the second tap of a double tap: swallowed
+    const bared = cardUnder(a.card);
+    if (g.autoMove(a.card)) {
+      lastMove = { time: t, x: a.x0, y: a.y0, card: a.card, bared: bared, state: g.state, moves: g.state.moves };
+    } else {
       board.shake(a.card);
       haptic('error');
       try {
@@ -391,8 +467,18 @@
   }
 
   function prevent(e) {
-    e.preventDefault();
+    // (not cancelable: another finger has started a browser gesture elsewhere on the page — asking anyway
+    // only earns a console error per move)
+    if (e.cancelable) e.preventDefault();
   }
+
+  /**
+   * A listener that does nothing, on purpose. Browsers "adjust" a touch to the nearest element that reacts to
+   * clicks, and the table reacts to pointer events only: without a click listener of its own, a touch on its
+   * lowest few pixels — pointerdown included — is handed to the toolbar button just below it. With one, a
+   * touch whose centre is on the table stays on the table.
+   */
+  function claimClicks() {}
 
   // ------------------------------------------------------------------ keyboard
   function isTyping(target) {
@@ -543,6 +629,7 @@
     tableEl.addEventListener('lostpointercapture', onLostCapture);
     tableEl.addEventListener('pointerleave', onPointerLeave);
     tableEl.addEventListener('contextmenu', onContextMenu);
+    tableEl.addEventListener('click', claimClicks);
     // no native drag images, selections, double-tap zoom or iOS gestures on the table
     tableEl.addEventListener('dragstart', prevent);
     tableEl.addEventListener('selectstart', prevent);

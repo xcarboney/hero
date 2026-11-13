@@ -286,6 +286,35 @@
   display: inline;
 }
 
+/*
+ * The fan mark (fanMarkup() in cards.js): a small suit under the compact rank, for a card whose right half is
+ * covered by the next card of a sideways fan — the compact suit sits top-right, so only the rank would show.
+ * The owner sets .is-fanned on such a card. The mark exists in the compact layout only (the classic corner
+ * index already carries its suit under the rank) and fades, so it never pops in or out on a card in view.
+ */
+.card__fan {
+  display: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 140ms ease-out, visibility 0s linear 140ms;
+}
+@container sol-card (max-width: 59.9px) {
+  .card__fan {
+    display: inline;
+  }
+}
+.card[data-layout="compact"] .card__fan {
+  display: inline;
+}
+.card[data-layout="classic"] .card__fan {
+  display: none;
+}
+.card.is-fanned .card__fan {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
+}
+
 /* ------------------------------------------------------------------ flip shading + glare */
 /*
  * Two overlay planes per effect, one hugging each face and culled from behind, so whichever side faces the

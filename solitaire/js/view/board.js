@@ -57,17 +57,27 @@
  *                                    trails, fewer particles
  *
  *   -- dragging (called by SOL.Input; client coordinates) --
- *   Board.cardAt(clientX, clientY, slop = 0) -> cardId | -1        topmost card as currently drawn (cards in
- *                                                                   mid-flight are skipped)
+ *   Board.cardAt(clientX, clientY, slop = 0) -> cardId | -1        the card a touch at this point means: the
+ *                                    topmost card drawn there; with `slop`, when no card is hit exactly, the
+ *                                    NEAREST card within `slop` px. A card in flight is hit at its landing place
+ *                                    (it counts as lying there already) and where it is drawn — but there it
+ *                                    gives way to the stock and to a face-up card of another pile under it.
  *   Board.pileAt(clientX, clientY, slop = 0) -> pileId | null      which pile's area the point is in
  *   Board.press(cardId) / Board.unpress()                           finger down: the card (and the run on it) is
  *                                    pushed into the felt a little; a drag lifts it out of the dip, a release
  *                                    lets it spring back
- *   Board.dragStart(cardId, clientX, clientY) -> number             cards picked up (0 = cannot be picked up)
- *   Board.dragMove(clientX, clientY)
+ *   Board.dragStart(cardId, clientX, clientY) -> number             cards picked up (0 = cannot be picked up).
+ *                                    The point is where the pointer went DOWN: the card is held by that spot
+ *                                    of its face. Wherever the card is by now (the pointer has moved on before
+ *                                    the drag was recognised, or the card was caught in flight) it slides under
+ *                                    the finger within a few frames (TUNE.dragCatch) and then follows rigidly.
+ *   Board.dragMove(clientX, clientY)                                the pointer is here now
  *   Board.dragEnd() -> { card, from, target, over } | null          stops following the pointer; the run stays
  *                                    in the air until Board.apply(…, { source: 'drag' }) or Board.dragCancel().
- *                                    target: the legal pile with the largest overlap (or null);
+ *                                    Judged where the finger holds the card at the last dragMove position (not
+ *                                    where the last frame drew it):
+ *                                    target: the legal pile with the largest overlap (or null — also while the
+ *                                    card still covers most of its own place, TUNE.dropLeave);
  *                                    over: the pile the lead card mostly covers, legal or not (or null).
  *   Board.dragCancel({ invalid } = {})                              the held run returns (invalid: with a shake)
  *   Board.isDragging() -> boolean
@@ -128,13 +138,15 @@
  *         mid-flight), rot / rx / ry / scale / lift (END pose, default 0 / 0 / 0 / 1 / 0), flip (END flip 0 | 180;
  *         a flight that does not change the face leaves --flip to a running flipTo), flipFrom / flipTo (0..1
  *         window of the flight),
- *         flipMode ('prop' | 'spin'), overshoot (px), z, trail (colour), liftSteps (coarser --lift steps for
+ *         flipMode ('prop' | 'spin'; default 'prop', in lite mode 'spin'), overshoot (px), z, trail (colour),
+ *         liftSteps (coarser --lift steps for
  *         crowded choreography; default TUNE.liftSteps), lazy (a covered card stays covered
  *         until its delay is over), onStart(s), onFrame(s, t), onLand(s) }
  *   sprite.springTo(x, y, { stiffness, damping, velocity: { x, y } }) -> handle     position only; retargets a
  *                                    running spring instead of restarting it
  *   sprite.poseTo({ rot, rx, ry, scale, lift }, { duration, delay, ease }) -> handle
- *   sprite.flipTo(deg, { duration, delay, mode, hop }) -> handle        hop: px the card jumps while it turns
+ *   sprite.flipTo(deg, { duration, delay, mode, hop }) -> handle        hop: px the card jumps while it turns;
+ *                                    mode: 'prop' | 'spin' (default as flipMode above)
  *   sprite.wobble(fn(t, sprite), { duration, delay }) -> handle         drives ox / oy (they end at 0)
  *   sprite.act(fn(t, sprite), { duration, delay }) -> handle            a performance in place: fn writes rot /
  *                                    rx / ry / scale / lift and brings them back to rest by t = 1
@@ -146,15 +158,19 @@
  * State classes the board keeps on its cards (board.css uses them to drop unused layers): .is-lifted while
  * lift > 0 or the card turns (the lift shadow is rendered only then), .is-turning while --flip is between 0 and
  * 180 (the flip shading), and .is-glare while a card carries a glare (the hover tilt sets it; add it yourself
- * before you animate --glare-o / --glare-x / --glare-y on a card, remove it afterwards).
+ * before you animate --glare-o / --glare-x / --glare-y on a card, remove it afterwards). One more, for the
+ * card art: .is-fanned on every waste card under the top one while the draw-3 waste fans sideways — such a
+ * card shows only its left edge, and cards.css gives the phone art a small suit under the rank there.
  * FLAT CARDS (board.css): a table card that is neither .is-turning nor .is-glare is flattened into ONE
  * compositor layer — its inner 3D boxes are switched off and only the visible face is rendered. So when you
  * rotate a sprite yourself (rx / ry), never go past edge-on (|ry| > 90) with flip left at 0: set flip to 180
  * and ry to the remainder instead (the back is swapped in — see face() in celebrate.js). rot, rx and small ry
  * need no care.
  * Flip modes: 'prop' animates --flip (lighting + shadow react; ~0.16 ms per card per frame, and the card is a
- * full 3D scene while it turns) — a handful of cards. 'spin' rotates .card itself and swaps the face at 90deg
- * (transform only, the card stays flat) — mass choreography, and everything in lite mode.
+ * full 3D scene while it turns) — single, unhurried turns: the tableau reveal, the column tops of a deal.
+ * 'spin' rotates .card itself and swaps the face at 90deg (transform only, the card stays flat) — mass
+ * choreography (gather, recycle), every draw and undone draw (the most frequent turn of all, three at a time
+ * in draw 3; they also cast no lift shadow), and every flip in lite mode.
  * Stacking: z-index = index in the pile at rest; a flight raises its card (TUNE.flyZ + launch order) and puts
  * it back on landing; dragged cards sit at TUNE.dragZ; held "show" cards are yours.
  * Invariant kept by the board: whenever a sprite is not held and has no handle, it is exactly on its target,
@@ -228,6 +244,7 @@
     pressMs: 90,
     dragScale: 1.07,
     dragLiftMs: 170,
+    dragCatch: 0.035, // s: time constant with which a card that is not under the finger yet slides there
     dragLag: 0.03, // s: time constant of the first trailing card…
     dragLagGrow: 0.22, // …and how much softer each further card of the run is
     dragStretchX: 0.4, // how far a trailing card may fall behind its neighbour / card width
@@ -240,6 +257,7 @@
     tiltMaxZ: 8, // clamps (deg)
     tiltMaxY: 14,
     tiltMaxX: 12,
+    dropLeave: 0.65, // a held card that still covers more than this share of its own place has not left it
     dropStiffness: 620, // the magnetic snap onto a legal pile
     dropDamping: 36,
     dropRunSoften: 46, // each further card of a dropped run lands this much softer (stiffness)
@@ -358,12 +376,8 @@
   }
   function haptic(kind) {
     try {
-      if (!SOL.Haptics) return;
-      // Before the first tap a browser refuses to vibrate and logs an intervention for every attempt
-      // (the opening deal runs without any gesture). The native shell has no such rule.
-      const ua = root.navigator && root.navigator.userActivation;
-      if (ua && !ua.hasBeenActive && !(SOL.Platform && SOL.Platform.isNativeApp)) return;
-      SOL.Haptics.play(kind);
+      // (SOL.Haptics itself holds back before the first user gesture in a browser: the opening deal)
+      if (SOL.Haptics) SOL.Haptics.play(kind);
     } catch (err) {
       /* ignore */
     }
@@ -422,6 +436,7 @@
       this.hFlip = null;
       this.hOff = null;
       this.covered = false; // completely under other cards of its pile and not rendered (see cover())
+      this.fanned = false; // a covered card of the sideways draw-3 waste fan (see markFanned())
       this.liftQ = 0; // --lift quantisation of the running flight (0 = TUNE.liftSteps)
       // style cache
       this._dirty = false;
@@ -432,6 +447,7 @@
       this._wDown = null;
       this._wTurn = false;
       this._wLifted = false;
+      this._wFan = false;
     }
 
     busy() {
@@ -538,7 +554,7 @@
       const trail = o.trail || null;
       let started = false;
 
-      if (flip1 !== flip0) s.flipMode = o.flipMode === SPIN ? SPIN : PROP;
+      if (flip1 !== flip0) s.flipMode = o.flipMode === SPIN || (o.flipMode === undefined && lite) ? SPIN : PROP;
       s.liftQ = o.liftSteps || 0;
       s.tracking = tracking;
       if (tracking) {
@@ -712,7 +728,7 @@
       s.cover(false);
       const flip0 = s.flip;
       const hop = o.hop || 0;
-      s.flipMode = o.mode === SPIN ? SPIN : PROP;
+      s.flipMode = o.mode === SPIN || (o.mode === undefined && lite) ? SPIN : PROP;
       s.dflip = deg;
       let started = false;
       let air = false; // the hop also lifts the card — unless a flight or a pose owns lift / scale meanwhile
@@ -732,7 +748,7 @@
             const bell = Math.sin(PI * t);
             if (!s.hOff) s.oy = -hop * bell;
             if (air && !s.hFlight && !s.hPose && !s.held) {
-              s.lift = 0.55 * bell;
+              s.lift = lite ? 0 : 0.55 * bell; // (lite mode: transform only, no shadow layers)
               s.scale = 1 + 0.05 * bell;
             }
           }
@@ -894,6 +910,10 @@
         s.el.classList.toggle('is-face-down', down);
         // hidden cards are never announced
         s.el.setAttribute('aria-label', down ? 'Face-down card' : SOL.Cards.label(s.id));
+      }
+      if (s.fanned !== s._wFan) {
+        s._wFan = s.fanned;
+        s.el.classList.toggle('is-fanned', s.fanned);
       }
 
       // ---- transform
@@ -1100,7 +1120,8 @@
 
     cardW = Math.max(22, cardW >= 60 ? Math.floor(cardW) : Math.floor(cardW * 2) / 2);
     const cardH = cardW * ASPECT;
-    const compact = cardW < 60; // cards.css swaps to the phone art below 60px
+    // cards.css swaps to the phone art below this width; SOL.Cards publishes the number (one source of truth)
+    const compact = cardW < ((SOL.Cards && SOL.Cards.COMPACT_BELOW) || 60);
     const rowGap = clamp(cardH * rowK, 7, 30);
     const top = Math.round(padT);
     const bottom = H - padB;
@@ -1264,6 +1285,7 @@
         s.tz = s.index;
         s.faceUp = false;
       }
+      markFanned(null);
       return;
     }
     const piles = state.piles;
@@ -1328,6 +1350,25 @@
     }
     const stockEl = pileEls.stock;
     if (stockEl) stockEl.classList.toggle('is-spent', piles.stock.length === 0 && piles.waste.length === 0);
+    markFanned(piles.waste);
+  }
+
+  /**
+   * Draw 3 with the waste fanned sideways: every waste card under the top one shows only its left edge, where
+   * the phone art has the rank but not the suit. Those cards carry .is-fanned and cards.css gives them a small
+   * suit under the rank (compact art only; the classic corner index has one anyway). `waste` null: nobody.
+   */
+  function markFanned(waste) {
+    const sideways = !!waste && L.draw3 && L.wasteFanX > 0;
+    const top = waste && waste.length > 0 ? waste[waste.length - 1] : -1;
+    for (let i = 0; i < 52; i++) {
+      const s = sprites[i];
+      const on = sideways && s.pile === 'waste' && i !== top;
+      if (on !== s.fanned) {
+        s.fanned = on;
+        touch(s);
+      }
+    }
   }
 
   /**
@@ -1473,6 +1514,7 @@
       leftHanded = false;
     }
     buildPiles();
+    setDealing(true); // (before the first style pass below: the symbol must not start visible and fade out)
     buildCards();
     inited = true;
 
@@ -1607,10 +1649,19 @@
     hoverEnd(true);
     clearHint();
     deckMode = false;
+    setDealing(false);
     for (let i = 0; i < 52; i++) {
       const s = sprites[i];
       if (s.held) releaseSprite(s);
     }
+  }
+
+  /**
+   * The deck is out — from the moment the old game is swept up until the new deal has landed. The stock slot
+   * is empty all that time, but not "run out": .is-dealing keeps its recycle symbol hidden (board.css).
+   */
+  function setDealing(on) {
+    if (pileEls.stock) pileEls.stock.classList.toggle('is-dealing', on);
   }
 
   function releaseSprite(s) {
@@ -1687,17 +1738,25 @@
   function scorePop(x, y, delta) {
     if (!delta || !L) return;
     const text = (delta > 0 ? '+' : '\u2212') + Math.abs(delta); // a real minus sign
-    const rise = clamp(L.cardH * 0.6, 30, 70);
-    // Near the top of the table the label starts lower (on the card) so it never drifts over the HUD.
-    if (y - rise < L.cardH * 0.08) y += Math.min(L.cardH * 0.7, rise + L.cardH * 0.08);
+    let rise = clamp(L.cardH * 0.6, 30, 70);
+    let onCard = false;
+    if (y - rise < L.cardH * 0.08) {
+      // The top row (a card reached its foundation, a recycle): the label can neither rise over the HUD nor
+      // may it settle on the rank and suit of the card that has just landed. It plays on the lower half of
+      // that card — from 0.84 of its height up to the middle — on a dark plate, so it reads on ivory.
+      y = L.topY + L.cardH * 0.84;
+      rise = L.cardH * 0.34;
+      onCard = true;
+    }
     const f = fx();
     if (f) {
       const c = toClient(x + L.cardW / 2, y);
-      f.floatText(c.x, c.y - 4, text, {
+      f.floatText(c.x, onCard ? c.y : c.y - 4, text, {
         color: delta > 0 ? GOLD : MINUS,
         size: clamp(L.cardW * 0.36, 15, 30),
         rise: rise,
         duration: 950,
+        plate: onCard,
       });
       return;
     }
@@ -1918,9 +1977,12 @@
         arc: L.side ? 0 : -L.cardH * 0.1,
         side: L.side ? (L.leftHanded ? -1 : 1) * (s.ty > s.y ? 1 : -1) * L.cardW * 0.14 : 0,
         spin: dir * 5,
-        peakLift: 0.85,
+        // Transform only, like the recycle: the card stays flat (one layer) and nothing but its own transform
+        // is restyled. A draw is the most frequent animation of the game and three of them overlap in draw 3:
+        // the lit --flip turn with its lift shadow cost about three times the paints and layout passes.
+        peakLift: 0,
         peakScale: 0.1,
-        flipMode: PROP,
+        flipMode: SPIN,
         flipFrom: 0.08,
         flipTo: 0.78,
         onStart: undo
@@ -2070,7 +2132,7 @@
       if (s.held) continue;
       const flipT = s.faceUp ? 0 : 180;
       if (s.hFlight) {
-        place(s, 'fly', { flipMode: PROP });
+        place(s, 'fly'); // (turns on the way: the lit flip, or the plain one in lite mode — fly()'s default)
         continue;
       }
       if (s.flip === flipT) continue;
@@ -2133,6 +2195,7 @@
     inviteOn = false;
     refreshInvite();
     if (pileEls.stock) pileEls.stock.classList.remove('is-stacked', 'is-spent');
+    setDealing(true);
     // where each card is now (retarget overwrites the logical place)
     const from = [];
     for (let k = 0; k < 52; k++) {
@@ -2490,6 +2553,7 @@
     return choreo(
       Promise.all([dealt, Promise.all(stockHome)]).then(function () {
         if (gen !== choreoGen) return;
+        setDealing(false);
         // anything a resize or an interruption left behind
         for (let i = 0; i < 52; i++) if (sprites[i].held === 'deck') sprites[i].held = null;
         sync('glide');
@@ -2498,29 +2562,83 @@
   }
 
   // ------------------------------------------------------------------ hit testing (model based, no DOM reads)
+  /** Distance (px) from a table-space point to the card rectangle with its top-left corner at (sx, sy); 0 inside. */
+  function cardGap(x, y, sx, sy) {
+    const dx = x < sx ? sx - x : Math.max(0, x - sx - L.cardW);
+    const dy = y < sy ? sy - y : Math.max(0, y - sy - L.cardH);
+    return dx === 0 ? dy : dy === 0 ? dx : Math.hypot(dx, dy);
+  }
+
   /**
-   * The topmost card drawn at a point. Cards in mid-flight are not there to be touched: when the player taps
-   * the stock or the waste again while the previous card is still leaving, the tap is meant for the pile, not
-   * for the card passing over it. (Gliding cards — springs — are hit where they are drawn.)
+   * The card a touch at this point means, or -1. A card that is hit exactly always wins. With `slop`, a touch
+   * that misses every card takes the NEAREST card within `slop` px — not the one highest in the stacking order:
+   * a finger in the gap between two columns means the card it almost touched. Cards at the same distance
+   * (the overlapping cards of a column): the topmost, which is the one whose strip is level with the finger.
+   *
+   * A card in flight can be touched in two places:
+   *   - where it is going to land: it counts as lying there already, on top of its pile;
+   *   - where it is drawn at this moment — except on the stock (quick draws are taps on the pile, not on the
+   *     card that is still leaving it) and except over a face-up card of another pile (the flight is only
+   *     passing over that card: the waste tapped again while its previous top card is leaving, the column
+   *     next to a landing place). A card that still shows its back does not shield the flight above it.
+   * (Gliding cards — springs — are hit where they are drawn.)
    */
   function cardAt(cx, cy, slop) {
     if (!L) return -1;
     const x = cx - L.left;
     const y = cy - L.top;
     const pad = slop || 0;
-    let best = -1;
-    let bestZ = -1;
+    const sz = pileZone('stock');
+    const onStock = x >= sz.x0 - pad && x <= sz.x1 + pad && y >= sz.y0 - pad && y <= sz.y1 + pad;
+    let rest = -1; // a card lying (or gliding) here
+    let restD = Infinity;
+    let land = -1; // a card in flight that lands here
+    let landD = Infinity;
+    let air = -1; // a card in flight that is drawn here
+    let airD = Infinity;
     for (let i = 0; i < 52; i++) {
       const s = sprites[i];
-      if (s.hFlight) continue;
-      const sx = s.x + s.ox;
-      const sy = s.y + s.oy;
-      if (x < sx - pad || x > sx + L.cardW + pad || y < sy - pad || y > sy + L.cardH + pad) continue;
-      if (s.z > bestZ) {
-        bestZ = s.z;
-        best = i;
+      let d;
+      if (!s.hFlight) {
+        d = cardGap(x, y, s.x + s.ox, s.y + s.oy);
+        if (d <= pad && (d < restD || (d === restD && s.z > sprites[rest].z))) {
+          rest = i;
+          restD = d;
+        }
+        continue;
+      }
+      if (s.tracking) {
+        d = cardGap(x, y, s.tx, s.ty);
+        if (d <= pad && (d < landD || (d === landD && s.tz > sprites[land].tz))) {
+          land = i;
+          landD = d;
+        }
+      }
+      if (!onStock) {
+        d = cardGap(x, y, s.x + s.ox, s.y + s.oy);
+        if (d <= pad && (d < airD || (d === airD && s.z > sprites[air].z))) {
+          air = i;
+          airD = d;
+        }
       }
     }
+    let best = rest;
+    let bestD = restD;
+    if (air >= 0 && airD <= bestD) {
+      let wins = airD < bestD;
+      if (!wins) {
+        // both under the finger: the flight covers the cards of the pile it is arriving on, and any card
+        // that is not showing its face
+        const a = sprites[air];
+        const r = sprites[rest];
+        wins = r.pile === a.pile ? a.tz > r.tz : !(r.faceUp && r.flip < 90);
+      }
+      if (wins) {
+        best = air;
+        bestD = airD;
+      }
+    }
+    if (land >= 0 && landD <= bestD) best = land;
     return best;
   }
 
@@ -2788,23 +2906,48 @@
       s.el.classList.add('is-dragging');
       // out of the press dip and up, quickly, with a little overshoot: the card is in the hand
       s.poseTo({ lift: 1, scale: TUNE.dragScale }, { duration: TUNE.dragLiftMs, delay: i * 10, ease: 'outBack' });
+      // (caught in flight in the middle of its turn — a card just drawn: it finishes turning in the hand)
+      if (s.flip !== (s.faceUp ? 0 : 180)) s.flipTo(s.faceUp ? 0 : 180, { duration: 150 });
       touch(s);
+    }
+    // Where on the card the finger went down. Normally that is on the card as it is drawn. A card caught in
+    // flight at its landing place is held as if it already lay there. Anything else — a touch that only just
+    // missed the card, a card that has flown on since the press — is held by the nearest point of its face.
+    let gx = px - lead.x;
+    let gy = py - lead.y;
+    if (gx < 0 || gx > L.cardW || gy < 0 || gy > L.cardH) {
+      const lx = px - lead.tx;
+      const ly = py - lead.ty;
+      if (lx >= 0 && lx <= L.cardW && ly >= 0 && ly <= L.cardH) {
+        gx = lx;
+        gy = ly;
+      } else {
+        gx = clamp(gx, 0, L.cardW);
+        gy = clamp(gy, 0, L.cardH);
+      }
     }
     drag = {
       card: cardId,
       sprites: spr,
       from: lead.pile,
-      gx: px - lead.x,
-      gy: py - lead.y,
+      gx: gx,
+      gy: gy,
       px: px,
       py: py,
+      // where the finger holds the lead card (see holdPoint) and how far the card still is from there
+      hx: lead.x,
+      hy: lead.y,
+      late: 1, // 1: not measured yet, 2: catching up, 0: under the finger
+      lx: 0,
+      ly: 0,
       vx: 0,
       vy: 0,
-      rot: 0,
+      // (the tilt springs start from the pose the card has: a card caught in flight does not snap straight)
+      rot: wrap180(lead.rot),
       rotV: 0,
-      ry: 0,
+      ry: wrap180(lead.ry),
       ryV: 0,
-      rx: 0,
+      rx: wrap180(lead.rx),
       rxV: 0,
       // the run keeps the spacing it had in its column (a compressed column does not spring apart in the hand)
       fan: spr.length > 1 ? clamp(spr[1].ty - spr[0].ty, 2, L.upFan) : L.upFan,
@@ -2826,15 +2969,43 @@
     wake();
   }
 
+  /**
+   * Where the finger holds the lead card at this moment (table space): the pointer minus the spot of the card
+   * it went down on. Kept on the table (and reachable): the card's centre never leaves the table box.
+   */
+  function holdPoint(d) {
+    d.hx = clamp(d.px - d.gx, -L.cardW * 0.5, L.w - L.cardW * 0.5);
+    d.hy = clamp(d.py - d.gy, -L.cardH * 0.5, L.h - L.cardH * 0.5);
+  }
+
   /** One frame of drag physics: the lead card follows the pointer, the run trails, everything tilts. */
   function dragFrame(dt) {
     const d = drag;
     const h = Math.min(dt, 40) / 1000;
     const lead = d.sprites[0];
-    // keep the grabbed card on the table (and reachable): its centre never leaves the table box
-    const nx = clamp(d.px - d.gx, -L.cardW * 0.5, L.w - L.cardW * 0.5);
-    const ny = clamp(d.py - d.gy, -L.cardH * 0.5, L.h - L.cardH * 0.5);
     const still = reduced();
+    holdPoint(d);
+    let nx = d.hx;
+    let ny = d.hy;
+    if (d.late) {
+      // The card is not under the finger yet: the pointer had moved on before the drag was recognised (the
+      // slop, a fast start) or the card was caught in flight. It closes the distance quickly but not in one
+      // jump, then follows rigidly.
+      if (d.late === 1) {
+        d.late = 2;
+        d.lx = lead.x - nx;
+        d.ly = lead.y - ny;
+      }
+      const keep = still ? 0 : Math.exp(-h / TUNE.dragCatch);
+      d.lx *= keep;
+      d.ly *= keep;
+      if (Math.abs(d.lx) < 0.5 && Math.abs(d.ly) < 0.5) {
+        d.late = 0;
+      } else {
+        nx += d.lx;
+        ny += d.ly;
+      }
+    }
 
     if (h > 0) {
       const ivx = (nx - lead.x) / h;
@@ -2902,12 +3073,12 @@
 
   /**
    * Where the held run would go: `target` = the legal pile the lead card overlaps most (any foundation counts
-   * for the card's own foundation); `over` = the pile it overlaps most, legal or not.
+   * for the card's own foundation); `over` = the pile it overlaps most, legal or not. The lead card is taken
+   * where the finger holds it (holdPoint), which is where it is drawn except while it is still catching up.
    */
   function dropCandidate(d) {
-    const lead = d.sprites[0];
-    const x0 = lead.x;
-    const y0 = lead.y;
+    const x0 = d.hx;
+    const y0 = d.hy;
     const x1 = x0 + L.cardW;
     const y1 = y0 + L.cardH;
     const area = L.cardW * L.cardH;
@@ -2940,6 +3111,14 @@
       target = own;
     }
     if (targetA < area * 0.18) target = null;
+    if (target) {
+      // A card that has hardly left its place — it still covers most of it — is put back, not moved: a tap
+      // that slipped past the slop, or a drag that was called off, is not a drop on the pile next door.
+      const lead = d.sprites[0];
+      const kx = L.cardW - Math.abs(x0 - lead.tx);
+      const ky = L.cardH - Math.abs(y0 - lead.ty);
+      if (kx > 0 && ky > 0 && kx * ky > area * TUNE.dropLeave) target = null;
+    }
     if (overA < area * 0.3) over = null;
     return { target: target, over: over };
   }
@@ -2947,6 +3126,8 @@
   function dragEnd() {
     if (!drag || drag.released) return null;
     const d = drag;
+    // judged where the finger is now: the last pointer position may be newer than the last frame
+    holdPoint(d);
     const c = dropCandidate(d);
     d.released = true;
     markTargets(d, false);

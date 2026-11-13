@@ -727,3 +727,76 @@ test('the App API has the old methods plus the two new ones', () => {
   ]);
   assert.deepStrictEqual(Object.keys(SOL.Haptics).sort(), ['play', 'supported']);
 });
+
+// ------------------------------------------------------------------ haptics before the first gesture
+/**
+ * Runs `fn` with a fake browser `navigator` in place (platform.js reads it when it loads). Node's own
+ * navigator is put back afterwards.
+ */
+function withNavigator(fake, fn) {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', { value: fake, configurable: true, writable: true });
+  try {
+    fn();
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'navigator', original);
+    else delete globalThis.navigator;
+  }
+}
+
+function fakeBrowserNavigator(activation) {
+  const vibrations = [];
+  const nav = {
+    userAgent: 'Mozilla/5.0 (Linux; Android 14) Chrome/130.0 Mobile',
+    vibrations,
+    vibrate(pattern) {
+      vibrations.push(pattern);
+      return true;
+    },
+  };
+  if (activation) nav.userActivation = activation;
+  return nav;
+}
+
+test('haptics in a browser: nothing is attempted before the first user gesture', () => {
+  // (the opening deal runs before any gesture; Chrome logs an intervention for every such vibrate call)
+  const activation = { hasBeenActive: false, isActive: false };
+  const nav = fakeBrowserNavigator(activation);
+  withNavigator(nav, () => {
+    const SOL = load({});
+    assert.strictEqual(SOL.Platform.isNativeApp, false);
+    assert.strictEqual(SOL.Haptics.supported, true);
+    for (const kind of ['tick', 'thud', 'success', 'heavy', 'win']) {
+      assert.strictEqual(SOL.Haptics.play(kind), false, kind + ' is held back');
+    }
+    assert.deepStrictEqual(nav.vibrations, [], 'navigator.vibrate was not called');
+
+    // the first tap: from now on the browser allows it
+    activation.hasBeenActive = true;
+    assert.strictEqual(SOL.Haptics.play('heavy'), true);
+    assert.strictEqual(SOL.Haptics.play('success'), true);
+    assert.deepStrictEqual(nav.vibrations, [30, [10, 36, 16]]);
+  });
+});
+
+test('haptics in a browser that cannot tell whether there was a gesture: tried as before', () => {
+  const nav = fakeBrowserNavigator(null); // no navigator.userActivation (older WebViews, Firefox)
+  withNavigator(nav, () => {
+    const SOL = load({});
+    assert.strictEqual(SOL.Haptics.play('heavy'), true);
+    assert.deepStrictEqual(nav.vibrations, [30]);
+  });
+});
+
+test('haptics in the app: the bridge is used and needs no user gesture', () => {
+  const nav = fakeBrowserNavigator({ hasBeenActive: false, isActive: false });
+  withNavigator(nav, () => {
+    const bridge = fakeBridge();
+    const SOL = load({ bridge });
+    assert.strictEqual(SOL.Platform.isNativeApp, true);
+    assert.strictEqual(SOL.Haptics.play('thud'), true);
+    assert.strictEqual(SOL.Haptics.play('win'), true);
+    assert.deepStrictEqual(bridge.args('haptic'), ['thud', 'win']);
+    assert.deepStrictEqual(nav.vibrations, [], 'navigator.vibrate is not used inside the app');
+  });
+});

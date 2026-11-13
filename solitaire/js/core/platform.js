@@ -63,7 +63,11 @@
  *   SOL.Platform.isTouch       primary input is touch (coarse pointer)
  *   SOL.Platform.canHover      a hover-capable fine pointer exists
  *
- *   SOL.Haptics.play(kind)     fire-and-forget; honours the 'haptics' setting; rate limited
+ *   SOL.Haptics.play(kind)     fire-and-forget; honours the 'haptics' setting; rate limited.
+ *                              In a browser nothing is attempted before the first user gesture
+ *                              (navigator.userActivation.hasBeenActive): the browser would refuse
+ *                              and log an error for every call. Inside the app the bridge is used
+ *                              and no gesture is needed. Callers need no guard of their own.
  *   SOL.Haptics.supported      boolean
  *
  *   SOL.App.addBackHandler(fn) -> remove()   LIFO stack. fn() returning false declines (the next
@@ -154,7 +158,14 @@
           b.haptic(kind);
           return true;
         }
-        if (typeof nav.vibrate === 'function') return !!nav.vibrate(PATTERNS[kind]);
+        if (typeof nav.vibrate === 'function') {
+          // A browser refuses to vibrate before the first user gesture and logs an intervention (a console
+          // error) for every attempt — and the game does ask that early: the opening deal. The shell's
+          // bridge above has no such rule.
+          const activation = nav.userActivation;
+          if (activation && !activation.hasBeenActive) return false;
+          return !!nav.vibrate(PATTERNS[kind]);
+        }
       } catch (err) {
         /* vibration blocked (no user activation yet, permissions policy): ignore */
       }

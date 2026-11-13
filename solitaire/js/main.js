@@ -41,6 +41,17 @@
  *   in the air; the position stays valid and saved), Game.isAutoCompleting(), Game.getHints() (cached
  *   SOL.Engine.hints of the current position), Game.isStuck(), Game.save() (write the save now),
  *   Game.isLite() / Game.setLite(bool) / Game.perf() (adaptive quality, see below).
+ *   (extra, for the Settings screen) the effects level as it really is, and the player's choice of one:
+ *   Game.getEffects() -> { chosen, effective, lite, locked }
+ *                                      chosen: the stored 'effects' setting ('high' | 'low'); effective: what
+ *                                      is applied right now ('low' while lite mode is on, whatever was chosen);
+ *                                      lite: adaptive lite mode is on; locked: the player has chosen a level
+ *                                      by hand in this session, so nothing adapts any more
+ *   Game.chooseEffects('high' | 'low') -> boolean
+ *                                      the player picks a level. Stores it (SOL.Settings 'effects') and — unlike
+ *                                      a plain SOL.Settings.set — also counts when it is the value already
+ *                                      stored: "High" tapped while lite mode has lowered the effects. Lite mode
+ *                                      ends and stays off for the session. false for any other value.
  *
  * EVENTS (SOL.Bus)
  *   'game:new'     { state, restored }       a new state is on the table (emitted when the deal STARTS)
@@ -55,26 +66,38 @@
  *                                            the celebration plays an encore (at most twice per win).
  *   'game:stuck'   {}                        once per stuck episode (Engine.isStuck, or no hint left), a
  *                                            moment after the move that caused it
- *   'game:busy'    { busy }
+ *   'game:busy'    { busy }                  only when Game.isBusy() changes: true and false always alternate
+ *                                            (a new game that interrupts auto-complete or the celebration
+ *                                            keeps the table busy, no event)
  *   'game:pause'   { paused, reason }        (extra) a pause reason was taken (paused: true) or given back
  *                                            (paused: is anything else still pausing). The celebration uses it
  *                                            to make room for the win screen.
- *   'game:quality' { lite, avgFrameMs, lateShare }   (extra) lite mode was switched on or off
+ *   'game:quality' { lite, effects, avgFrameMs, lateShare }
+ *                                            (extra) lite mode was switched on (a slow deal or show: the two
+ *                                            numbers are its measurement) or off (the player chose an effects
+ *                                            level, or Game.setLite(false): both numbers 0). effects: the
+ *                                            level in force now, as Game.getEffects().effective.
  *
  * RULES OF THE HOUSE
  *   - The clock starts with the first action of a session (also for a restored game) and stops on a win, while
  *     paused, while the page is hidden and during the deal.
  *   - The game is saved (SOL.Save) after every change — in the next task, so a burst of actions costs one
  *     write — and synchronously when the page is hidden.
+ *   - Asking for a new game ends the old one for good: the save is cleared at once and nothing is written
+ *     until the new deal exists (Game.state is still the old game while the cards are gathered and shuffled;
+ *     Game.save() does nothing meanwhile). Whenever the app is closed, the abandoned game does not come back:
+ *     the next start restores the new deal, or deals one if there was none yet.
  *   - Stats: recordStart on the first action of a game, recordWin on a win (best score uses score + time bonus).
  *   - Settings apply live: theme, card back, animation speed, reduced motion, sound / volume, effects quality,
  *     handedness, haptics. drawCount applies to the next deal.
  *   - Adaptive quality: real frame intervals are sampled during every deal and every full celebration. When
  *     the average is well above 20 ms (> 24 ms, and more than half of the frames late) the session goes into
  *     LITE mode: SOL.FX quality 'low', <html data-effects="low">, SOL.Board.setLite(true) (transform-only
- *     choreography, no trails, the celebration with far fewer particles). It switches back when a later
- *     sample is comfortably fast (< 18.5 ms). Never written to the settings; changing the 'effects' setting by
- *     hand ends the adaptive behaviour for the session.
+ *     choreography, no trails, the celebration with far fewer particles). Once on, it stays on for the rest of
+ *     the session: it never switches itself off again (frames measured in lite mode say nothing about the full
+ *     effects, and a device near the threshold would flap). It is never written to the settings. The player's
+ *     own choice wins: picking an effects level — a changed 'effects' setting, or Game.chooseEffects() with
+ *     any value — ends lite mode and the adaptive behaviour for the session.
  *
  * The bootstrap at the bottom starts the modules in order (settings -> Anim / FX / Audio -> Board -> Input ->
  * Inspector -> UI -> Game.init()); a missing or throwing module is logged and skipped, never fatal.
@@ -97,7 +120,6 @@
   const PERF_SLOW_MS = 20.5; // a frame that missed a 60 Hz deadline
   const PERF_LITE_AVG_MS = 24; // "struggling": average well above 20 ms and most frames late
   const PERF_LITE_SHARE = 0.5;
-  const PERF_OK_AVG_MS = 18.5; // good again (hysteresis)
   const ENCORE_DELAY_MS = 320;
   const LANDING_LIMIT_MS = 1200;
 
@@ -115,14 +137,18 @@
   let tickTimer = 0;
 
   let saveTimer = 0;
+  // A new game was asked for and its deal does not exist yet (gather / shuffle / the seed search): `state` is
+  // still the abandoned game, and there is deliberately nothing to save (see saveNow).
+  let dealPending = false;
   let dealToken = 0;
   let autoToken = 0;
   let winToken = 0;
   let encoreTimer = 0;
   let encoresLeft = 0; // per win: closing dialogs on a won table must not turn into an endless party
   let hurried = false;
-  let lite = false; // adaptive quality: the device was struggling during a deal (this session only)
+  let lite = false; // adaptive quality: the device was struggling during a deal (stays on for the session)
   let liteLocked = false; // the player chose an effects level by hand: stop second-guessing it
+  let effectsApplied = 0; // times an effects choice was applied (see chooseEffects)
   const perf = { stop: null, n: 0, sum: 0, slow: 0, skip: 0, last: null };
 
   const hintCache = { v: -1, list: [] };
@@ -207,7 +233,9 @@
       root.clearTimeout(saveTimer);
       saveTimer = 0;
     }
-    if (!state || !SOL.Save) return;
+    // While a new deal is on its way `state` is the game the player has just abandoned: writing it back —
+    // when the page is hidden or closed during the shuffle — would bring it back on the next start.
+    if (!state || !SOL.Save || dealPending) return;
     try {
       state.elapsedMs = elapsed();
       SOL.Save.write(E().serialize(state));
@@ -567,9 +595,17 @@
    * the celebration (transform-only choreography) and <html data-effects> (stylesheets drop their expensive
    * decoration). Effective = 'low' when the setting says so or when the session is in lite mode.
    */
+  function chosenEffects() {
+    return setting('effects', 'high') === 'low' ? 'low' : 'high';
+  }
+
+  function getEffects() {
+    const chosen = chosenEffects();
+    return { chosen: chosen, effective: lite ? 'low' : chosen, lite: lite, locked: liteLocked };
+  }
+
   function applyQuality() {
-    const wanted = setting('effects', 'high') === 'low' ? 'low' : 'high';
-    const effective = lite ? 'low' : wanted;
+    const effective = lite ? 'low' : chosenEffects();
     try {
       if (SOL.FX) SOL.FX.setQuality(effective);
       const b = board();
@@ -580,12 +616,34 @@
     }
   }
 
+  function emitQuality(info) {
+    emit('game:quality', {
+      lite: lite,
+      effects: lite ? 'low' : chosenEffects(),
+      avgFrameMs: info ? info.avg : 0,
+      lateShare: info ? info.share : 0,
+    });
+  }
+
   function setLite(on, info) {
     on = !!on;
     if (on === lite) return;
     lite = on;
     applyQuality();
-    emit('game:quality', { lite: lite, avgFrameMs: info ? info.avg : 0, lateShare: info ? info.share : 0 });
+    emitQuality(info);
+  }
+
+  /**
+   * The player's own choice of an effects level (the Settings screen). It is a choice even when the value is
+   * the one already stored — "High" tapped while lite mode has lowered the effects — which a plain
+   * SOL.Settings.set() would swallow (no change, no event).
+   */
+  function chooseEffects(value) {
+    if (value !== 'high' && value !== 'low') return false;
+    const before = effectsApplied;
+    if (SOL.Settings && chosenEffects() !== value) SOL.Settings.set('effects', value); // -> applySetting('effects')
+    if (effectsApplied === before) applySetting('effects'); // nothing changed in the store: apply it ourselves
+    return true;
   }
 
   /** Starts sampling frame intervals (real time, as SOL.Anim's frame loop reports them). */
@@ -609,7 +667,8 @@
 
   /**
    * Ends the sampling. `judge`: decide whether this device needs lite mode — the average frame took well over
-   * 20 ms and most frames were late — or, once in lite mode, whether it is comfortably fast again.
+   * 20 ms and most frames were late. There is no way back by measurement: frames sampled in lite mode are the
+   * cheap ones, so "fast again" would only mean that lite mode works (and the session would flap).
    */
   function perfEnd(judge) {
     if (!perf.stop) return;
@@ -619,7 +678,6 @@
     const info = { avg: perf.sum / perf.n, share: perf.slow / perf.n, frames: perf.n };
     perf.last = info;
     if (!lite && info.avg > PERF_LITE_AVG_MS && info.share > PERF_LITE_SHARE) setLite(true, info);
-    else if (lite && info.avg < PERF_OK_AVG_MS && info.share < 0.2) setLite(false, info);
   }
 
   // ------------------------------------------------------------------ new game / restore
@@ -716,6 +774,11 @@
     opts = opts || {};
     const eng = E();
     if (!eng) return Promise.resolve(false);
+    // Busy with the deal BEFORE the other reasons go (cancelRunning drops 'auto' and 'celebrate' without a
+    // word): a new game that interrupts auto-complete or the celebration keeps the table busy throughout,
+    // and 'game:busy' is emitted only when the flag really changes — true and false always pair up.
+    const wasBusy = busy.size > 0;
+    busy.add('deal');
     cancelRunning();
     const token = dealToken;
     const b0 = board();
@@ -725,8 +788,10 @@
     if (tickTimer) root.clearTimeout(tickTimer);
     tickTimer = 0;
     armed = false;
-    setBusy('deal', true);
-    busy.delete('celebrate');
+    if (!wasBusy) {
+      emit('game:busy', { busy: true });
+      emitStatus();
+    }
     // The table is being swept: whatever is still falling from the last show goes too (and the particle
     // canvas, the most expensive layer on the page while it is active, is idle during the deal).
     try {
@@ -734,7 +799,9 @@
     } catch (err) {
       /* ignore */
     }
-    // The old game is over the moment the cards are swept up.
+    // The old game is over the moment the cards are swept up — and it stays over: until the new deal exists
+    // nothing is saved (`state` is still the old game), so leaving the app now cannot bring it back.
+    dealPending = true;
     if (SOL.Save) SOL.Save.clear();
     if (saveTimer) {
       root.clearTimeout(saveTimer);
@@ -769,6 +836,7 @@
       .then(function () {
         if (token !== dealToken) return false;
         state = eng.newGame({ seed: seed, drawCount: drawCount });
+        dealPending = false;
         resetForNewState();
         emit('game:new', { state: state, restored: false });
         emitStatus();
@@ -788,7 +856,14 @@
         log('newGame failed', err);
         if (token === dealToken) {
           endHurry();
-          if (!state) state = eng.newGame({ drawCount: drawCount });
+          if (!state || dealPending) {
+            // it failed before the new deal existed: deal one now — the abandoned game does not come back
+            state = eng.newGame({ seed: seedReady ? seed : undefined, drawCount: drawCount });
+            dealPending = false;
+            resetForNewState();
+            emit('game:new', { state: state, restored: false });
+            saveNow();
+          }
           try {
             if (b) b.render(state);
           } catch (err2) {
@@ -849,6 +924,7 @@
     cancelRunning();
     busy.clear();
     state = next;
+    dealPending = false;
     resetForNewState();
     const b = board();
     if (b) b.render(state);
@@ -910,8 +986,11 @@
       if (key === 'reducedMotion' || key === '*') {
         if (SOL.Anim) SOL.Anim.setReducedMotion(S.reducedMotion());
       }
+      let liteEnded = false;
       if (key === 'effects') {
         // The player picked a level by hand: that is what they get from now on (no more adaptive switching).
+        effectsApplied++;
+        liteEnded = lite;
         lite = false;
         liteLocked = true;
       }
@@ -920,6 +999,7 @@
       if (key === 'theme' || key === 'effects' || key === 'reducedMotion' || key === '*') {
         if (SOL.FX && !hidden) SOL.FX.ambient(true, { theme: S.get('theme') });
       }
+      if (liteEnded) emitQuality(null);
       if (key === 'sound' || key === '*') {
         if (SOL.Audio) SOL.Audio.setEnabled(!!S.get('sound'));
       }
@@ -1000,6 +1080,8 @@
     setLite: function (on) {
       setLite(on, null);
     },
+    getEffects: getEffects,
+    chooseEffects: chooseEffects,
     perf: function () {
       return perf.last ? { avgFrameMs: perf.last.avg, lateShare: perf.last.share, frames: perf.last.frames, lite: lite } : null;
     },

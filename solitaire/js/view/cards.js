@@ -31,7 +31,7 @@
  *     <div class="card__shadow"></div>                         (two cross-faded lift shadows; rotates with the faces)
  *     <div class="card__tilt">
  *       <div class="card__flip">
- *         <div class="card__face card__front"><svg class="card__art">…two <use> into the sprite…</svg></div>
+ *         <div class="card__face card__front"><svg class="card__art">…three <use> into the sprite…</svg></div>
  *         <div class="card__face card__back"></div>            (the design is a CSS background chosen by data-back)
  *         <div class="card__edges">…</div>                     (only with { thick: true }: 4 walls + 7 strips per rounded
  *                                                                corner, each an <i class="card__edge">, lit from the top-left)
@@ -45,22 +45,28 @@
  * --sheen-o / --shadow-o (0..1). Nothing in here listens for resize: every measure derives from --card-w in CSS,
  * and the art is SVG.
  *
- * Art notes: all shapes live once in an injected <svg> sprite (#sol-card-sprite) and each front is two <use>
- * elements — a classic layout (corner indices, pips, ornamental ace, double-ended courts) and a compact one for
- * cards narrower than 60px (big rank + suit, one large suit or a single bust); a container query in cards.css
- * shows one of them. The six backs are procedurally generated SVG documents handed to CSS as data: URIs, so a
- * face-down card costs no extra DOM. Everything is original: suits, numerals, court figures and backs are drawn
- * from scratch below. A card is 10 DOM nodes (43 with { thick: true }).
+ * Art notes: all shapes live once in an injected <svg> sprite (#sol-card-sprite) and each front is three <use>
+ * elements — a classic layout (corner indices, pips, ornamental ace, double-ended courts), a compact one for
+ * cards narrower than 60px (big rank + suit, one large suit or a single bust) and the fan mark (below); a
+ * container query in cards.css shows one of the two layouts. The six backs are procedurally generated SVG
+ * documents handed to CSS as data: URIs, so a face-down card costs no extra DOM. Everything is original: suits,
+ * numerals, court figures and backs are drawn from scratch below. A card is 11 DOM nodes (44 with { thick: true }).
  *
  * Optional attribute: data-layout="compact" | "classic" on the .card element pins the front layout whatever the
  * card's size (unset = automatic). Nothing in here sets it.
+ *
+ * Optional class: .is-fanned on the .card element — "only the left edge of this card can be seen" (a covered
+ * card of a sideways fan). In the compact layout it shows the fan mark, a small suit under the rank (on a paper
+ * chip for the courts), which is hidden otherwise; the classic layout ignores it (its corner index has the suit
+ * under the rank anyway). The owner sets it (SOL.Board does, for the draw-3 waste); nothing in here does.
  *
  * Layout numbers other modules may lean on (fractions of the card height, measured from the top edge): the
  * corner index ends at 0.26 in the classic layout (rank alone: 0.17) and at 0.27 in the compact one, so a
  * tableau fan step of 0.27-0.28 keeps rank and suit of every covered card readable at any size. Sideways
  * (fractions of the card width from the left edge): the classic index needs 0.22; the compact rank needs 0.24
  * (0.33 for the 10) and the compact suit sits top-RIGHT, so a sideways fan of compact cards shows rank and
- * colour only.
+ * colour only — unless its covered cards are marked .is-fanned: the fan mark needs 0.27 (0.30 under the 10,
+ * 0.28 on a court) and ends at 0.44 of the card height.
  */
 (function (root) {
   'use strict';
@@ -530,6 +536,27 @@
     return s;
   }
 
+  /*
+   * The fan mark: a small suit directly under the compact rank, like a classic corner index. A sideways fan of
+   * compact cards (the draw-3 waste on a phone) shows only the left 43% of each covered card — the rank, but
+   * not the suit top-right. The owner marks those cards .is-fanned and cards.css then shows this mark (it is
+   * hidden everywhere else). On a court it sits on a paper chip over the corner of the bust frame.
+   */
+  function fanMarkup(cardId) {
+    const c = info(cardId);
+    const court = c.rank > 10;
+    const size = court ? 46 : 54;
+    const cx = 14 + GLYPHS[c.rank].w * 0.4; // centre of the rank glyph (80 high, so 0.8 of its box width wide)
+    const y = 99;
+    let s = '';
+    if (court) {
+      s += R(n(cx - size / 2 - 5), y - 3, size + 10, size + 8, 9, PAPER) +
+        '<rect x="' + n(cx - size / 2 - 5) + '" y="' + (y - 3) + '" width="' + (size + 10) + '" height="' + (size + 8) +
+        '" rx="9" fill="none" stroke="currentColor" stroke-width="2.5" opacity=".35"/>';
+    }
+    return s + use('sol-suit-' + c.suit, cx - size / 2, y, size, size);
+  }
+
   // ------------------------------------------------------------------ sprite
   function spriteMarkup() {
     let s = '';
@@ -554,6 +581,7 @@
     for (let id = 0; id < 52; id++) {
       s += '<g id="sol-face-' + id + '">' + faceMarkup(id) + '</g>';
       s += '<g id="sol-mini-' + id + '">' + compactMarkup(id) + '</g>';
+      s += '<g id="sol-fan-' + id + '">' + fanMarkup(id) + '</g>';
     }
     return s;
   }
@@ -955,7 +983,8 @@
     el.innerHTML = shell(
       '<svg class="card__art" viewBox="0 0 250 350" aria-hidden="true" focusable="false">' +
         '<use class="card__classic" href="#sol-face-' + c.id + '"/>' +
-        '<use class="card__compact" href="#sol-mini-' + c.id + '"/></svg>',
+        '<use class="card__compact" href="#sol-mini-' + c.id + '"/>' +
+        '<use class="card__fan" href="#sol-fan-' + c.id + '"/></svg>',
       !!o.thick
     );
     return el;
