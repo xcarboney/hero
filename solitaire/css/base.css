@@ -180,6 +180,10 @@ button {
   z-index: var(--z-table);
   grid-row: 2;
   min-height: 0;
+  /* Re-derive here: custom properties using var() are resolved where they are declared, so the
+     :root values would stay tied to the :root --card-w when the board sets --card-w on #table. */
+  --card-h: calc(var(--card-w) * 1.4);
+  --card-radius: calc(var(--card-w) * 0.075);
   touch-action: none;            /* the board handles every pointer gesture itself */
   user-select: none;
   -webkit-user-select: none;
