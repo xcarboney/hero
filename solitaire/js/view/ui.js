@@ -1750,7 +1750,20 @@
       }
     };
     pose(0);
-    tween({ from: 0, to: 1, duration: 620, delay: 160, ease: 'outBack', update: pose });
+    // The fan opens while the sheet itself is still sliding up. A CSS transition does it on the compositor: a
+    // JS tween here cost the main thread a style + commit pass on every one of those frames (measured: the menu
+    // was the most expensive sheet to open because of it). Duration and delay still follow the speed setting.
+    const ms = transitionMs(620);
+    if (!ms || typeof root.requestAnimationFrame !== 'function') {
+      pose(1);
+      return;
+    }
+    root.requestAnimationFrame(() => root.requestAnimationFrame(() => {
+      for (const c of els) {
+        c.el.style.transition = 'transform ' + ms + 'ms cubic-bezier(0.34, 1.56, 0.64, 1) ' + transitionMs(160) + 'ms';
+      }
+      pose(1);
+    }));
   }
 
   function buildMenu(layer) {
