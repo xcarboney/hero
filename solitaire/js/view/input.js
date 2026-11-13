@@ -141,6 +141,7 @@
   /** Ends the current gesture without any game action. Cards in the hand go home. */
   function cancel() {
     const a = active;
+    if (B() && typeof B().hoverEnd === 'function') B().hoverEnd();
     if (!a) {
       // the board may still hold a run for us (e.g. it was told to drag by someone else)
       if (B() && B().isDragging()) B().dragCancel();

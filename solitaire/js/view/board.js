@@ -218,10 +218,11 @@
     revealDelay: 110,
     revealHop: 0.13, // card heights
     // ---- new game: gather, shuffle, deal (about 2.5 s together at speed 1)
-    deckScale: 1.3,
+    deckScale: 1.8, // the deck is shuffled close to the player (capped by deckMaxW and the table width)
+    deckMaxW: 170, // px: widest a deck card gets
     gatherMs: 330, // flight of the farthest card (nearer ones are quicker)
     gatherSpan: 170, // the sweep goes round the table within this long
-    cutMs: 180,
+    cutMs: 170,
     riffleGap: 5.4, // ms between two cards falling
     riffleMs: 135, // one card's fall
     squareMs: 190,
@@ -496,6 +497,7 @@
       const peakScale = o.peakScale === undefined ? 0.07 : o.peakScale;
       const spin = o.spin || 0;
       const turns = (o.turns || 0) * 360; // whole in-plane turns: the card ends looking exactly as without them
+      const turnsBy = o.turnsBy || 1; // …finished by this fraction of the flight (the rest is a straight slide)
       const ease = o.ease || outCubic;
       const ownsFlip = flip1 !== flip0;
       const arc = o.arc || 0;
@@ -537,7 +539,8 @@
           s.x = x0 + (x1 - x0) * p + nx * side * bow;
           s.y = y0 + (y1 - y0) * p + ny * side * bow - arc * bow;
           const bell = Math.sin(PI * t);
-          s.rot = rot0 + (rot1 - rot0) * e + spin * bell + turns * e;
+          s.rot = rot0 + (rot1 - rot0) * e + spin * bell;
+          if (turns) s.rot += turns * (turnsBy < 1 ? outCubic(Math.min(1, t / turnsBy)) : e);
           s.rx = rx0 + (rx1 - rx0) * e;
           s.ry = ry0 + (ry1 - ry0) * e;
           s.scale = sc0 + (sc1 - sc0) * e + peakScale * bell;
@@ -1125,7 +1128,8 @@
     }
     for (let i = 0; i < 7; i++) piles[TABLEAU[i]] = { x: col[i], y: ty };
 
-    const deckScale = clamp(TUNE.deckScale, 1, Math.max(1, (W * 0.5) / (cardW * 2.4)));
+    // two halves side by side (the cut) must fit the table with room to spare
+    const deckScale = clamp(TUNE.deckScale, 1, Math.max(1, Math.min((W * 0.4) / cardW, TUNE.deckMaxW / cardW)));
     const next = {
       w: W,
       h: H,
@@ -2158,7 +2162,7 @@
           scale: scale,
           duration: TUNE.gatherMs * (0.62 + 0.38 * clamp(dist / far, 0, 1)),
           delay: delay,
-          ease: inOutCubic, // gathers speed, then lands softly: it is pulled in, not thrown
+          ease: inOutSine, // gathers speed, then lands softly: it is pulled in, not thrown
           arc: 0,
           side: Math.min(L.cardW * 1.5, dist * 0.3), // every card curls the same way round
           spin: clamp(-ddx / (L.cardW * 3), -1, 1) * 16,
@@ -2218,9 +2222,11 @@
     const sc = L.deck.scale;
     const w = L.cardW * sc;
     const u = L.cardW / 100;
-    const spread = Math.min(w * 0.6, Math.max(10, (L.w - w) / 2 - 6));
-    const lean = 13; // deg: the V
-    const bow = lite ? 0 : 24; // deg: inner edges up
+    // the halves leave a gap between them: the riffled pile grows there, in plain sight
+    const spread = Math.min(w * 0.86, Math.max(10, (L.w - w) / 2 - 4));
+    const drop = L.cardH * sc * 0.2; // the pile forms a little below the two halves
+    const lean = 16; // deg: the V
+    const bow = lite ? 0 : 30; // deg: inner edges up
     const speed = SOL.Anim.speed || 1;
     const riffleSpan = (n - 1) * TUNE.riffleGap + TUNE.riffleMs;
 
@@ -2234,7 +2240,7 @@
       cut.push(
         s.fly({
           x: s.tx + (right ? spread : -spread) + (right ? -1 : 1) * k * 0.1 * u,
-          y: Math.round(L.deck.y) - k * 0.5 * u + L.cardH * 0.04,
+          y: Math.round(L.deck.y) - k * 0.5 * u - drop,
           rot: right ? lean : -lean,
           scale: sc,
           duration: TUNE.cutMs,
@@ -2273,13 +2279,13 @@
             // (fly() eases the bow out: the card springs flat as it leaves the thumb)
             all.push(
               s.fly({
-                x: s.tx + (right ? 1 : -1) * w * 0.085,
+                x: s.tx + (right ? 1 : -1) * w * 0.13,
                 y: s.ty,
-                rot: right ? 5.5 : -5.5,
+                rot: right ? 9 : -9,
                 scale: sc,
                 duration: TUNE.riffleMs,
                 delay: j * TUNE.riffleGap,
-                arc: L.cardH * 0.07,
+                arc: -L.cardH * sc * 0.1, // falls: the path sags instead of rising
                 peakLift: 0,
                 peakScale: 0.035,
                 overshoot: 0,
@@ -2378,10 +2384,11 @@
       const ms = TUNE.dealMs + 70 * reach;
       const h = s.fly({
         duration: ms,
-        ease: outQuart, // thrown: all the speed is at the start
+        // thrown: all the speed is at the start (outCubic, the default)
         arc: Math.min(L.cardH * 0.5, dist * 0.2),
         side: dir * Math.min(L.cardW * 0.5, dist * 0.1),
-        turns: lite ? 0 : dir, // one full turn in the plane of the table
+        turns: lite ? 0 : dir, // one full turn in the plane of the table…
+        turnsBy: 0.8, // …done before the card slides into place
         spin: lite ? dir * 14 : 0,
         peakLift: lite ? 0 : 0.8,
         liftSteps: 3, // ten cards in the air at once: a handful of shadow steps each, not one per frame
@@ -2424,7 +2431,7 @@
       stockHome.push(
         s.fly({
           duration: 360,
-          delay: Math.max(0, lastLaunch - 110) + i * 4,
+          delay: Math.max(0, lastLaunch - 110) + i * 2.4,
           lazy: true, // the covered ones stay unrendered until they take off
           ease: inOutCubic,
           arc: Math.min(L.cardH * 0.45, dist * 0.14),

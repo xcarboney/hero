@@ -1,33 +1,48 @@
 /*
- * SOL.Celebrate — the win celebration. First version: a clean, skippable three-act show built entirely on the
- * board's sprite API, meant to be replaced / elevated act by act.
+ * SOL.Celebrate — the win celebration: one continuous, skippable show of about eight seconds, played by the
+ * real 52 cards in 3D with SOL.FX on top.
  *
- *   act 1  ERUPT    the four foundations empty themselves, king first: every card launches along a high arc
- *                   into one big ring around the table, with sparks at the launch pad;
- *   act 2  WHEEL    the ring turns one and a quarter times while it breathes, a wave of flips runs around it,
- *                   fireworks go up and confetti falls;
- *   act 3  HOME     the cards stream back onto their foundations, ace first.
+ *   0.0 s  HUSH     the four finished stacks draw breath (the fanfare starts);
+ *   0.2 s  ERUPT    the foundations erupt one after the other in suit order — spades, hearts, clubs, diamonds —
+ *                   king first: every card shoots up, tumbles and is swept into…
+ *   …      VORTEX   …a funnel of cards turning in space: a helix around a vertical axis, cards facing outwards
+ *                   (faces in front, real backs behind), seen in perspective from a camera that keeps tilting;
+ *   2.9 s  RING     the helix winds down into one ring — a crown of cards — that spins faster and beats twice;
+ *   5.2 s  BURST    the ring bursts: the cards fly apart like the stars of a firework shell and hang in the air,
+ *                   glittering, while fireworks go up and confetti falls;
+ *   6.3 s  HOME     ace first, rank by rank on a rising scale, the cards cascade back onto four neat stacks.
+ *   7.8 s  the table is tidy; a last sweep of light crosses the foundations.
+ *
+ * The whole show is one function of time (one SOL.Anim tween drives a director that computes all 52 poses per
+ * frame), so it follows the speed setting, can be cut at any frame, and adapts while it runs:
+ *   - STAGE: it plays in whatever part of the screen is free. When the win screen slides up from the bottom
+ *     ('game:pause' { reason: 'modal' }) the show glides into the space above it; when it closes, back.
+ *   - a re-layout (rotation, resize) moves the stage and the foundations under it.
+ * Cost: transforms only. The cards themselves are rotated (rx / ry / rot / scale on .card — no --flip, no
+ * --lift, no shadows), z-order is re-sorted a few times a second instead of every frame, and cards buried in
+ * the stacks stay unrendered until they launch and are covered again as the stacks rebuild.
  *
  * Public API
- *   Celebrate.play(result?) -> Promise<boolean>   starts the show (once: while it runs the same promise is
- *                                                 returned). Resolves true when it ran to the end, false when
- *                                                 it was skipped / stopped. The cards are on their way home
- *                                                 (or home) when it resolves. `result` is the 'game:won'
- *                                                 payload (unused by this version).
- *   Celebrate.skip()                              the player tapped: straight to act 3, fast
- *   Celebrate.stop()                              no act 3 at all: releases the cards where they are (the
+ *   Celebrate.play(result?) -> Promise<boolean>   starts the show (while it runs the same promise is returned).
+ *                                                 Resolves true when it ran to the end, false when it was
+ *                                                 skipped / stopped; the cards are home (or, after a skip, on
+ *                                                 their way home) when it resolves. `result` is the 'game:won'
+ *                                                 payload (unused). Does nothing (resolves false) unless all
+ *                                                 52 cards lie on the foundations.
+ *   Celebrate.skip()                              the player tapped: straight to the tidy end state (the
+ *                                                 cards fly home in a third of a second)
+ *   Celebrate.stop()                              no homecoming at all: releases the cards where they are (the
  *                                                 caller is about to re-deal or re-render)
  *   Celebrate.isPlaying() -> boolean
+ *   Celebrate.DURATION                            length of the show in ms at speed 1
+ *   Celebrate.TIMELINE                            the beats (ms at speed 1; mutable, for tuning)
  * Emits 'celebrate:start' {} and 'celebrate:end' { skipped } on SOL.Bus, and sets .is-celebrating on #app while
  * it runs (base.css lifts the table above the HUD and toolbar so the cards can fly over them).
  *
- * How it drives the cards (the seam for the animation director):
- *   const cards = SOL.Board.hold(null, 'show')     // all 52 sprites; the layout leaves held sprites alone
- *   sprite.fly({ x, y, rot, scale, … })            // explicit destinations, see board.js "SPRITES"
- *   sprite.x = …; sprite.rot = …; SOL.Board.touch(sprite)      // or write values directly, once per frame
- *   SOL.Board.release('show', { how: 'fly', stagger, … })      // everything flies back to its logical place
- * All timing goes through SOL.Anim (speed setting, reduced motion). Under reduced motion there is no show:
- * a chime, a haptic, and the promise resolves at once.
+ * Reduced motion: a calm version — the chime, a haptic and a gold crown on the four stacks for about a second.
+ * Lite mode (SOL.Board.isLite(): a struggling device or effects 'low'): no trails, far fewer particles.
+ *
+ * Needs SOL.Board and SOL.Anim. SOL.FX, SOL.Audio, SOL.Haptics, SOL.Bus and SOL.Game are optional.
  */
 (function (root) {
   'use strict';
@@ -36,14 +51,46 @@
   const doc = root.document;
   const PI = Math.PI;
   const TAU = PI * 2;
+  const DEG = 180 / PI;
+  const GOLD = '#f3c969';
+  const SUIT_GLOW = ['#dfe8ff', '#ff6b81', '#dfe8ff', '#ff6b81'];
+  const FOUNDATIONS = ['f0', 'f1', 'f2', 'f3'];
+  const CALM_MS = 1300;
+
+  /** The beats, in ms at animation speed 1. */
+  const T = {
+    hush: 200, // the stacks draw breath
+    suitGap: 150, // between two eruptions
+    cardGap: 26, // between two cards of one eruption
+    launchMs: 640, // one card's way into the vortex
+    unwind: 2900, // the helix starts winding down…
+    ring: 3900, // …and is a ring
+    pulse1: 4250, // the ring beats
+    pulse2: 4700,
+    pulseMs: 240,
+    burst: 5180, // …and bursts
+    burstMs: 560,
+    home: 6250, // the first aces leave for home
+    homeGap: 74, // between two ranks
+    homeMs: 430, // one card's way home
+    tail: 240, // after the last landing
+  };
+
+  function duration() {
+    return T.home + 12 * T.homeGap + 36 + T.homeMs + T.tail;
+  }
 
   let playing = false;
   let token = 0;
   let current = null; // the promise of the running show
   let finish = null; // resolves it
   let stops = []; // FX emitters to stop
-  let handles = []; // tweens to cancel
+  let timeline = null; // the tween that drives the show
+  let show = null; // per-show state, see play()
+  let calmTimer = 0;
+  let offs = []; // bus subscriptions of the running show
 
+  // ------------------------------------------------------------------ small helpers
   function sfx(name, opts) {
     try {
       if (SOL.Audio) SOL.Audio.play(name, opts);
@@ -51,11 +98,18 @@
       /* ignore */
     }
   }
+  function note(rank, opts) {
+    try {
+      if (SOL.Audio) SOL.Audio.playFoundation(rank, opts);
+    } catch (err) {
+      /* ignore */
+    }
+  }
   function haptic(kind) {
     try {
       if (!SOL.Haptics) return;
-      // Before the first tap a browser refuses to vibrate and logs an intervention for every attempt
-      // (the opening deal runs without any gesture). The native shell has no such rule.
+      // Before the first tap a browser refuses to vibrate and logs an intervention for every attempt.
+      // The native shell has no such rule.
       const ua = root.navigator && root.navigator.userActivation;
       if (ua && !ua.hasBeenActive && !(SOL.Platform && SOL.Platform.isNativeApp)) return;
       SOL.Haptics.play(kind);
@@ -63,11 +117,48 @@
       /* ignore */
     }
   }
+  function fx() {
+    return SOL.FX && SOL.Anim && !SOL.Anim.reduced ? SOL.FX : null;
+  }
   function appEl() {
     return doc ? doc.getElementById('app') : null;
   }
+  function clamp(v, lo, hi) {
+    return v < lo ? lo : v > hi ? hi : v;
+  }
+  function lerp(a, b, t) {
+    return a + (b - a) * t;
+  }
+  function outCubic(t) {
+    const u = 1 - t;
+    return 1 - u * u * u;
+  }
+  function outQuart(t) {
+    const u = 1 - t;
+    return 1 - u * u * u * u;
+  }
+  function inCubic(t) {
+    return t * t * t;
+  }
+  function inOutCubic(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+  function inOutSine(t) {
+    return -(Math.cos(PI * t) - 1) * 0.5;
+  }
+  function wrap180(a) {
+    a = a % 360;
+    if (a > 180) a -= 360;
+    else if (a <= -180) a += 360;
+    return a;
+  }
+  /** Deterministic "random" 0..1 per card and channel. */
+  function hash(k, c) {
+    const v = Math.sin(k * 12.9898 + c * 78.233) * 43758.5453;
+    return v - Math.floor(v);
+  }
 
-  function cleanupEffects() {
+  function stopEmitters() {
     for (let i = 0; i < stops.length; i++) {
       try {
         stops[i]();
@@ -76,15 +167,35 @@
       }
     }
     stops = [];
-    for (let i = 0; i < handles.length; i++) handles[i].cancel();
-    handles = [];
+  }
+
+  function crown(on) {
+    const B = SOL.Board;
+    if (!B || !B.ready) return;
+    for (let i = 0; i < 4; i++) {
+      const el = B.pileEl(FOUNDATIONS[i]);
+      if (el) el.classList.toggle('is-crowned', on);
+    }
   }
 
   /** Ends the show state and resolves the promise. */
   function end(completed) {
     if (!playing) return;
     playing = false;
-    cleanupEffects();
+    stopEmitters();
+    if (timeline) {
+      const h = timeline;
+      timeline = null;
+      h.cancel();
+    }
+    if (calmTimer) {
+      root.clearTimeout(calmTimer);
+      calmTimer = 0;
+      crown(false);
+    }
+    for (let i = 0; i < offs.length; i++) offs[i]();
+    offs = [];
+    show = null;
     const app = appEl();
     if (app) app.classList.remove('is-celebrating');
     if (SOL.Bus) SOL.Bus.emit('celebrate:end', { skipped: !completed });
@@ -94,171 +205,547 @@
     if (resolve) resolve(completed);
   }
 
+  // ------------------------------------------------------------------ the stage
+  /**
+   * Top edge (viewport px) of a sheet docked to the bottom of the screen — the win screen on phones — or null.
+   * One layout read, made when a dialog opens (never inside the frame loop); offsets, not client rects, so a
+   * sheet that is still sliding in is measured where it will come to rest.
+   */
+  function measureSheet() {
+    try {
+      const host = doc.getElementById('overlay-root');
+      if (!host) return null;
+      const all = host.querySelectorAll('[aria-modal="true"]');
+      const sheet = all.length ? all[all.length - 1] : null;
+      if (!sheet) return null;
+      let top = 0;
+      let el = sheet;
+      while (el && el !== doc.body && el !== doc.documentElement) {
+        top += el.offsetTop;
+        el = el.offsetParent;
+      }
+      const h = sheet.offsetHeight;
+      const vh = root.innerHeight;
+      if (h > 0 && top + h >= vh - 3 && top > vh * 0.2 && sheet.offsetWidth >= root.innerWidth * 0.7) return top;
+      return null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /** Recomputes the stage the show should play in (table space) from the layout, the viewport and the sheet. */
+  function aimStage(sh) {
+    const L = sh.L;
+    const left = -L.left + 3;
+    const right = sh.vw - L.left - 3;
+    const top = -L.top + 4;
+    let bottom = sh.vh - L.top - 4;
+    if (sh.sheetTop !== null) bottom = Math.min(bottom, sh.sheetTop - L.top + L.cardH * 0.12);
+    bottom = Math.max(bottom, top + L.cardH * 2.6);
+    sh.aim.cx = (left + right) / 2;
+    sh.aim.cy = (top + bottom) / 2;
+    sh.aim.a = (right - left) / 2;
+    sh.aim.b = (bottom - top) / 2;
+  }
+
+  // ------------------------------------------------------------------ play
   function play() {
     if (playing && current) return current;
     const B = SOL.Board;
     const A = SOL.Anim;
+    const G = SOL.Game;
     if (!B || !B.ready || !A) return Promise.resolve(false);
+    const L0 = B.layout();
+    if (!L0 || B.isDeckMode()) return Promise.resolve(false);
+    // the show is written for a finished game: every card on its foundation
+    const cards = B.sprites;
+    for (let i = 0; i < 52; i++) {
+      const s = cards[i];
+      if (!s || s.pile !== 'f' + Math.floor(i / 13) || s.index !== i % 13) return Promise.resolve(false);
+    }
 
-    sfx('win');
-    haptic('win');
-    if (A.reduced) return Promise.resolve(true); // no motion: the chime is the celebration
-
-    const L = B.layout();
-    if (!L) return Promise.resolve(false);
     const my = ++token;
     playing = true;
     current = new Promise(function (resolve) {
       finish = resolve;
     });
+    if (SOL.Bus) SOL.Bus.emit('celebrate:start', {});
+    sfx('win');
+    haptic('win');
+
+    if (A.reduced) {
+      // ---- the calm version: no motion at all — the chime, and a gold crown on the four stacks
+      crown(true);
+      calmTimer = root.setTimeout(function () {
+        if (my !== token) return;
+        calmTimer = 0;
+        crown(false);
+        end(true);
+      }, CALM_MS);
+      return current;
+    }
+
     const app = appEl();
     if (app) app.classList.add('is-celebrating');
-    if (SOL.Bus) SOL.Bus.emit('celebrate:start', {});
+    const lite = !!(B.isLite && B.isLite());
+    const showZ = B.TUNE.showZ;
+    const total = duration();
 
-    const cards = B.hold(null, 'show');
-    const FX = SOL.FX;
-    const cw = L.cardW;
-    const ch = L.cardH;
-
-    // ---- the ring: 52 seats around the middle of the table
-    const cx = L.w / 2 - cw / 2;
-    const cy = L.h / 2 - ch / 2;
-    const rx = Math.max(cw * 1.4, Math.min(L.w / 2 - cw / 2 - 4, cw * 6.5));
-    const ry = Math.max(ch * 0.9, Math.min((L.h - ch) / 2 - 4, rx * 1.12));
-    // launch order: kings first (they are on top), suit by suit around the ring
-    const order = [];
-    for (let rank = 13; rank >= 1; rank--) for (let suit = 0; suit < 4; suit++) order.push(suit * 13 + rank - 1);
-    const seat = new Array(52);
-    for (let k = 0; k < 52; k++) seat[order[k]] = k;
-
-    function seatPos(k, turn, breathe) {
-      const a = (k / 52) * TAU - PI / 2 + turn;
-      return {
-        x: cx + Math.cos(a) * rx * breathe,
-        y: cy + Math.sin(a) * ry * breathe,
-        rot: ((a + PI / 2) * 180) / PI,
-      };
+    const sh = (show = {
+      L: L0,
+      vw: root.innerWidth,
+      vh: root.innerHeight,
+      sheetTop: null,
+      measure: 0, // frames until the sheet is measured (0 = nothing pending)
+      measureAgain: 0,
+      st: { cx: 0, cy: 0, a: 0, b: 0 },
+      aim: { cx: 0, cy: 0, a: 0, b: 0 },
+      last: 0,
+      frame: 0,
+      phase: new Uint8Array(52), // 0 waiting, 1 launching, 2 in the vortex / ring, 3 burst, 4 homing, 5 home
+      from: [], // pose at the start of the current phase
+      burst: [], // per card: where the burst takes it
+      depth: new Float32Array(52),
+      order: [],
+      fired: Object.create(null),
+      landed: 0,
+    });
+    aimStage(sh);
+    sh.st.cx = sh.aim.cx;
+    sh.st.cy = sh.aim.cy;
+    sh.st.a = sh.aim.a;
+    sh.st.b = sh.aim.b;
+    for (let i = 0; i < 52; i++) {
+      const s = cards[i];
+      s.stop();
+      s.held = 'show';
+      s.soft = false;
+      sh.from.push({ x: s.x + s.ox, y: s.y + s.oy, rot: wrap180(s.rot), rx: wrap180(s.rx), ry: wrap180(s.ry), scale: s.scale });
+      s.x += s.ox;
+      s.y += s.oy;
+      s.ox = 0;
+      s.oy = 0;
+      s.lift = 0;
+      s.flip = 0;
+      sh.burst.push(null);
+      sh.order.push(i);
     }
-
-    // ---- act 1: erupt
-    const launchGap = 30;
-    const launchMs = 640;
-    const flights = [];
-    for (let k = 0; k < 52; k++) {
-      const s = B.sprite(order[k]);
-      const p = seatPos(k, 0, 1);
-      const rot = ((p.rot + 180) % 360) - 180; // shortest way round
-      flights.push(
-        s.fly({
-          x: p.x,
-          y: p.y,
-          rot: rot,
-          scale: 1,
-          duration: launchMs,
-          delay: k * launchGap,
-          arc: ch * 0.9,
-          spin: (k % 2 ? -1 : 1) * 22,
-          peakLift: 0.6,
-          peakScale: 0.3,
-          overshoot: cw * 0.1,
-          z: B.TUNE.showZ + k,
-          trail: k % 2 === 0 ? '#f3c969' : null,
-          onStart: function (sp) {
-            if (my !== token) return;
-            if (k % 4 === 0) {
-              sfx('whoosh', { volume: 0.5, pitch: 0.9 + (k / 52) * 0.5 });
-              haptic('tick');
-            }
-            if (FX && k % 2 === 0) {
-              const c = B.toClient(sp.x + cw / 2, sp.y + ch / 2);
-              FX.burst(c.x, c.y, { kind: 'spark', count: 8, speed: cw * 5, size: Math.max(1.6, cw * 0.035) });
-            }
-          },
-        }).finished
+    if (G && typeof G.isPaused === 'function' && G.isPaused()) sh.measure = 1;
+    if (SOL.Bus) {
+      offs.push(
+        SOL.Bus.on('game:pause', function (e) {
+          if (!show || !e || e.reason !== 'modal') return;
+          if (e.paused) {
+            // measured on the next frames: the sheet may still be on its way into the document
+            show.measure = 1;
+            show.measureAgain = 20;
+          } else {
+            show.sheetTop = null;
+            show.measure = 0;
+            show.measureAgain = 0;
+            aimStage(show);
+          }
+        })
+      );
+      offs.push(
+        SOL.Bus.on('board:layout', function (layout) {
+          if (!show || !layout) return;
+          show.L = layout;
+          show.vw = root.innerWidth;
+          show.vh = root.innerHeight;
+          if (show.sheetTop !== null) show.measure = 2;
+          aimStage(show);
+        })
       );
     }
-    if (FX) stops.push(FX.confetti({ duration: 5200, density: 0.9 }));
 
-    Promise.all(flights)
-      .then(function () {
-        if (my !== token) return null;
-        // ---- act 2: wheel
-        if (FX) stops.push(FX.fireworks({ duration: 3000, intensity: 1 }));
-        haptic('win');
-        return new Promise(function (resolve) {
-          const h = A.tween({
-            duration: 3000,
-            ease: 'linear',
-            update: function (t) {
-              if (my !== token) return;
-              const e = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2; // inOutQuad
-              const turn = e * TAU * 1.25;
-              const breathe = 1 + 0.1 * Math.sin(t * PI * 3) * Math.sin(t * PI);
-              const env = Math.sin(t * PI);
-              for (let i = 0; i < 52; i++) {
-                const s = cards[i];
-                const k = seat[s.id];
-                const p = seatPos(k, turn, breathe);
-                s.x = p.x;
-                s.y = p.y;
-                s.rot = ((p.rot + 180) % 360) - 180;
-                // a wave of flips travelling round the ring (transform-only flip mode)
-                const w = 0.5 - 0.5 * Math.cos(TAU * (t * 2 - k / 52));
-                s.flipMode = 'spin';
-                s.flip = 180 * env * w;
-                s.scale = 1 + 0.12 * env;
-                s.z = B.TUNE.showZ + ((k + Math.floor((turn / TAU) * 52)) % 52);
-                B.touch(s);
-              }
-            },
-            done: function () {
-              for (let i = 0; i < 52; i++) {
-                cards[i].flip = 0;
-                cards[i].scale = 1;
-                B.touch(cards[i]);
-              }
-              resolve();
-            },
-          });
-          handles.push(h);
-          // a cancelled tween never calls done(): resolve anyway so the chain can end
-          h.finished.then(function (ok) {
-            if (!ok) resolve();
-          });
+    function beat(name) {
+      if (sh.fired[name]) return false;
+      sh.fired[name] = true;
+      return true;
+    }
+
+    /** Client-space point of a table-space point. */
+    function cx(x) {
+      return sh.L.left + x;
+    }
+    function cy(y) {
+      return sh.L.top + y;
+    }
+
+    /**
+     * The director: all 52 poses at time t (ms on the show clock). Everything is derived from t, the live
+     * stage and each card's slot (suit * 13 + (13 - rank): the kings lead their suits).
+     */
+    function direct(t, dt) {
+      const L = sh.L;
+      const cw = L.cardW;
+      const ch = L.cardH;
+      const f = fx();
+      sh.frame++;
+
+      // ---- the stage follows its target
+      if (sh.measure > 0 && --sh.measure === 0) {
+        sh.sheetTop = measureSheet();
+        aimStage(sh);
+      }
+      if (sh.measureAgain > 0 && --sh.measureAgain === 0) {
+        sh.sheetTop = measureSheet();
+        aimStage(sh);
+      }
+      const follow = 1 - Math.exp(-Math.min(dt, 60) / 230);
+      const st = sh.st;
+      st.cx += (sh.aim.cx - st.cx) * follow;
+      st.cy += (sh.aim.cy - st.cy) * follow;
+      st.a += (sh.aim.a - st.a) * follow;
+      st.b += (sh.aim.b - st.b) * follow;
+
+      // ---- the shape of the vortex right now
+      const focal = clamp(cw * 12, 800, 1800); // the same perspective as #cards (board.css)
+      const R0 = Math.max(cw * 1.5, Math.min(st.a - cw * 0.6, cw * 3.5));
+      const Hh = Math.max(ch * 1.2, Math.min(st.b * 2 - ch * 1.5, ch * 4.6));
+      const Rring = Math.max(cw * 1.5, Math.min(st.a - cw * 0.66, st.b * 1.5, cw * 3.3));
+      const w = inOutCubic(clamp((t - T.unwind) / (T.ring - T.unwind), 0, 1)); // 0 helix … 1 ring
+      const turns = lerp(2.35, 51 / 52, w);
+      const tsec = t / 1000;
+      const spin = 1.5 * tsec + 0.27 * tsec * tsec; // rad: it keeps accelerating
+      const tilt = lerp(0.3 + 0.16 * Math.sin(tsec * 1.7), 0.62, w); // rad: the camera keeps moving
+      const sinT = Math.sin(tilt);
+      const cosT = Math.cos(tilt);
+      let pulse = 1;
+      const p1 = (t - T.pulse1) / T.pulseMs;
+      const p2 = (t - T.pulse2) / T.pulseMs;
+      if (p1 > 0 && p1 < 1) pulse -= 0.2 * Math.sin(PI * p1);
+      if (p2 > 0 && p2 < 1) pulse -= 0.24 * Math.sin(PI * p2);
+      const squeeze = clamp((t - (T.burst - 190)) / 190, 0, 1);
+      pulse *= 1 - 0.42 * inCubic(squeeze); // the breath before the burst
+      const vScale = lerp(0.9, 0.84, w);
+
+      // ---- beats that are not tied to one card
+      if (t >= T.pulse1 && beat('p1')) ringBeat(f, st, Rring, 0);
+      if (t >= T.pulse2 && beat('p2')) ringBeat(f, st, Rring, 1);
+      if (t >= T.burst && beat('burst')) burstBeat(f, st, cw);
+      if (t >= total - T.tail && beat('tidy')) tidyBeat(f, L);
+
+      let sortNeeded = false;
+      for (let id = 0; id < 52; id++) {
+        const s = cards[id];
+        const suit = (id / 13) | 0;
+        const rank = (id % 13) + 1;
+        const k = suit * 13 + (13 - rank);
+        const launch = T.hush + suit * T.suitGap + (13 - rank) * T.cardGap;
+        let ph = sh.phase[id];
+
+        // ---- waiting on the foundation: the stacks draw breath
+        if (ph === 0) {
+          if (t < launch) {
+            if (!s.covered) {
+              const q = clamp(t / 140, 0, 1);
+              const fr = sh.from[id];
+              const breath = Math.sin(PI * clamp(t / T.hush, 0, 1));
+              s.x = lerp(fr.x, s.tx, q);
+              s.y = lerp(fr.y, s.ty, q) + ch * 0.03 * breath;
+              s.rot = fr.rot * (1 - q);
+              s.rx = fr.rx * (1 - q);
+              s.ry = fr.ry * (1 - q);
+              s.scale = lerp(fr.scale, 1, q) - 0.07 * breath;
+              B.touch(s);
+            }
+            continue;
+          }
+          // ---- launch
+          ph = sh.phase[id] = 1;
+          s.cover(false);
+          s.z = showZ + 100 + k;
+          const fr = sh.from[id];
+          fr.x = s.tx;
+          fr.y = s.ty;
+          fr.th0 = (spin + turns * TAU * (k / 51)) * DEG; // the slot's angle at launch
+          if (rank === 13) eruptBeat(f, s, suit, cw, ch);
+        }
+
+        // ---- the slot in the vortex / ring (also the target of a launch)
+        let x = 0;
+        let y = 0;
+        let sc = 1;
+        let rx = 0;
+        let ry = 0;
+        let rot = 0;
+        if (ph <= 2) {
+          const u = 1 - k / 51;
+          const th = spin + turns * TAU * (k / 51);
+          const R = lerp(R0 * (0.46 + 0.54 * u), Rring, w) * (w > 0 ? lerp(1, pulse, w) : 1);
+          const X = R * Math.sin(th);
+          const Z = R * Math.cos(th);
+          const Y = (0.5 - u) * Hh * (1 - w);
+          const Yt = Y * cosT + Z * sinT;
+          const Zt = -Y * sinT + Z * cosT;
+          const persp = focal / (focal - Zt);
+          x = st.cx + X * persp - cw / 2;
+          y = st.cy + Yt * persp - ch / 2;
+          sc = persp * vScale;
+          rx = -tilt * DEG;
+          ry = th * DEG;
+          sh.depth[id] = Zt;
+
+          if (ph === 1) {
+            const p = clamp((t - launch) / T.launchMs, 0, 1);
+            const fr = sh.from[id];
+            const e = outCubic(p);
+            const bell = 4 * p * (1 - p);
+            const sideways = (k % 2 ? 1 : -1) * cw * 0.55;
+            const fx0 = fr.x;
+            const fy0 = fr.y;
+            x = lerp(fx0, x, e) + sideways * bell * (1 - p);
+            y = lerp(fy0, y, e) - ch * 1.05 * bell * (1 - p * 0.6);
+            sc = lerp(1, sc, e) + 0.3 * bell;
+            rx = rx * e;
+            // winds up into the turning frame: starts flat (0), ends on the slot's own angle
+            ry = ry - fr.th0 + wrap180(fr.th0) * e;
+            rot = (k % 2 ? -1 : 1) * 38 * bell * (1 - p);
+            if (f && !lite && k % 3 === 0 && p < 0.9) {
+              f.trail(cx(x + cw / 2), cy(y + ch / 2), { color: k % 2 ? GOLD : SUIT_GLOW[suit], size: clamp(cw * 0.05, 2, 5) });
+            }
+            if (p >= 1) {
+              sh.phase[id] = 2;
+              sortNeeded = true;
+            }
+          } else if (t >= T.burst) {
+            // ---- the ring bursts: where does this card go?
+            sh.phase[id] = ph = 3;
+            const ddx = x + cw / 2 - st.cx;
+            const ddy = (y + ch / 2 - st.cy) * 1.7; // (undo the squash of the tilted ring: directions spread evenly)
+            const len = Math.hypot(ddx, ddy) || 1;
+            const ux = ddx / len;
+            const uy = ddy / len;
+            const edge = Math.min((st.a - cw * 0.5) / Math.max(0.001, Math.abs(ux)), (st.b - ch * 0.56) / Math.max(0.001, Math.abs(uy)));
+            const reach = [1, 0.56, 0.8, 0.36][k % 4] * (0.9 + 0.1 * hash(k, 1));
+            const size = [1.18, 0.8, 1, 0.68][k % 4];
+            const dirSpin = k % 2 ? 1 : -1;
+            const ryNow = wrap180(ry);
+            sh.from[id] = { x: x, y: y, rot: 0, rx: rx, ry: ryNow, scale: sc };
+            sh.burst[id] = {
+              x: st.cx + ux * edge * reach - cw / 2,
+              y: st.cy + uy * edge * reach - ch / 2,
+              ux: ux,
+              uy: uy,
+              rot: (hash(k, 2) - 0.5) * 56,
+              rx: (hash(k, 3) - 0.5) * 26,
+              ry: 360 * Math.round((ryNow + dirSpin * 430) / 360) + (hash(k, 4) - 0.5) * 30,
+              scale: size,
+              cx: st.cx,
+              cy: st.cy,
+            };
+            s.z = showZ + Math.round(size * 40) + (k % 4);
+          }
+        }
+
+        if (ph === 3) {
+          // ---- flung outwards, then hanging in the air
+          const b = sh.burst[id];
+          const fr = sh.from[id];
+          const homeAt = T.home + (rank - 1) * T.homeGap + suit * 12;
+          if (t >= homeAt) {
+            // ---- time to go home: remember where the card is
+            sh.phase[id] = ph = 4;
+            sh.from[id] = { x: s.x, y: s.y, rot: wrap180(s.rot), rx: wrap180(s.rx), ry: wrap180(s.ry), scale: s.scale, at: homeAt };
+            s.z = showZ + 200 + rank * 4 + suit;
+          } else {
+            const p = clamp((t - T.burst) / T.burstMs, 0, 1);
+            const e = outQuart(p);
+            const hang = Math.max(0, t - T.burst) / 1000;
+            const drift = cw * 0.22 * hang;
+            // (the stage may have moved since the burst: the constellation moves with it)
+            x = lerp(fr.x, b.x, e) + b.ux * drift + (st.cx - b.cx);
+            y = lerp(fr.y, b.y, e) + b.uy * drift + ch * 0.05 * Math.sin(hang * 5 + k) + (st.cy - b.cy);
+            sc = lerp(fr.scale, b.scale, e);
+            rot = lerp(fr.rot, b.rot, e) + 4 * Math.sin(hang * 3.1 + k * 1.7);
+            rx = lerp(fr.rx, b.rx, e) + 9 * Math.sin(hang * 4.3 + k);
+            ry = lerp(fr.ry, b.ry, e) + 14 * Math.sin(hang * 3.7 + k * 0.6) * e;
+          }
+        }
+
+        if (ph === 4) {
+          // ---- the cascade home
+          const fr = sh.from[id];
+          const p = clamp((t - fr.at) / T.homeMs, 0, 1);
+          if (p >= 1) {
+            sh.phase[id] = 5;
+            s.x = s.tx;
+            s.y = s.ty;
+            s.rot = 0;
+            s.rx = 0;
+            s.ry = 0;
+            s.scale = 1;
+            s.z = s.tz;
+            B.touch(s);
+            sh.landed++;
+            landBeat(f, s, suit, rank, cw, ch);
+            // the stack below is hidden again (the board keeps the top two of a foundation rendered)
+            if (rank > 2) cards[id - 2].cover(true);
+            continue;
+          }
+          const e = inOutCubic(p);
+          const bell = 4 * e * (1 - e);
+          x = lerp(fr.x, s.tx, e);
+          y = lerp(fr.y, s.ty, e) - ch * 0.5 * bell;
+          sc = lerp(fr.scale, 1, e) + 0.12 * bell;
+          rot = fr.rot * (1 - e);
+          rx = fr.rx * (1 - e);
+          ry = fr.ry * (1 - e);
+        } else if (ph === 5) {
+          continue;
+        }
+
+        s.x = x;
+        s.y = y;
+        s.scale = sc;
+        s.rot = rot;
+        s.rx = rx;
+        s.ry = ry;
+        B.touch(s);
+      }
+
+      // ---- depth order in the vortex: every few frames (a z-index change costs far more than a transform)
+      if (t < T.burst && (sortNeeded || sh.frame % (lite ? 6 : 4) === 0)) {
+        const order = sh.order;
+        const depth = sh.depth;
+        order.sort(function (a, b) {
+          return depth[a] - depth[b];
         });
-      })
-      .then(function () {
-        if (my !== token) return null;
-        // ---- act 3: home
-        sfx('whoosh', { duration: 700 });
-        return B.release('show', {
-          how: 'fly',
-          stagger: 16,
-          duration: 560,
-          arc: ch * 0.7,
-          spin: 14,
-          peakLift: 0.5,
-          peakScale: 0.12,
+        for (let i = 0; i < 52; i++) {
+          const id = order[i];
+          if (sh.phase[id] === 2) cards[id].z = showZ + i;
+        }
+      }
+    }
+
+    function eruptBeat(f, s, suit, cw, ch) {
+      sfx('whoosh', { pitch: 0.82 + suit * 0.12, volume: 0.8, duration: 520 });
+      haptic(suit === 0 ? 'heavy' : 'thud');
+      B.pulse(s.pile, SUIT_GLOW[suit]);
+      if (!f) return;
+      const x = cx(s.tx + cw / 2);
+      const y = cy(s.ty + ch / 2);
+      f.ring(x, y, { color: SUIT_GLOW[suit], radius: cw * 1.5, width: Math.max(2, cw * 0.05), duration: 520 });
+      f.burst(x, y, { kind: 'suit', suit: suit, count: lite ? 6 : 14, size: clamp(cw * 0.12, 5, 14), speed: cw * 6, gravity: cw * 9, spread: PI * 0.9 });
+      f.burst(x, y, { kind: 'spark', count: lite ? 8 : 20, speed: cw * 7, size: clamp(cw * 0.04, 1.6, 3.4), gravity: cw * 8, spread: PI * 0.8 });
+    }
+
+    function ringBeat(f, st, R, n) {
+      haptic('heavy');
+      sfx('place', { pitch: n ? 0.8 : 0.7, volume: 1.1 });
+      if (!f) return;
+      f.ring(cx(st.cx), cy(st.cy), { color: GOLD, radius: R * (1.25 + n * 0.2), width: Math.max(2, R * 0.03), duration: 520 });
+      if (!lite) f.burst(cx(st.cx), cy(st.cy), { kind: 'star', count: 10, speed: R * 1.6, size: clamp(R * 0.05, 4, 10) });
+    }
+
+    function burstBeat(f, st, cw) {
+      haptic('win');
+      sfx('whoosh', { pitch: 0.7, volume: 1.1, duration: 640 });
+      sfx('autocomplete', { volume: 0.8 });
+      if (!f) return;
+      const x = cx(st.cx);
+      const y = cy(st.cy);
+      const reach = Math.min(st.a, st.b);
+      f.ring(x, y, { color: '#ffffff', radius: reach * 1.5, width: Math.max(3, cw * 0.08), duration: 620 });
+      f.ring(x, y, { color: GOLD, radius: reach * 1.1, width: Math.max(2, cw * 0.05), duration: 760 });
+      f.burst(x, y, { kind: 'spark', count: lite ? 20 : 46, speed: reach * 3.4, size: clamp(cw * 0.05, 2, 4), gravity: cw * 3 });
+      f.burst(x, y, { kind: 'star', count: lite ? 10 : 24, speed: reach * 2.2, size: clamp(cw * 0.12, 5, 12) });
+      stops.push(f.fireworks({ duration: 1700, intensity: lite ? 0.5 : 1 }));
+      stops.push(f.confetti({ duration: 2300, density: lite ? 0.4 : 0.85 }));
+    }
+
+    function landBeat(f, s, suit, rank, cw, ch) {
+      B.pulse(s.pile, SUIT_GLOW[suit]);
+      if (suit === 0) {
+        // one note per rank: thirteen steps up the scale, the kings land on the tonic
+        note(rank, { volume: 0.75 });
+        haptic(rank === 13 ? 'success' : 'tick');
+      }
+      if (f && !lite && (rank === 13 || (rank + suit) % 3 === 0)) {
+        f.burst(cx(s.tx + cw / 2), cy(s.ty + ch / 2), {
+          kind: 'spark',
+          count: rank === 13 ? 12 : 4,
+          speed: cw * 4,
+          size: clamp(cw * 0.035, 1.6, 3),
+          gravity: cw * 7,
         });
-      })
-      .then(function () {
+      }
+    }
+
+    function tidyBeat(f, L) {
+      sfx('place', { volume: 0.9 });
+      if (!f) return;
+      for (let i = 0; i < 4; i++) {
+        const p = L.piles[FOUNDATIONS[i]];
+        f.shimmer({ x: cx(p.x), y: cy(p.y), width: L.cardW, height: L.cardH }, { radius: L.cardW * 0.075, duration: 700 });
+      }
+    }
+
+    timeline = A.tween({
+      duration: total,
+      ease: 'linear',
+      update: function (e) {
+        if (my !== token || !show) return;
+        const t = e * total;
+        const dt = Math.max(0, t - sh.last);
+        sh.last = t;
+        direct(t, dt);
+      },
+      done: function () {
         if (my !== token) return;
-        sfx('place');
-        haptic('thud');
+        timeline = null;
+        // every card is home: hand them back exactly on their places
+        B.release('show', { how: 'instant' });
+        B.flush();
         end(true);
-      });
+      },
+    });
 
     return current;
   }
 
-  /** The player tapped: the cards go straight home, quickly. */
+  /** Gives the cards back to the board. `home`: they fly to their places; otherwise they stay where they are. */
+  function handBack(home) {
+    const B = SOL.Board;
+    if (!B || !B.ready) return;
+    if (home) {
+      const L = B.layout();
+      B.release('show', {
+        how: 'fly',
+        stagger: 3,
+        duration: 330,
+        arc: L ? L.cardH * 0.25 : 0,
+        peakLift: 0,
+        peakScale: 0.03,
+        spin: 0,
+        overshoot: 0,
+      });
+      return;
+    }
+    const all = B.sprites;
+    for (let i = 0; i < all.length; i++) {
+      if (all[i].held === 'show') {
+        all[i].held = null;
+        all[i].soft = false;
+      }
+    }
+    B.sync('glide'); // whatever the caller does next starts from a consistent table
+  }
+
+  /** The player tapped: straight to the tidy end state. */
   function skip() {
     if (!playing) return;
     token++;
-    cleanupEffects();
-    const B = SOL.Board;
-    if (B && B.ready) {
-      B.release('show', { how: 'fly', stagger: 3, duration: 300, peakLift: 0.3, peakScale: 0.04, spin: 0 });
+    stopEmitters();
+    if (timeline) {
+      const h = timeline;
+      timeline = null;
+      h.cancel();
+      handBack(true);
+      sfx('whoosh', { volume: 0.6, duration: 300 });
+      haptic('tap');
     }
     end(false);
   }
@@ -267,17 +754,12 @@
   function stop() {
     if (!playing) return;
     token++;
-    cleanupEffects();
-    const B = SOL.Board;
-    if (B && B.ready) {
-      const all = B.sprites;
-      for (let i = 0; i < all.length; i++) {
-        if (all[i].held === 'show') {
-          all[i].held = null;
-          all[i].soft = false;
-        }
-      }
-      B.sync('glide'); // whatever the caller does next starts from a consistent table
+    stopEmitters();
+    if (timeline) {
+      const h = timeline;
+      timeline = null;
+      h.cancel();
+      handBack(false);
     }
     try {
       if (SOL.FX) SOL.FX.clear();
@@ -294,5 +776,9 @@
     isPlaying: function () {
       return playing;
     },
+    get DURATION() {
+      return duration();
+    },
+    TIMELINE: T,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

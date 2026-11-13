@@ -974,6 +974,24 @@
    * Drag down to dismiss (sheets only). The grab bar and the header always drag; the body drags when it has
    * nothing to scroll, or when it is scrolled to the top and the finger moves down (see touch-action in ui.css).
    */
+  /**
+   * Downward speed (px/s) at the moment of release: how far the pointer travelled during the last 100 ms
+   * before it. A pointer that was moved fast and then held still is not a flick — its speed is 0.
+   */
+  function releaseVelocity(trail, releaseT) {
+    if (!trail || trail.length < 2) return 0;
+    const last = trail[trail.length - 1];
+    const now = releaseT > last.t ? releaseT : last.t;
+    let from = null;
+    for (let i = trail.length - 2; i >= 0; i--) {
+      if (now - trail[i].t > 100) break;
+      from = trail[i];
+    }
+    if (!from) return 0; // nothing moved in the last 100 ms
+    const dt = now - from.t;
+    return dt > 0 ? ((last.y - from.y) / dt) * 1000 : 0;
+  }
+
   function attachDrag(layer) {
     const sheet = layer.sheet;
     let drag = null;
@@ -999,7 +1017,7 @@
 
       const height = sheet.offsetHeight || 1;
       const y = layer.y || 0;
-      const v = d.v * 1000; // px per second
+      const v = releaseVelocity(d.trail, e && e.timeStamp ? e.timeStamp : 0); // px per second
       // Let go after a deliberate pull (a third of the sheet, 180 px at most — tall sheets must not need more
       // thumb travel than that) or with a flick: it leaves. Anything less springs back.
       const dismiss = !cancelled && layer.spec.dismissible !== false && y > 12 && (y > Math.min(height * 0.32, 180) || v > 650);
@@ -1027,7 +1045,7 @@
       if (t.closest && t.closest('input, [data-no-drag]')) return;
       const inBody = layer.body.contains(t);
       if (inBody && layer.scrollable && layer.body.scrollTop > 0) return;
-      drag = { id: e.pointerId, x: e.clientX, y: e.clientY, offset: 0, active: false, lastY: e.clientY, lastT: e.timeStamp, v: 0 };
+      drag = { id: e.pointerId, x: e.clientX, y: e.clientY, offset: 0, active: false, trail: [{ t: e.timeStamp, y: e.clientY }] };
     });
 
     sheet.addEventListener('pointermove', (e) => {
@@ -1053,13 +1071,9 @@
           /* capture is a nicety */
         }
       }
-      const dt = e.timeStamp - drag.lastT;
-      if (dt > 0) {
-        const inst = (e.clientY - drag.lastY) / dt;
-        drag.v = drag.v * 0.6 + inst * 0.4; // px per ms, smoothed
-        drag.lastY = e.clientY;
-        drag.lastT = e.timeStamp;
-      }
+      // where the pointer has been lately (for the speed at the moment of release)
+      drag.trail.push({ t: e.timeStamp, y: e.clientY });
+      while (drag.trail.length > 2 && e.timeStamp - drag.trail[0].t > 160) drag.trail.shift();
       let y = dy - drag.offset;
       if (y < 0) y = -Math.pow(-y, 0.6); // pulling up only stretches a little
       setSheetY(layer, y);
