@@ -18,11 +18,15 @@
  *   - the file loads as a classic script (no require / module), as index.html loads it.
  *
  * Time. The suite must pass on a busy machine (other test files, a shared CI runner), where a
- * process can be kept waiting at any moment. So no test depends on how long something really
- * took, beyond "at least its budget" and a very loose upper bound (BUSY_MS). Where time is the
- * subject (maxMs, budgetMs, sliceMs) the search runs on a test clock that only moves when the
- * solver looks at it (testClock): when it stops, how long a slice is and how many slices fit in
- * a budget are then exact numbers, the same on every machine and every run.
+ * process can be kept waiting at any moment, also for longer than a whole maxMs or budgetMs. So
+ * no test depends on how long something really took, beyond "at least its budget" and a very
+ * loose upper bound (BUSY_MS), and no test on the real clock asserts how much a search got done
+ * before its time ran out: a search that was kept waiting all that time has honestly done
+ * nothing. Where the answer of a search is asserted, time is not what ends it (nodesOnly, or a
+ * 20 s budget for a seed search). Where time is the subject (maxMs, budgetMs, sliceMs and their
+ * defaults) the search runs on a test clock that only moves when the solver looks at it
+ * (testClock): when it stops, how much it searched until then, how long a slice is and how many
+ * slices fit in a budget are then exact numbers, the same on every machine and every run.
  *
  * The measurements quoted in the solver's header come from the last test. It is skipped unless
  * asked for:   SOLVER_BENCH=1 node --test "solitaire/tests/solver.test.js"
@@ -50,8 +54,9 @@ function nodesOnly(maxNodes) {
 /**
  * The only upper bound these tests put on real time. They run next to other work (the other test
  * files, whatever else the machine or the CI runner is doing), and a process that is kept waiting
- * for the CPU must not fail a test. So what a search did is asserted through its own results
- * (nodes, reason, tried, certified) and, where time itself is the subject, on a test clock
+ * for the CPU must not fail a test. So on the real clock a search that time may end is asserted
+ * only through what holds however long it was kept waiting (reason, certified, the seed that
+ * belongs to `tried`, `ms` not below the limit); how much it searched is asserted on a test clock
  * (testClock below), where it is exact. Real time only has to stay below the limit plus this
  * much: a search that ignored its limit would run for minutes (the tests give it maxNodes 1e9).
  */
@@ -88,6 +93,21 @@ function testClock(stepMs) {
     return clock.time;
   };
   return clock;
+}
+
+/**
+ * fn() on a testClock(stepMs), for searches that return before they are done with the clock
+ * (solve, findWinnableSeed; not the async one). Returns { r: what fn returned, reads: how often
+ * the clock was looked at }.
+ */
+function onTestClock(stepMs, fn) {
+  const clock = testClock(stepMs);
+  try {
+    const r = fn();
+    return { r: r, reads: clock.reads };
+  } finally {
+    clock.restore();
+  }
 }
 
 function deal(seed, drawCount) {
@@ -445,10 +465,11 @@ describe('solve: every solution replays to a win through the engine', () => {
     assert.equal(r.nodes, 0);
     assert.equal(r.reason, 'solved');
 
-    // one action before the end
+    // one action before the end (the default node limit, but no time limit that a busy machine
+    // could run into: the answer is asserted)
     const almost = Engine.clone(st);
     for (let i = 0; i < line.moves.length - 1; i++) Engine.apply(almost, line.moves[i]);
-    const last = Solver.solve(almost);
+    const last = Solver.solve(almost, nodesOnly(Solver.DEFAULTS.maxNodes));
     assert.equal(last.solved, true);
     assert.equal(last.moves.length, 1);
     assertWins(almost, last.moves, 'last move');
@@ -467,7 +488,7 @@ describe('solve: every solution replays to a win through the engine', () => {
       fu.push(card(s, 13));
     }
     const kings = makeState({ piles: piles, faceUp: fu });
-    const r = Solver.solve(kings);
+    const r = Solver.solve(kings, nodesOnly(Solver.DEFAULTS.maxNodes));
     assert.equal(r.solved, true);
     assert.equal(r.moves.length, 4);
     assertWins(kings, r.moves, 'four kings');
@@ -486,7 +507,7 @@ describe('solve: every solution replays to a win through the engine', () => {
       }
       const buried = makeState({ piles: p2, faceUp: fu2 }, drawCount);
       const truth = bruteForceWinnable(buried, 100000);
-      const r2 = Solver.solve(buried);
+      const r2 = Solver.solve(buried, nodesOnly(Solver.DEFAULTS.maxNodes));
       assert.equal(r2.solved, truth, 'draw ' + drawCount + ': solver and brute force agree');
       if (r2.solved) assertWins(buried, r2.moves, 'buried spades, draw ' + drawCount);
       else assert.equal(r2.reason, 'exhausted');
@@ -530,7 +551,7 @@ describe('solve: every solution replays to a win through the engine', () => {
     const dead = makeState({ piles: piles, faceUp: tops }, 3);
     assert.deepEqual(Engine.legalMoves(dead), []);
     assert.equal(Engine.canDraw(dead), false);
-    const r = Solver.solve(dead);
+    const r = Solver.solve(dead, nodesOnly(Solver.DEFAULTS.maxNodes));
     assertResultShape(r, 0);
     assert.equal(r.solved, false);
     assert.equal(r.reason, 'exhausted');
@@ -591,7 +612,7 @@ describe('solve: limits', () => {
       for (const maxNodes of [0, 1, 2, 10, 51]) {
         for (let seed = 1; seed <= 20; seed++) {
           const t0 = performance.now();
-          const r = Solver.solve(deal(seed, drawCount), { maxNodes: maxNodes });
+          const r = Solver.solve(deal(seed, drawCount), nodesOnly(maxNodes));
           const took = performance.now() - t0;
           assertResultShape(r, maxNodes);
           assert.equal(r.solved, false, 'a win takes at least 52 nodes');
@@ -646,10 +667,12 @@ describe('solve: limits', () => {
         assert.equal(r.solved, false);
         assert.equal(r.reason, 'time');
         assert.ok(r.ms >= maxMs - 0.001, 'it used its time (' + r.ms.toFixed(2) + ' of ' + maxMs + ' ms)');
-        // What it did in that time: a small part of the search (a busy machine only makes it less).
-        assert.ok(r.nodes > 0 && r.nodes < 200000, r.nodes + ' nodes');
+        // What it did in that time: a small part of the search. A busy machine only makes it
+        // less, down to nothing at all when the process is kept waiting for the whole of maxMs
+        // before the first look at the clock, so "it searched" is not asserted here.
+        assert.ok(r.nodes < 200000, r.nodes + ' nodes');
         // How long that really took is only bounded loosely here (see BUSY_MS); the test below
-        // puts the same search on a test clock, where "stopped at the limit" is exact.
+        // puts the same search on a test clock, where "searched, and stopped at the limit" is exact.
         assert.ok(took < maxMs + BUSY_MS, 'stopped: ' + took.toFixed(1) + ' ms for maxMs ' + maxMs);
       }
     }
@@ -703,19 +726,29 @@ describe('solve: limits', () => {
   test('limits that are not finite numbers mean the defaults; negative ones mean zero', () => {
     const seed = findSeed(1, 20000, (r) => r.reason === 'nodes');
     const st = deal(seed, 1);
+    const hard = deal(hardSeed(1), 1);
+    // Which default ended a search is asserted on a test clock, where it is exact: a fine one
+    // (the default maxMs is then far away, the default maxNodes ends the search) and a coarse
+    // one (the default maxMs ends a search that has no node limit to speak of).
+    const FINE = 1 / 1024; // ms per look at the clock
+    const COARSE = 1 / 16;
     for (const bad of [undefined, null, NaN, Infinity, -Infinity, '100', {}, true]) {
-      const r = Solver.solve(st, { maxNodes: bad, maxMs: bad });
+      const r = onTestClock(FINE, () => Solver.solve(st, { maxNodes: bad, maxMs: bad })).r;
       assertResultShape(r, Solver.DEFAULTS.maxNodes);
       assert.equal(r.solved, false);
-      assert.ok(r.nodes > 100, 'it searched');
-      assert.ok(r.ms < Solver.DEFAULTS.maxMs + 150);
+      assert.equal(r.reason, 'nodes');
+      assert.equal(r.nodes, Solver.DEFAULTS.maxNodes);
+      const timed = onTestClock(COARSE, () => Solver.solve(hard, { maxNodes: 1e9, maxMs: bad }));
+      assert.equal(timed.r.reason, 'time');
+      assert.equal(timed.reads, Solver.DEFAULTS.maxMs / COARSE + 2, 'looks at the clock for the default maxMs');
+      assert.equal(timed.r.ms, Solver.DEFAULTS.maxMs + COARSE);
       // one bad limit does not switch the other one off
-      assert.equal(Solver.solve(st, { maxNodes: 300, maxMs: bad }).nodes, 300);
+      assert.equal(onTestClock(COARSE, () => Solver.solve(st, { maxNodes: 300, maxMs: bad })).r.nodes, 300);
       assert.equal(Solver.solve(st, { maxNodes: bad, maxMs: 0 }).reason, 'time');
     }
     // "no time left" (a deadline that has passed) must not start a search
     assert.deepEqual(
-      [Solver.solve(st, { maxMs: -3 }).reason, Solver.solve(st, { maxMs: -3 }).nodes, Solver.solve(st, { maxNodes: -1 }).reason, Solver.solve(st, { maxNodes: -1 }).nodes],
+      [Solver.solve(st, { maxMs: -3 }).reason, Solver.solve(st, { maxMs: -3 }).nodes, Solver.solve(st, nodesOnly(-1)).reason, Solver.solve(st, nodesOnly(-1)).nodes],
       ['time', 0, 'nodes', 0]
     );
     for (const opts of [undefined, null, 5, 'x']) {
@@ -856,14 +889,27 @@ describe('findWinnableSeed', () => {
   });
 
   test('default options: certified well within the default budget', () => {
-    let certified = 0;
+    // On the real clock: a call without options comes back with a certified seed, or without
+    // one only when its whole budget is used up (on a busy machine that can happen: the budget
+    // is wall-clock time).
     for (let i = 0; i < 20; i++) {
       const t0 = performance.now();
       const r = Solver.findWinnableSeed();
       const took = performance.now() - t0;
       assertSeedResult(r, 1);
+      if (!r.certified) assert.ok(took >= Solver.DEFAULTS.budgetMs - 1, 'gave up after ' + took.toFixed(1) + ' ms');
       assert.ok(took < Solver.DEFAULTS.budgetMs + BUSY_MS, took.toFixed(1) + ' ms');
-      if (r.certified) certified++;
+    }
+    // "Well within" is asserted on a test clock that runs about as fast as one desktop core
+    // (1/64 ms per look at the clock, i.e. a million search steps a second). The default budget
+    // is then 16000 looks; the longest of 3000 such calls took about 7600.
+    const STEP = 1 / 64;
+    let certified = 0;
+    for (let i = 0; i < 20; i++) {
+      const hunt = onTestClock(STEP, () => Solver.findWinnableSeed());
+      assertSeedResult(hunt.r, 1);
+      assert.ok(hunt.reads <= Solver.DEFAULTS.budgetMs / STEP + 2, hunt.reads + ' looks at the clock');
+      if (hunt.r.certified) certified++;
     }
     assert.ok(certified >= 18, certified + ' of 20 certified');
     const r3 = Solver.findWinnableSeed({ drawCount: 3 });
