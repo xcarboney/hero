@@ -75,8 +75,8 @@ Things to know before changing code:
 - **Cards and piles.** A card is an id from 0 to 51: `suit = floor(id / 13)` (0 spades, 1 hearts,
   2 clubs, 3 diamonds) and `rank = id % 13 + 1`. Piles are `stock`, `waste`, `f0`..`f3`
   (foundations, one per suit) and `t0`..`t6` (tableau columns).
-- **`js/core/` loads in Node.** The tests `require` these files directly. `rng.js`, `engine.js`
-  and `solver.js` are pure logic with no browser APIs; `bus.js`, `store.js` and `platform.js`
+- **`js/core/` loads in Node.** The tests `require` these files directly. `bus.js`, `rng.js`,
+  `engine.js` and `solver.js` are pure logic with no browser APIs; `store.js` and `platform.js`
   use browser APIs only behind checks, so they still load without a DOM. Keep it that way.
 - **Styles.** `css/base.css` holds the design tokens, the four table themes and the page shell;
   the other stylesheets build on it.
