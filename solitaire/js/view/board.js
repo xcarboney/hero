@@ -108,7 +108,10 @@
  *   Board.touch(sprite)              "I changed this sprite's values": schedules its style write
  *   Board.flush()                    write the styles of touched sprites right now (normally once per frame)
  *   Board.pulse(pileId, color?)      the slot's arrival ring
- *   Board.scorePop(x, y, delta)      "+10" at a table-space point (canvas text, or a DOM label when FX is off)
+ *   Board.scorePop(x, y, delta)      "+10" for the card whose top-left corner is the table-space point (x, y):
+ *                                    gold on a dark pill, rising from the card's top edge — in the top row,
+ *                                    where that would run under the HUD, it plays on the lower half of the card
+ *                                    instead, clear of its rank and suit (canvas, or a DOM label when FX is off)
  *   Board.foundationArrive(sprite, { quiet })   the whole arrival effect (ring, particles, pitch, haptic)
  *   Board.TUNE                       every timing / distance constant (mutable: tune them live)
  *   Board.busyCount() -> number      sprites with a running animation
@@ -1134,7 +1137,11 @@
 
     if (side) {
       gap = Math.min(clamp(cardW * sideGapK * 1.25, 5, 30), (availW - 10 * cardW) / 11);
-      const sep = gap * 2; // between the side groups and the columns
+      // Between the side groups and the columns: two gaps at least and, where the outer margins have the room,
+      // up to 0.6 of a card — the 2 x 2 foundation block (and the stock) must read as groups of their own, not
+      // as two more columns.
+      const spare = Math.max(0, availW - 10 * cardW - 11 * gap);
+      const sep = gap * 2 + Math.min(spare / 2, Math.max(0, cardW * 0.6 - gap * 2));
       const total = 10 * cardW + 7 * gap + 2 * sep;
       const x0 = padL + (availW - total) / 2;
       const step = cardW + gap;
@@ -1743,7 +1750,7 @@
     if (y - rise < L.cardH * 0.08) {
       // The top row (a card reached its foundation, a recycle): the label can neither rise over the HUD nor
       // may it settle on the rank and suit of the card that has just landed. It plays on the lower half of
-      // that card — from 0.84 of its height up to the middle — on a dark plate, so it reads on ivory.
+      // that card — from 0.84 of its height up to the middle.
       y = L.topY + L.cardH * 0.84;
       rise = L.cardH * 0.34;
       onCard = true;
@@ -1756,7 +1763,7 @@
         size: clamp(L.cardW * 0.36, 15, 30),
         rise: rise,
         duration: 950,
-        plate: onCard,
+        plate: true, // a dark pill, like the DOM label below: score labels play over cards, and gold on ivory is weak
       });
       return;
     }
@@ -3156,12 +3163,14 @@
     for (let i = 0; i < d.sprites.length; i++) {
       const s = d.sprites[i];
       if (invalid && !reduced()) {
-        // flies home along a curve and shakes its head
-        const dist = Math.hypot(s.tx - s.x, s.ty - s.y);
+        // flies home along a curve and shakes its head — AS a run: every card on the lead card's curve (one
+        // duration, one bow) and only a breath apart, so the run trails a little but never opens into a row
+        const lead = d.sprites[0];
+        const dist = Math.hypot(lead.tx - lead.x, lead.ty - lead.y);
         place(s, 'fly', {
           duration: clamp(240 + dist * 0.35, 260, 460),
-          delay: i * 18,
-          side: (s.tx < s.x ? 1 : -1) * Math.min(L.cardW * 0.7, dist * 0.16),
+          delay: i * 5,
+          side: (lead.tx < lead.x ? 1 : -1) * Math.min(L.cardW * 0.7, dist * 0.16),
           peakLift: 0.2,
           peakScale: 0,
           overshoot: 0,
