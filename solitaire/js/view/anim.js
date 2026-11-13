@@ -986,21 +986,28 @@
     }
   }
 
-  /** Anything stagger/all accept -> a promise that never rejects. */
+  /** Anything stagger/all accept -> a promise that never rejects (and this function never throws). */
   function toPromise(v) {
     if (v === null || v === undefined) return Promise.resolve(v);
-    if (Array.isArray(v)) return all(v);
-    if (isObj(v) || isFn(v)) {
-      const fin = v.finished;
-      if (fin && isFn(fin.then)) return fin;
-      if (isFn(v.then)) {
-        return Promise.resolve(v).then(null, function (err) {
-          report('awaited promise', err);
-          return false;
-        });
+    try {
+      if (Array.isArray(v)) return all(v);
+      if (isObj(v) || isFn(v)) {
+        const fin = v.finished;
+        if (fin && isFn(fin.then)) {
+          // our own handles never reject; a foreign `finished` promise might
+          return v instanceof Tween || v instanceof Spring ? fin : Promise.resolve(fin).then(null, swallow);
+        }
+        if (isFn(v.then)) return Promise.resolve(v).then(null, swallow);
       }
+    } catch (err) {
+      return Promise.resolve(swallow(err));
     }
     return Promise.resolve(v);
+  }
+
+  function swallow(err) {
+    report('awaited promise', err);
+    return false;
   }
 
   class Stagger {
@@ -1026,13 +1033,16 @@
       const items = this.items;
       const gap = this.gap;
       const prevCredit = credit;
-      while (this.alive && this.index < items.length) {
-        const due = this.index * gap;
-        if (!all && this.time < due) break;
-        credit = all ? prevCredit : Math.max(0, this.time - due);
-        this.start(this.index++);
+      try {
+        while (this.alive && this.index < items.length) {
+          const due = this.index * gap;
+          if (!all && this.time < due) break;
+          credit = all ? prevCredit : Math.max(0, this.time - due);
+          this.start(this.index++);
+        }
+      } finally {
+        credit = prevCredit; // whatever happens, nothing created later may inherit the back-dating
       }
-      credit = prevCredit;
       if (this.alive && this.index >= items.length) this.close();
     }
 

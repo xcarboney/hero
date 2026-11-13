@@ -30,6 +30,7 @@
  *        origin omitted / 'top': rains from above the top edge across the whole width.
  *        origin { x, y, angle = -PI/2, spread = 1.3 }: a cannon firing from that point.
  *        duration may be Infinity (until stop()). stop() ends the emission; airborne pieces finish falling.
+ *        Rain never takes more than 70% of the particle pool, so bursts and fireworks always find room.
  *   FX.fireworks({ duration = 4500, intensity = 1, colors }) -> stop()
  *        shells rise from the bottom edge and burst (peony, ring, two-colour, willow and suit-shaped shells).
  *   FX.shimmer(rect, { color, duration = 900, radius })
@@ -47,12 +48,21 @@
  *   FX.stats() -> { particles, rings, texts, shimmers, rockets, sprites, awake, quality, cap, dpr,
  *                   frameMs, avgFrameMs }                      (extra) for tests and tuning
  *
+ * floatText, shimmer, confetti and fireworks always draw on the front canvas. Front-canvas order, bottom to top:
+ * shimmers, particles, rockets, rings, texts.
+ *
+ * A typical "card reached its foundation" recipe (see dev/fx-demo.html `fx.foundation`):
+ *   FX.ring(cx, cy, { radius: cardW * 1.1 });   FX.burst(cx, cy, { kind: 'suit', suit, count: 10 });
+ *   FX.burst(cx, cy, { kind: 'spark', count: 14 });   FX.floatText(cx, top - 6, '+10');
+ *   FX.shimmer(cardRect, { radius: cardW * 0.075 });
+ *
  * Guarantees
  * ----------
  * - Every call is a silent no-op before init() and while SOL.Anim.reduced is true (confetti/fireworks then
  *   return a no-op stop function). Switching reduced motion on clears whatever is on screen.
  * - Particles live in pre-allocated typed arrays (hard cap: 1000, 500 in 'low'); when the cap is reached new
- *   particles are dropped. The frame loop allocates nothing; shapes are cached sprites drawn with drawImage.
+ *   particles are dropped. The frame loop allocates nothing; shapes are sprites drawn once per (kind, colour),
+ *   cached, and blitted with drawImage.
  * - The loop is a SOL.Anim.frame subscription that exists only while there is something to draw; only the
  *   region touched by the previous frame is cleared. With only the ambient layer active the back canvas is
  *   redrawn at ~30fps.
@@ -271,9 +281,19 @@
     return inited && !isReduced();
   }
 
+  /** `v` when it is a finite number, else the fallback (NaN and ±Infinity are not values we can draw). */
   function num(v, fallback) {
-    return typeof v === 'number' && v === v ? v : fallback;
+    return typeof v === 'number' && v - v === 0 ? v : fallback;
   }
+
+  function clampTo(v, min, max) {
+    return v < min ? min : v > max ? max : v;
+  }
+
+  // Upper bounds for caller-supplied values: generous for any real effect, but a typo (or garbage) can no
+  // longer park an immortal particle on screen or ask the rasteriser for a kilometre-wide sprite.
+  const MAX_LIFE = 60000; // ms, also for ring / text / shimmer durations
+  const MAX_SIZE = 200; // px radius
 
   function scaled(n) {
     return quality === 'low' ? Math.ceil(n * 0.5) : n;
@@ -504,7 +524,8 @@
     let idx = map.get(color);
     if (idx !== undefined) return idx;
     if (sprites.length >= MAX_SPRITES) {
-      // Cache full (someone is generating colours): reuse any sprite of this kind.
+      // Cache full (someone is generating colours): reuse any sprite of this kind. Only a kind that has no
+      // sprite at all may still add one, so the cache is bounded by MAX_SPRITES + the number of kinds.
       const first = map.values().next();
       if (!first.done) return first.value;
     }
@@ -1585,11 +1606,13 @@
     } else {
       speed = 320; gravity = 560; life = 700; size = 2.4; drag = 1.6; palette = PAL_SPARK; sprKind = S_GLOW;
     }
-    speed = num(o.speed, speed * unit);
-    gravity = num(o.gravity, gravity * unit);
+    speed = clampTo(num(o.speed, speed * unit), -20000, 20000);
+    gravity = clampTo(num(o.gravity, gravity * unit), -50000, 50000);
     life = num(o.life, life);
     size = num(o.size, size * unit);
     if (!(life > 0) || !(size > 0)) return;
+    if (life > MAX_LIFE) life = MAX_LIFE;
+    if (size > MAX_SIZE) size = MAX_SIZE;
     const angle = num(o.angle, -PI / 2);
     const spread = num(o.spread, TAU);
     const custom = typeof o.colors === 'string' ? o.colors : Array.isArray(o.colors) && o.colors.length ? o.colors : null;
@@ -1600,7 +1623,7 @@
     if (kind === K_SUIT && suit === -1) {
       // a mix of all four suits, each in its own colour unless colours were given
       for (let s = 0; s < 4; s++) {
-        const col = typeof palette === 'string' ? palette : palette ? palette[s % palette.length] : s % 2 === 1 ? RED : INK;
+        const col = typeof palette === 'string' ? palette : palette ? String(palette[s % palette.length]) : s % 2 === 1 ? RED : INK;
         tmpSpr[nSpr++] = sprite(S_SUIT + s, col);
       }
     } else if (typeof palette === 'string') {
@@ -1652,7 +1675,15 @@
     const width = num(o.width, 3);
     const duration = num(o.duration, 500);
     if (!(radius > 0) || !(width > 0) || !(duration > 0)) return;
-    addRing(num(x, 0), num(y, 0), typeof o.color === 'string' ? o.color : GOLD, radius, width, duration, layer);
+    addRing(
+      num(x, 0),
+      num(y, 0),
+      typeof o.color === 'string' ? o.color : GOLD,
+      radius > 4000 ? 4000 : radius,
+      width > MAX_SIZE ? MAX_SIZE : width,
+      duration > MAX_LIFE ? MAX_LIFE : duration,
+      layer
+    );
     wake();
   }
 
@@ -1666,7 +1697,7 @@
     const layer = o.layer === 'back' ? BACK : FRONT;
     if (!layers[layer].ctx) return;
     const color = typeof o.color === 'string' ? o.color : GOLD;
-    const size = o.size > 0 ? +o.size : 2.6;
+    const size = clampTo(num(o.size, 2.6), 0.5, 60);
     x = num(x, 0);
     y = num(y, 0);
     const spr = sprite(S_GLOW, color);
@@ -1726,10 +1757,13 @@
     if (text === null || text === undefined) return;
     text = String(text);
     if (!text) return;
+    if (text.length > 80) text = text.slice(0, 80);
     o = o || EMPTY;
-    const duration = num(o.duration, 900);
-    const size = num(o.size, 22);
+    let duration = num(o.duration, 900);
+    let size = num(o.size, 22);
     if (!(duration > 0) || !(size > 0)) return;
+    if (duration > MAX_LIFE) duration = MAX_LIFE;
+    if (size > 300) size = 300;
     if (textCount >= texts.length) {
       // full: drop the one closest to its end
       let best = 0;
@@ -1745,7 +1779,7 @@
     t.text = text;
     t.color = typeof o.color === 'string' ? o.color : GOLD;
     t.size = size;
-    t.rise = num(o.rise, 46);
+    t.rise = clampTo(num(o.rise, 46), -4000, 4000);
     t.dur = duration;
     t.age = 0;
     t.font = '800 ' + size + 'px ' + FONT_STACK;
@@ -1768,7 +1802,7 @@
     if (!ready() || !layers[FRONT].ctx) return noop;
     o = o || EMPTY;
     const L = layers[FRONT];
-    const density = Math.max(0, num(o.density, 1)) * (quality === 'low' ? 0.5 : 1);
+    const density = clampTo(num(o.density, 1), 0, 10) * (quality === 'low' ? 0.5 : 1);
     const dur = o.duration === Infinity ? Infinity : Math.max(0, num(o.duration, 3500));
     if (!(density > 0) || !(dur > 0)) return noop;
     const origin = o.origin;
@@ -1826,8 +1860,9 @@
     o = o || EMPTY;
     const w = num(rect.width, 0);
     const h = num(rect.height, 0);
-    const duration = num(o.duration, 900);
-    if (!(w > 0) || !(h > 0) || !(duration > 0)) return;
+    let duration = num(o.duration, 900);
+    if (!(w > 0) || !(h > 0) || !(duration > 0) || w > 20000 || h > 20000) return;
+    if (duration > MAX_LIFE) duration = MAX_LIFE;
     if (shimmerCount >= shimmers.length) return;
     const color = typeof o.color === 'string' ? o.color : GOLD;
     const s = shimmers[shimmerCount++];
@@ -1835,7 +1870,7 @@
     s.y = num(rect.y, num(rect.top, 0));
     s.w = w;
     s.h = h;
-    s.r = num(o.radius, Math.min(w, h) * 0.08);
+    s.r = clampTo(num(o.radius, Math.min(w, h) * 0.08), 0, Math.min(w, h) * 0.5);
     s.dur = duration;
     s.age = 0;
     s.band = sprite(S_BAND, color);

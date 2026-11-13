@@ -901,6 +901,95 @@ test('activeCount() and idle()', async () => {
   assert.strictEqual(idle, true);
 });
 
+test('garbage in never throws, never hangs the clock', async () => {
+  const junk = [undefined, null, NaN, Infinity, -1, 0, '', 'abc', {}, [], () => {}, { x: 'y' }, true];
+  const handles = [];
+  for (const a of junk) {
+    for (const b of junk) {
+      assert.doesNotThrow(() => {
+        handles.push(Anim.tween({ duration: a, delay: b === Infinity ? 0 : b, from: a, to: b, ease: a, update: b, done: a }));
+        handles.push(Anim.spring({ from: a, to: b, velocity: a, stiffness: b, damping: a, mass: b, precision: a, update: b, done: a }));
+        Anim.arc(a, b, a)(0.5);
+        Anim.arc(a, b, { lift: a, side: b })(0.5);
+        Anim.bezier(a, b, a, b)(0.5);
+        Anim.lerp(a, b, 0.5);
+        Anim.clamp(a, b, a);
+        Anim.mapRange(a, b, a, b, a, b);
+        Anim.setSpeed(a);
+        Anim.setReducedMotion(false);
+      });
+    }
+    assert.doesNotThrow(() => {
+      Anim.tween(a);
+      Anim.spring(a);
+      Anim.frame(a)();
+      Anim.onChange(a)();
+      Anim.all(a);
+      Anim.stagger(a === Infinity || typeof a === 'number' || typeof a === 'boolean' || typeof a === 'function' ? null : a, a, a);
+      const w = Anim.wait(a === Infinity ? 0 : a);
+      w.cancel();
+    });
+  }
+  for (const h of handles) {
+    assert.doesNotThrow(() => {
+      h.setTarget && h.setTarget(NaN);
+      h.setTarget && h.setTarget({ nope: 1 });
+      h.nudge && h.nudge('x');
+    });
+  }
+  Anim.setSpeed(1);
+  await advance(400, 16);
+  // whatever is still running (endless durations) can be stopped and the loop goes back to sleep
+  for (const h of handles) {
+    h.finish();
+    h.cancel();
+  }
+  await advance(64, 16);
+  assert.strictEqual(Anim.activeCount(), 0);
+  assert.strictEqual(Anim._looping, false);
+  assert.strictEqual(Anim.speed, 1);
+});
+
+test('finish()/cancel() called from inside the final or the resting update do not recurse', async () => {
+  let calls = 0;
+  const t = Anim.tween({
+    duration: 30,
+    update: (e, raw) => {
+      calls++;
+      if (raw === 1) {
+        t.finish();
+        t.finish();
+      }
+    },
+  });
+  await advance(40);
+  assert.strictEqual(await t.finished, true);
+  assert.strictEqual(calls, 3, 'two in-flight frames + exactly one final call');
+
+  let rests = 0;
+  const s = Anim.spring({
+    from: 0,
+    to: 1,
+    update: (v, vel) => {
+      if (v === 1 && vel === 0) {
+        rests++;
+        s.finish();
+      }
+    },
+  });
+  await advance(3000, 16);
+  assert.strictEqual(rests, 1);
+  assert.strictEqual(await s.finished, true);
+
+  // cancelling inside the final update: the value was delivered, but the handle reports "cancelled"
+  let last;
+  const c = Anim.tween({ from: 0, to: 5, duration: 20, update: (v, raw) => { last = v; if (raw === 1) c.cancel(); } });
+  await advance(30);
+  assert.strictEqual(last, 5);
+  assert.strictEqual(await c.finished, false);
+  assert.strictEqual(errors.length, 0);
+});
+
 // ------------------------------------------------------------------ pure helpers
 test('ease: every curve starts at 0 and ends at 1; shapes are sane', () => {
   const names = [

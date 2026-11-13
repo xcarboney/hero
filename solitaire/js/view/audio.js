@@ -285,6 +285,7 @@
     this.out = rig.ctx.createGain();
     this.panner = null;
     this.wet = null;
+    this.faded = false; // stolen or stopped: on its way out
     this.dead = false;
   }
 
@@ -322,10 +323,11 @@
     let mean = f1;
     filter.type = o.type || 'bandpass';
     filter.Q.value = q;
-    filter.frequency.setValueAtTime(f1, t);
+    filter.frequency.value = f1; // already in place before t: the first samples must not see the default
     if (o.f2) {
       const f2 = rig.hz(o.f2);
       const sweep = Math.min(o.sweep || dur, dur);
+      filter.frequency.setValueAtTime(f1, t);
       if (o.f3) {
         filter.frequency.exponentialRampToValueAtTime(f2, t + sweep * (o.turn || 0.5));
         filter.frequency.exponentialRampToValueAtTime(rig.hz(o.f3), t + sweep);
@@ -363,8 +365,11 @@
     const dur = o.dur;
     const osc = ctx.createOscillator();
     osc.type = o.wave || 'sine';
-    osc.frequency.setValueAtTime(rig.hz(o.f), t);
-    if (o.f2) osc.frequency.exponentialRampToValueAtTime(rig.hz(o.f2), t + Math.min(o.glide || dur, dur));
+    osc.frequency.value = rig.hz(o.f);
+    if (o.f2) {
+      osc.frequency.setValueAtTime(rig.hz(o.f), t);
+      osc.frequency.exponentialRampToValueAtTime(rig.hz(o.f2), t + Math.min(o.glide || dur, dur));
+    }
     const amp = ctx.createGain();
     envelope(amp.gain, t, dur, o.gain, o);
     osc.connect(amp);
@@ -388,7 +393,8 @@
   /** Fade out from `when` (context time). Used when a voice is stolen and by stopAll(). */
   Voice.prototype.kill = function (when) {
     if (this.dead) return;
-    if (this.start > when) {
+    this.faded = true;
+    if (this.start > when - 0.001) {
       // Not sounding yet: it never will.
       for (let i = 0; i < this.sources.length; i++) {
         try {
@@ -878,7 +884,7 @@
     const marks = [];
     for (let i = 0; i < voices.length; i++) {
       const v = voices[i];
-      if (v.start >= t1 || v.end <= t0) continue;
+      if (v.faded || v.start >= t1 || v.end <= t0) continue;
       marks.push([Math.max(v.start, t0), 1], [Math.min(v.end, t1), -1]);
     }
     marks.sort(function (a, b) {
@@ -1037,7 +1043,10 @@
         if (volumeOpt < 0.0005) return null;
         const pan = clamp(num(o.pan, 0), -1, 1);
         const now = ctx.currentTime;
-        const t0 = now + LOOKAHEAD + clamp(num(o.delay, 0) / 1000, 0, MAX_DELAY);
+        // Snapped to the sample grid (a whisker inside the frame, so every browser's time-to-frame rounding
+        // agrees): sounds staggered by `delay` then come out as identical waveforms exactly `delay` apart.
+        const rate = ctx.sampleRate;
+        const t0 = (Math.round((now + LOOKAHEAD + clamp(num(o.delay, 0) / 1000, 0, MAX_DELAY)) * rate) + 0.001) / rate;
         const t1 = t0 + def.len(o);
 
         prune(now);
@@ -1048,6 +1057,7 @@
         let victim = null;
         for (let i = 0; i < voices.length; i++) {
           const other = voices[i];
+          if (other.faded) continue; // already on its way out
           if (other.name === name) {
             if (Math.abs(other.start - t0) < def.gap) return null; // the same sound, the same instant: one is enough
             if (other.start <= t0 && other.end > t0) stacked += (other.end - t0) / (other.end - other.start);
@@ -1117,7 +1127,8 @@
   let ctx = null;
   let live = null; // rig on ctx
   let failures = 0; // contexts that could not be created
-  let lastWake = -1e9; // wall-clock ms of the last resume() attempt
+  let wakeAt = -1e9; // wall-clock ms of the last wake-up that is bound to succeed (a gesture, or a brand new context)
+  let retryAt = -1e9; // ...and of the last speculative resume() made from play()
 
   function wallNow() {
     return root.performance && typeof root.performance.now === 'function' ? root.performance.now() : Date.now();
@@ -1150,6 +1161,7 @@
     // The pointerup / touchend that follows is, and brings us back here.
     if (act === 0 || (act === -1 && !fromGesture)) return false;
     try {
+      let fresh = false;
       if (!ctx) {
         let created = null;
         try {
@@ -1160,6 +1172,7 @@
         const rig = createRig(created, { volume: volume });
         ctx = created;
         live = rig;
+        fresh = true;
         try {
           // The classic iOS unlock: start any source from inside the gesture.
           const blip = ctx.createBufferSource();
@@ -1171,10 +1184,13 @@
         }
       }
       if (ctx.state !== 'running' && !isHidden()) {
-        const now = wallNow();
-        // Anything scheduled during an earlier, failed wake-up is stale by now: it must not burst out late.
-        if (now - lastWake > WAKE_WINDOW) live.stopAll();
-        lastWake = now;
+        if (fromGesture || fresh) {
+          // This resume() will go through, so play() may already schedule on the still-frozen clock (see play()).
+          const now = wallNow();
+          // Anything left from an earlier wake-up that never happened is stale: it must not burst out late.
+          if (now - wakeAt > WAKE_WINDOW) live.stopAll();
+          wakeAt = now;
+        }
         settle(ctx.resume());
       }
       return true;
@@ -1295,11 +1311,15 @@
       if (isHidden()) return false;
       if (!live && !wake(false)) return false;
       if (ctx.state !== 'running') {
-        if (wallNow() - lastWake > WAKE_WINDOW) {
+        const now = wallNow();
+        if (now - wakeAt > WAKE_WINDOW) {
           // Suspended and not about to start. Scheduling now would pile sounds up on a frozen clock and
-          // release them all at once later, so drop this one — and try to get going again for the next.
+          // release them all at once later, so drop this one — and nudge the context for the next.
           live.stopAll();
-          wake(false);
+          if (now - retryAt > 250) {
+            retryAt = now;
+            wake(false);
+          }
           return false;
         }
         // else: resume() was just called from a gesture; the context starts within milliseconds and plays this.
