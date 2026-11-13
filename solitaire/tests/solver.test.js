@@ -978,6 +978,7 @@ describe('findWinnableSeed', () => {
     assert.deepEqual(s, { seed: 123456, certified: false, tried: 0 });
     assert.deepEqual(Solver.findWinnableSeed({ budgetMs: -5, startSeed: 7 }), { seed: 7, certified: false, tried: 0 });
     // a budget that is not a finite number means the default one
+    const STEP = 1 / 4; // ms per look at the test clock
     for (const bad of [NaN, Infinity, '50', null]) {
       const t0 = performance.now();
       const r2 = Solver.findWinnableSeed({ budgetMs: bad, startSeed: 7, maxNodes: 10 });
@@ -985,8 +986,15 @@ describe('findWinnableSeed', () => {
       assert.equal(r2.certified, false);
       // 10 nodes certify nothing, so it searched until the budget was used up: the default one
       // (at least that long whatever the machine is doing; BUSY_MS for the other side)
-      assert.ok(r2.tried > 10, r2.tried + ' deals');
+      assert.equal(r2.seed, (7 + r2.tried * 0x9e3779b9) >>> 0, 'the seed after the last one examined');
       assert.ok(took >= Solver.DEFAULTS.budgetMs - 1 && took < Solver.DEFAULTS.budgetMs + BUSY_MS, took.toFixed(1) + ' ms');
+      // The same on a test clock: deal after deal, and over at the first look at the clock at
+      // or after the default budget (confirmed by one more when that look was inside a deal).
+      const hunt = onTestClock(STEP, () => Solver.findWinnableSeed({ budgetMs: bad, startSeed: 7, maxNodes: 10 }));
+      const expected = 1 + Solver.DEFAULTS.budgetMs / STEP;
+      assert.ok(hunt.reads === expected || hunt.reads === expected + 1, hunt.reads + ' looks at the clock');
+      assert.equal(hunt.r.certified, false);
+      assert.ok(hunt.r.tried > 10 && hunt.r.tried <= hunt.reads / 2, hunt.r.tried + ' deals in ' + hunt.reads + ' looks');
     }
   });
 
@@ -1012,8 +1020,9 @@ describe('findWinnableSeed', () => {
       const took = performance.now() - t0;
       assertSeedResult(r, drawCount);
       assert.equal(r.certified, false);
-      assert.ok(r.tried > 10, 'it kept trying (' + r.tried + ' deals)');
-      // never early; how late is only bounded loosely here (BUSY_MS), and exactly in the next test
+      // never early; how late is only bounded loosely here (BUSY_MS), and exactly in the next
+      // test, which also counts the deals (how many there were in 40 ms of real time is up to
+      // the machine: none at all when the process was kept waiting that long)
       assert.ok(took >= 39 && took < 40 + BUSY_MS, took.toFixed(1) + ' ms for a 40 ms budget');
       assert.equal(r.seed, (1000 + r.tried * 0x9e3779b9) >>> 0, 'the seed after the last one examined');
 
@@ -1023,8 +1032,11 @@ describe('findWinnableSeed', () => {
       const h = Solver.findWinnableSeed({ drawCount: drawCount, budgetMs: 25, maxNodes: 1e9, startSeed: hard });
       const took1 = performance.now() - t1;
       assert.equal(h.certified, false);
-      assert.equal(h.tried, 1);
-      assert.notEqual(h.seed, hard, 'a deal the solver gave up on is not handed back');
+      // It did not get past that deal, and a deal the solver gave up on is not handed back. (The
+      // start seed itself comes back only when it was never dealt: the process was kept waiting
+      // for the whole budget before the first look at the clock. The next test rules that out.)
+      assert.ok(h.tried <= 1, h.tried + ' deals');
+      assert.equal(h.seed, (hard + h.tried * 0x9e3779b9) >>> 0, 'the seed after the last one examined');
       assert.ok(took1 >= 24 && took1 < 25 + BUSY_MS, took1.toFixed(1) + ' ms for a 25 ms budget');
     }
   });
