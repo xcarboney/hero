@@ -319,10 +319,10 @@
       rgba(255, 255, 255, 0) 66%
     ),
     radial-gradient(
-      circle calc(var(--card-w) * 1.55) at calc(100% - var(--glare-x, 50%)) calc(100% - var(--glare-y, 0%)),
-      rgba(24, 18, 44, 0.3) 0%,
-      rgba(24, 18, 44, 0.14) 36%,
-      rgba(24, 18, 44, 0) 78%
+      circle calc(var(--card-w) * 1.45) at calc(100% - var(--glare-x, 50%)) calc(100% - var(--glare-y, 0%)),
+      rgba(24, 18, 44, 0.22) 0%,
+      rgba(24, 18, 44, 0.09) 38%,
+      rgba(24, 18, 44, 0) 76%
     ),
     linear-gradient(
       115deg,
@@ -364,7 +364,7 @@
 @supports (opacity: calc(sin(30deg))) {
   .card__flip::before,
   .card__flip::after {
-    opacity: max(0, 0.3 * sin(var(--flip, 0deg)) * sin(var(--flip, 0deg)) - 0.002);
+    opacity: max(0, 0.2 * sin(var(--flip, 0deg)) * sin(var(--flip, 0deg)) - 0.002);
   }
 
   .card__shadow::before,

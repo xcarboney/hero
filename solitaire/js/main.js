@@ -89,6 +89,7 @@
   let saveTimer = 0;
   let dealToken = 0;
   let autoToken = 0;
+  let winToken = 0;
   let hurried = false;
 
   const hintCache = { v: -1, list: [] };
@@ -445,6 +446,7 @@
     if (SOL.App && SOL.App.keepScreenOn) SOL.App.keepScreenOn(false);
 
     const wonState = state;
+    const token = ++winToken;
     setBusy('celebrate', true);
     let show;
     try {
@@ -454,6 +456,7 @@
       show = null;
     }
     const done = function () {
+      if (token !== winToken) return; // a new game / loadState took over meanwhile
       setBusy('celebrate', false);
       // the win screen follows the show — unless the player already moved on
       if (state === wonState && state.won) emit('game:won', result);
@@ -468,6 +471,7 @@
   function cancelRunning() {
     dealToken++;
     autoToken++;
+    winToken++;
     if (stuckTimer) {
       root.clearTimeout(stuckTimer);
       stuckTimer = 0;
@@ -479,6 +483,7 @@
       log('celebration stop failed', err);
     }
     busy.delete('auto');
+    busy.delete('celebrate');
     endHurry();
   }
 

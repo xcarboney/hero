@@ -364,6 +364,25 @@
     };
   }
 
+  /** The 13 piles, each array copied. */
+  function copyPiles(p) {
+    return {
+      stock: p.stock.slice(),
+      waste: p.waste.slice(),
+      f0: p.f0.slice(),
+      f1: p.f1.slice(),
+      f2: p.f2.slice(),
+      f3: p.f3.slice(),
+      t0: p.t0.slice(),
+      t1: p.t1.slice(),
+      t2: p.t2.slice(),
+      t3: p.t3.slice(),
+      t4: p.t4.slice(),
+      t5: p.t5.slice(),
+      t6: p.t6.slice(),
+    };
+  }
+
   /** A copy of one history record that shares nothing with the original. */
   function copyRecord(r) {
     const tr = r.transfers;
@@ -406,21 +425,7 @@
       id: state.id,
       seed: state.seed,
       drawCount: state.drawCount,
-      piles: {
-        stock: p.stock.slice(),
-        waste: p.waste.slice(),
-        f0: p.f0.slice(),
-        f1: p.f1.slice(),
-        f2: p.f2.slice(),
-        f3: p.f3.slice(),
-        t0: p.t0.slice(),
-        t1: p.t1.slice(),
-        t2: p.t2.slice(),
-        t3: p.t3.slice(),
-        t4: p.t4.slice(),
-        t5: p.t5.slice(),
-        t6: p.t6.slice(),
-      },
+      piles: copyPiles(p),
       faceUp: state.faceUp.slice(),
       score: state.score,
       moves: state.moves,
@@ -1634,21 +1639,7 @@
       id: '',
       seed: 0,
       drawCount: state.drawCount,
-      piles: {
-        stock: p.stock.slice(),
-        waste: p.waste.slice(),
-        f0: p.f0.slice(),
-        f1: p.f1.slice(),
-        f2: p.f2.slice(),
-        f3: p.f3.slice(),
-        t0: p.t0.slice(),
-        t1: p.t1.slice(),
-        t2: p.t2.slice(),
-        t3: p.t3.slice(),
-        t4: p.t4.slice(),
-        t5: p.t5.slice(),
-        t6: p.t6.slice(),
-      },
+      piles: copyPiles(p),
       faceUp: state.faceUp.slice(),
       score: 0,
       moves: 0,
@@ -2008,6 +1999,8 @@
    * last-resort search decides: if a rearrangement can still reopen the game it comes first
    * (priority 7) and the soft moves wait (priority 8); if nothing can, they are plain foundation
    * moves again. This is what keeps "follow the first hint" from going round in circles.
+   * Nothing is ever dropped from the list: a legal foundation, uncovering or waste move is always
+   * in it, at worst last.
    */
   function hints(state) {
     const raw = rawHints(state, false);
