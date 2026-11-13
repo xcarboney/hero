@@ -143,6 +143,17 @@
 .pile--stock.is-dealing .pile__mark {
   opacity: 0;
 }
+/*
+ * The symbol means "the stock is empty", so it is only ever seen while the stock IS empty in the game:
+ * .has-cards is set from the game state, not from what lies on the slot at this moment. The cards of a full
+ * stock can be away from their slot — they glide to it when it moved (the screen turned, left-handed was
+ * switched), they fly to it in a recycle — and .is-stacked is off for that time: without this rule the symbol
+ * came up beside the travelling pile.
+ * (One class more in the selector: it also wins over the hint and "nothing to suggest" looks below.)
+ */
+.pile.pile--stock.has-cards .pile__mark {
+  opacity: 0;
+}
 
 /* nothing left to draw and nothing to recycle: the symbol fades back to a ghost */
 .pile--stock.is-spent .pile__mark {

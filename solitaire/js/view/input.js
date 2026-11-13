@@ -24,11 +24,16 @@
  *                         (SOL.Board.hoverAt) — decoration only, nothing depends on it
  * Keyboard: Space / D draw, U or Ctrl/Cmd+Z undo, H hint, N new game, A auto-complete, I inspect the card under
  * the pointer, Esc cancels a drag / stops auto-complete / skips the celebration (overlays close themselves).
+ * A key that is held down repeats only what is harmless to repeat: undo, hint and draw — and a held draw key
+ * stops at the end of the stock (turning the waste over can cost points: that takes a new press). N, A and I
+ * act once per press.
  *
  * Hit-testing goes through the board's layout model (Board.cardAt / pileAt): no DOM reads. A card is hit
- * where it is drawn, also while it glides or flies, and a flying card at its landing place as well; an exact
+ * where it is drawn, also while it glides or flies, and a flying card at its landing place as well (a card
+ * flying back to the stock only there: a touch on the waste slot it has just left draws nothing); an exact
  * hit always wins, and a finger that misses every card takes the nearest one within TAP_SLACK px that it could
- * do something with (the stock, a face-up card) — never a card lying face-down in a column.
+ * do something with (the stock, a face-up card) — never a card lying face-down in a column, and never the
+ * stock from the waste slot beside it: a touch on that slot, empty or not, does not draw.
  * A card is only ever played while the player can see its face. The game state turns a card face-up the
  * moment a move uncovers or draws it; the table turns it a little later. Until its back is out of sight (and
  * for the whole gesture, if the finger went down before that) it cannot be tapped, dragged or inspected.
@@ -540,6 +545,16 @@
     g.newGame();
   }
 
+  /**
+   * Nothing left to draw: the next "draw" would turn the waste over. A key that is held down draws on and on,
+   * but it stops here — a recycle can cost points (every one in draw 1) and a held key would pay again with
+   * every pass through the stock. Turning the waste over takes a press of its own.
+   */
+  function stockEmpty() {
+    const g = G();
+    return !!(g && g.state && g.state.piles.stock.length === 0);
+  }
+
   function onKeyDown(e) {
     if (e.defaultPrevented || e.isComposing) return;
     const g = G();
@@ -578,11 +593,13 @@
       case ' ':
       case 'Spacebar':
         if (isButtonLike(e.target)) return; // Space activates the focused button
+        if (e.repeat && stockEmpty()) break; // (see stockEmpty)
         cancel();
         g.draw();
         break;
       case 'd':
       case 'D':
+        if (e.repeat && stockEmpty()) break;
         cancel();
         g.draw();
         break;

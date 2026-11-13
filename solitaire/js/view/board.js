@@ -63,8 +63,10 @@
  *                                    never taken by a near miss, only by an exact hit). A card in flight is hit
  *                                    at its landing place (it counts as lying there already) and where it is
  *                                    drawn — but there it gives way to the stock and to a face-up card of another
- *                                    pile under it.
- *   Board.pileAt(clientX, clientY, slop = 0) -> pileId | null      which pile's area the point is in
+ *                                    pile under it. A card flying to the stock is hit at the stock only.
+ *   Board.pileAt(clientX, clientY, slop = 0) -> pileId | null      which pile's area the point is in. In both,
+ *                                    the stock's `slop` does not reach onto the waste slot: a point on that
+ *                                    slot — empty or not — never means the stock.
  *   Board.press(cardId) / Board.unpress()                           finger down: the card (and the run on it) is
  *                                    pushed into the felt a little; a drag lifts it out of the dip, a release
  *                                    lets it spring back
@@ -168,7 +170,8 @@
  * 180 (the flip shading), and .is-glare while a card carries a glare (the hover tilt sets it; add it yourself
  * before you animate --glare-o / --glare-x / --glare-y on a card, remove it afterwards). One more, for the
  * card art: .is-fanned on every waste card under the top one while the draw-3 waste fans sideways — such a
- * card shows only its left edge, and cards.css gives the phone art a small suit under the rank there. And
+ * card shows only its left edge, and cards.css gives the phone art a small suit under the rank there (not
+ * on the card that lies open while the player holds the top card in a drag: it shows the normal art). And
  * .is-tight on every covered face-up card of a tableau column whose fan step is squeezed below
  * TUNE.tightBelow (0.25 of the card height; classic art only — long columns on wide, short tables): the suit
  * under the rank of its corner index is cut off there, and cards.css shows the suit once more top-right.
@@ -1383,6 +1386,9 @@
     }
     const stockEl = pileEls.stock;
     if (stockEl) stockEl.classList.toggle('is-spent', piles.stock.length === 0 && piles.waste.length === 0);
+    // .has-cards: the stock is not empty in the game — wherever its cards are at this moment (gliding to a slot
+    // that moved, flying back in a recycle). board.css shows the recycle symbol only without it.
+    if (stockEl) stockEl.classList.toggle('has-cards', piles.stock.length > 0);
     markFanned(piles.waste);
     markTight(piles);
   }
@@ -1391,13 +1397,18 @@
    * Draw 3 with the waste fanned sideways: every waste card under the top one shows only its left edge, where
    * the phone art has the rank but not the suit. Those cards carry .is-fanned and cards.css gives them a small
    * suit under the rank (compact art only; the classic corner index has one anyway). `waste` null: nobody.
+   * While the top card is in the player's hand the card under it lies open, face and all: it shows the normal
+   * art, and gets the mark back the moment the hand lets go and the top card comes home (dragStart and
+   * dragCancel call this; a drop that moves the card away changes the state, and retarget() marks the new fan).
    */
   function markFanned(waste) {
     const sideways = !!waste && L.draw3 && L.wasteFanX > 0;
-    const top = waste && waste.length > 0 ? waste[waste.length - 1] : -1;
+    const n = waste ? waste.length : 0;
+    const top = n > 0 ? waste[n - 1] : -1;
+    const open = n > 1 && sprites[top].held === 'drag' ? waste[n - 2] : -1;
     for (let i = 0; i < 52; i++) {
       const s = sprites[i];
-      const on = sideways && s.pile === 'waste' && i !== top;
+      const on = sideways && s.pile === 'waste' && i !== top && i !== open;
       if (on !== s.fanned) {
         s.fanned = on;
         touch(s);
@@ -2262,7 +2273,7 @@
     state = null;
     inviteOn = false;
     refreshInvite();
-    if (pileEls.stock) pileEls.stock.classList.remove('is-stacked', 'is-spent');
+    if (pileEls.stock) pileEls.stock.classList.remove('is-stacked', 'is-spent', 'has-cards');
     setDealing(true);
     // where each card is now (retarget overwrites the logical place)
     const from = [];
@@ -2645,6 +2656,7 @@
    * Only cards the player can do something with are in that race: the stock, and every card that lies (or is
    * about to lie) face-up. A card lying face-down in a column answers an exact hit only — a finger in the gap
    * between it and the stock above it, or the face-up card beside it, means the stock, or that card.
+   * The stock's slack ends where the waste slot begins (stockPad): on that slot the stock is never meant.
    *
    * A card in flight can be touched in two places:
    *   - where it is going to land: it counts as lying there already, on top of its pile;
@@ -2652,6 +2664,8 @@
    *     card that is still leaving it) and except over a face-up card of another pile (the flight is only
    *     passing over that card: the waste tapped again while its previous top card is leaving, the column
    *     next to a landing place). A card that still shows its back does not shield the flight above it.
+   *     A card flying to the stock (an undone draw, a recycle) is not hit on its way at all: touching it would
+   *     draw, and a touch on the waste slot it has just left, or on anything else under its path, is no draw.
    * (Gliding cards — springs — are hit where they are drawn.)
    */
   function cardAt(cx, cy, slop) {
@@ -2659,8 +2673,9 @@
     const x = cx - L.left;
     const y = cy - L.top;
     const pad = slop || 0;
+    const padS = stockPad(x, y, pad);
     const sz = pileZone('stock');
-    const onStock = x >= sz.x0 - pad && x <= sz.x1 + pad && y >= sz.y0 - pad && y <= sz.y1 + pad;
+    const onStock = x >= sz.x0 - padS && x <= sz.x1 + padS && y >= sz.y0 - padS && y <= sz.y1 + padS;
     let rest = -1; // a card lying (or gliding) here
     let restD = Infinity;
     let land = -1; // a card in flight that lands here
@@ -2671,7 +2686,7 @@
       const s = sprites[i];
       // (a card lying face-down in a column has to be hit exactly: nothing can be done with it, so a near
       // miss is never meant for it and it must not take one from the stock above or the card beside it)
-      const reach = !s.faceUp && s.pile.charAt(0) === 't' ? 0 : pad;
+      const reach = s.pile === 'stock' ? padS : !s.faceUp && s.pile.charAt(0) === 't' ? 0 : pad;
       let d;
       if (!s.hFlight) {
         d = cardGap(x, y, s.x + s.ox, s.y + s.oy);
@@ -2688,7 +2703,8 @@
           landD = d;
         }
       }
-      if (!onStock) {
+      // (a card on its way to the stock means "draw" wherever it is touched, and that is meant only at the stock)
+      if (!onStock && s.pile !== 'stock') {
         d = cardGap(x, y, s.x + s.ox, s.y + s.oy);
         if (d <= reach && (d < airD || (d === airD && s.z > sprites[air].z))) {
           air = i;
@@ -2731,14 +2747,26 @@
     return { x0: p.x - hx, y0: p.y - hy, x1: p.x + L.cardW + hx, y1: p.y + L.cardH + hy };
   }
 
+  /**
+   * The finger slack of the stock at a table-space point: `pad` — but none on the waste slot. That slot is hit
+   * exactly there, with or without a card on it, so a touch on it is never a near miss of the stock beside it:
+   * touching the empty waste slot does not draw.
+   */
+  function stockPad(x, y, pad) {
+    const p = L.piles.waste;
+    return pad > 0 && x >= p.x && x <= p.x + L.cardW && y >= p.y && y <= p.y + L.cardH ? 0 : pad;
+  }
+
   function pileAt(cx, cy, slop) {
     if (!L) return null;
     const x = cx - L.left;
     const y = cy - L.top;
     const pad = slop || 0;
+    const padS = stockPad(x, y, pad);
     for (let i = 0; i < PILE_IDS.length; i++) {
       const z = pileZone(PILE_IDS[i]);
-      if (x >= z.x0 - pad && x <= z.x1 + pad && y >= z.y0 - pad && y <= z.y1 + pad) return PILE_IDS[i];
+      const p = i === 0 ? padS : pad; // (PILE_IDS[0] is the stock)
+      if (x >= z.x0 - p && x <= z.x1 + p && y >= z.y0 - p && y <= z.y1 + p) return PILE_IDS[i];
     }
     return null;
   }
@@ -2984,6 +3012,7 @@
       if (s.flip !== (s.faceUp ? 0 : 180)) s.flipTo(s.faceUp ? 0 : 180, { duration: 150 });
       touch(s);
     }
+    if (lead.pile === 'waste') markFanned(state.piles.waste); // (the card under it lies open now)
     // Where on the card the finger went down. Normally that is on the card as it is drawn. A card caught in
     // flight at its landing place is held as if it already lay there. Anything else — a touch that only just
     // missed the card, a card that has flown on since the press — is held by the nearest point of its face.
@@ -3229,10 +3258,20 @@
         // duration, one bow) and only a breath apart, so the run trails a little but never opens into a row
         const lead = d.sprites[0];
         const dist = Math.hypot(lead.tx - lead.x, lead.ty - lead.y);
+        // The bow of a level flight rises towards the top of the screen, and flights are kept on the table:
+        // where the lead card has less room above its path than the bow is high — a run going home along the
+        // top row of a wide table — the cards were pressed against the table edge, one onto the other. So the
+        // bow is only as high as fits: (√y0 + √y1)² / 4 for a path between the heights y0 and y1 (none for a
+        // card that was let go above the edge: it comes back onto the table the shortest way).
+        let side = Math.min(L.cardW * 0.7, dist * 0.16);
+        const rise = dist > 0.001 ? (Math.abs(lead.tx - lead.x) / dist) * side : 0;
+        const edge = L.cardH * Math.max(0, lead.scale - 1) * 0.5; // (a card still scaled up is kept this far in)
+        const room = lead.y > edge ? Math.pow(Math.sqrt(lead.y - edge) + Math.sqrt(Math.max(0, lead.ty - edge)), 2) / 4 : 0;
+        if (rise > room) side *= room / rise;
         place(s, 'fly', {
           duration: clamp(240 + dist * 0.35, 260, 460),
           delay: i * 5,
-          side: (lead.tx < lead.x ? 1 : -1) * Math.min(L.cardW * 0.7, dist * 0.16),
+          side: (lead.tx < lead.x ? 1 : -1) * side,
           peakLift: 0.2,
           peakScale: 0,
           overshoot: 0,
@@ -3254,6 +3293,7 @@
         touch(s);
       }
     }
+    if (d.from === 'waste' && state) markFanned(state.piles.waste); // (the card under it is covered again)
     if (invalid) {
       sfx('invalid');
       haptic('error');

@@ -733,7 +733,8 @@
   touch-action: none;
 }
 
-.ui-layer {
+.ui-layer,
+.ui-staged {
   position: absolute;
   inset: 0;
   z-index: 2;
@@ -748,6 +749,11 @@
 }
 .ui-layer.is-closing {
   pointer-events: none;
+}
+/* A panel built ahead of its time (ui.js: stageLayer — the win screen while the celebration starts): the very
+   box of a layer, so that turning it into one lays nothing out again, but out of sight and out of reach. */
+.ui-staged {
+  visibility: hidden;
 }
 
 .ui-backdrop {
@@ -888,7 +894,8 @@
 
 /* centred dialog */
 @media (min-width: 640px) {
-  .ui-layer {
+  .ui-layer,
+  .ui-staged {
     align-items: center;
     padding: max(16px, var(--safe-t)) max(16px, var(--safe-r)) max(16px, var(--safe-b)) max(16px, var(--safe-l));
   }
@@ -2307,6 +2314,14 @@ button.ui-row:active {
 }
 .ui-toast.is-bump .ui-toast__card {
   animation: ui-toast-bump 300ms var(--ease-out);
+}
+/* a toast that only tells (the one-time tip): it cannot be tapped, taps go through it to the cards below */
+.ui-toast--passive .ui-toast__card {
+  pointer-events: none;
+  cursor: default;
+}
+.ui-toast--passive .ui-toast__msg {
+  text-wrap: balance;                            /* two even lines on a narrow phone, not one word left over */
 }
 .ui-toast__icon {
   flex: none;

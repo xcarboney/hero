@@ -1,7 +1,10 @@
 /*
- * SOL.Inspector — the "3D card preview": a card inspector (hold one card in your hand) and a deck gallery
- * (a 3D carousel of all the cards + a picker for the six card backs). Lives in #inspector-root, above every
- * other layer. Styles: css/inspector.css.
+ * SOL.Inspector — a card inspector (hold one card in your hand) and a deck gallery (a 3D carousel of all the
+ * cards + a picker for the six card backs). Lives in #inspector-root, above every other layer. Styles:
+ * css/inspector.css.
+ * On screen and to assistive technology the two views have one name each, the same ones SOL.UI uses: the card
+ * inspector is the "3D preview", the deck gallery the "3D card gallery" (NAME_CARD / NAME_GALLERY: the
+ * dialog's aria-label follows the view, the gallery's title shows it on the cards tab).
  *
  * Public API
  * ----------
@@ -71,6 +74,11 @@
  * focused card, tapping a card focuses it (or opens it when it already is), 1..5 pick a suit filter.
  * Buttons, chips and tabs act when the pointer comes up on them (see onPress(): a `click` would be withheld
  * by the browser right after a fling); keyboard and scripted clicks work as usual.
+ * Stray taps: for 350 ms after a view has come up — open(), openGallery(), a card opened out of the gallery,
+ * the gallery again when that card goes back — a press that starts inside the inspector is not a tap (see
+ * guardTaps()): it presses no button, tab or chip, opens, pokes, flips and selects nothing and does not close.
+ * So the second tap of a double tap on whatever opened the view cannot act on what appeared under the finger.
+ * Such a press can still drag (turn the card, move the carousel); keyboard, Esc and Android back are not delayed.
  *
  * How the 3D card is built: the inspector owns a wrapper (.insp-obj, transform-style: preserve-3d) that holds
  * a thick SOL.Cards card plus two overlay planes of its own (one per face) with a shade veil and a holographic
@@ -113,6 +121,10 @@
   const HALF = norm3(LIGHT[0], LIGHT[1], LIGHT[2] + 1);
   const SUIT_NAMES = ['spades', 'hearts', 'clubs', 'diamonds'];
   const SUIT_LABELS = ['Spades', 'Hearts', 'Clubs', 'Diamonds'];
+  // What the player reads and hears: one name for each of the two views, the same ones SOL.UI uses (menu,
+  // toolbar, help).
+  const NAME_CARD = '3D preview';
+  const NAME_GALLERY = '3D card gallery';
   // Carousel arc, in card widths (placeItem): the first neighbour steps ARC_X1 aside, ARC_Z1 back and turns
   // ARC_RY1 degrees inwards; every further one adds ARC_XN / ARC_ZN (+ ARC_ZQ per step squared: the arc curves
   // away) / ARC_RYN. The steps are much smaller than a turned card is wide, so the cards overlap like a fanned
@@ -203,6 +215,29 @@
    */
   let lastPointerUp = -1e9;
 
+  /*
+   * Stray taps. The second tap of a double tap on whatever brought a view up — the toolbar's "3D cards", a menu
+   * tile, the front card of the carousel, the Close button of a card that came out of the gallery — lands on
+   * what has just appeared under the finger: a tab, a card, a card back, the other Close button. For a moment
+   * after a view has come up (guardTaps(): the gallery, a card, the gallery again behind a card that goes
+   * back) a press that starts inside the inspector is therefore not a tap: it presses no button, opens, pokes
+   * and selects nothing. It may still become a drag (turning the card, moving the carousel). Keyboard, Esc and
+   * Android back are not delayed.
+   */
+  const TAP_GUARD_MS = 350;
+  let tapGuardUntil = 0;
+
+  function guardTaps() {
+    tapGuardUntil = nowMs() + TAP_GUARD_MS;
+  }
+
+  /** Did this pointer event happen while taps are held off? (When it happened, not when it is handled: on a
+   *  busy phone a press can wait in the queue while the view is being built.) */
+  function guarded(e) {
+    const t = e && e.timeStamp > 0 ? Math.min(nowMs(), e.timeStamp) : nowMs();
+    return t < tapGuardUntil;
+  }
+
   function onPress(container, selector, handler) {
     let down = null;
     const find = function (e) {
@@ -212,6 +247,7 @@
     container.addEventListener('pointerdown', function (e) {
       down = null;
       if (e.pointerType === 'mouse' && e.button !== 0) return;
+      if (guarded(e)) return; // (its click, a pointer's own, is dropped below like every such click)
       const el = find(e);
       if (el) down = { id: e.pointerId, el: el };
     });
@@ -402,13 +438,14 @@
         '" aria-checked="false" aria-label="' + SUIT_LABELS[s] + '">' + Cards.suitSvg(s, { size: 20 }) + '</button>';
     }
 
-    const el = h('div', 'insp', { role: 'dialog', 'aria-modal': 'true', 'aria-label': '3D card preview', tabindex: '-1' });
+    // (the dialog is named after the view it shows: setView() switches between NAME_CARD and NAME_GALLERY)
+    const el = h('div', 'insp', { role: 'dialog', 'aria-modal': 'true', 'aria-label': NAME_CARD, tabindex: '-1' });
     el.hidden = true;
     el.innerHTML =
       '<div class="insp__backdrop"></div>' +
       '<div class="insp__live visually-hidden" aria-live="polite" aria-atomic="true"></div>' +
       // ---- card inspector
-      '<section class="insp__view insp-card" data-view="card" aria-label="Card inspector" hidden>' +
+      '<section class="insp__view insp-card" data-view="card" aria-label="' + NAME_CARD + '" hidden>' +
         '<div class="insp-card__stage">' +
           '<div class="insp-card__glow"></div>' +
           '<div class="insp-card__floor"><i class="insp-card__pool"></i>' +
@@ -420,12 +457,12 @@
         '<div class="insp-card__bar" role="toolbar" aria-label="Card controls">' + bar + '</div>' +
       '</section>' +
       // ---- deck gallery
-      '<section class="insp__view insp-gal" data-view="gallery" aria-label="Deck gallery" hidden>' +
-        '<header class="insp-gal__head"><h2 class="insp-gal__title">Deck gallery</h2></header>' +
+      '<section class="insp__view insp-gal" data-view="gallery" aria-label="' + NAME_GALLERY + '" hidden>' +
+        '<header class="insp-gal__head"><h2 class="insp-gal__title">' + NAME_GALLERY + '</h2></header>' +
         '<div class="insp-gal__panels">' +
           '<div class="insp-gal__panel" data-panel="cards" role="tabpanel" id="insp-panel-cards" aria-labelledby="insp-tab-cards">' +
             '<div class="insp-gal__ring" tabindex="0" role="group" aria-roledescription="carousel" ' +
-              'aria-label="Cards. Swipe or use the arrow keys to browse, Enter opens the card in 3D."></div>' +
+              'aria-label="Cards. Swipe or use the arrow keys to browse, Enter opens the ' + NAME_CARD + ' of the card."></div>' +
             '<div class="insp-gal__info"><div class="insp-gal__name"></div><div class="insp-gal__count"></div></div>' +
             '<div class="insp-gal__scrub" role="slider" tabindex="0" aria-label="Position in the deck" aria-valuemin="1">' +
               '<div class="insp-gal__scrub-track"><i></i><i></i><i></i><i></i></div><i class="insp-gal__scrub-thumb"></i></div>' +
@@ -438,7 +475,7 @@
           '</div>' +
         '</div>' +
         '<div class="insp-gal__bar">' +
-          '<div class="insp-gal__tabs" role="tablist" aria-label="Gallery">' +
+          '<div class="insp-gal__tabs" role="tablist" aria-label="' + NAME_GALLERY + '">' +
             '<i class="insp-gal__tabs-pill" aria-hidden="true"></i>' +
             '<button type="button" class="insp-tab" role="tab" id="insp-tab-cards" data-tab="cards" aria-controls="insp-panel-cards" aria-selected="true">Cards</button>' +
             '<button type="button" class="insp-tab" role="tab" id="insp-tab-backs" data-tab="backs" aria-controls="insp-panel-backs" aria-selected="false">Card backs</button>' +
@@ -843,6 +880,7 @@
     ui.galView.classList.toggle('is-behind', card && G.live);
     ui.cardView.setAttribute('aria-hidden', card ? 'false' : 'true');
     ui.galView.setAttribute('aria-hidden', card ? 'true' : 'false');
+    ui.root.setAttribute('aria-label', card ? NAME_CARD : NAME_GALLERY);
     ui.root.setAttribute('data-view', name);
   }
 
@@ -2078,6 +2116,7 @@
     startTilt();
     syncLoop();
     ui.root.focus({ preventScroll: true });
+    guardTaps();
   }
 
   /**
@@ -2196,7 +2235,14 @@
       const sc = o.s * o.zoom;
       const beside = !onCard && Math.abs(p.x - (M.ox + M.cx + o.x)) > (M.W * sc) / 2;
       C.g = newGesture(p, beside ? 'edge' : 'rotate', onCard);
-      if (!beside) grab(o);
+      if (guarded(e)) {
+        // The card has only just come up (guardTaps): this press is not a tap, and as long as it does not
+        // move it does not even take hold of the card — the turn the card flies in with goes on undisturbed.
+        C.g.tapOK = false;
+        C.g.free = true;
+      } else if (!beside) {
+        grab(o);
+      }
     } else {
       beginPinch();
     }
@@ -2275,6 +2321,7 @@
     if (!g.turning) {
       if (g.moved < 3) return; // keeps taps perfectly still
       g.turning = true;
+      if (g.free) grab(o); // a press from the first moments of the view takes hold only now, as a drag
     }
     o.yaw += dx * M.sens * g.dir;
     o.pitch -= dy * M.sens;
@@ -2322,7 +2369,7 @@
       return;
     }
     if (g.mode === 'edge' || g.noFling || !g.turning) {
-      settle(o);
+      if (!(g.free && !g.turning)) settle(o); // (a press that never took hold of the card leaves it alone)
       return;
     }
     releaseRot(o, g, v);
@@ -2599,6 +2646,7 @@
         moved: 0,
         sliding: false,
         caught: caught,
+        guard: guarded(e), // the view has only just come up: this press may drag, it is not a tap (guardTaps)
         carry: carry,
         hit: e.target,
         samples: [{ t: nowMs(), x: e.clientX, y: e.clientY }],
@@ -2635,7 +2683,7 @@
       const fixed = !!(cfg.fixed && cfg.fixed());
       if (d.moved < TAP_SLOP && nowMs() - d.t0 < TAP_MS) {
         if (d.caught) to(Math.round(cfg.get()));
-        else if (cfg.onTap(d.hit) !== true && !fixed) to(Math.round(cfg.get()));
+        else if ((d.guard || cfg.onTap(d.hit) !== true) && !fixed) to(Math.round(cfg.get()));
         return;
       }
       if (fixed) return;
@@ -2996,7 +3044,7 @@
     const el = ui.scrub;
     let id = null;
     el.addEventListener('pointerdown', function (e) {
-      if (id !== null || !galleryInteractive()) return;
+      if (id !== null || !galleryInteractive() || guarded(e)) return; // (a press here jumps at once: see guardTaps)
       if (e.pointerType === 'mouse' && e.button !== 0) return;
       id = e.pointerId;
       try {
@@ -3213,7 +3261,7 @@
       b.setAttribute('aria-selected', b.getAttribute('data-tab') === tab ? 'true' : 'false');
     }
     ui.tabs.setAttribute('data-tab', tab);
-    ui.galTitle.textContent = tab === 'backs' ? 'Card backs' : 'Deck gallery';
+    ui.galTitle.textContent = tab === 'backs' ? 'Card backs' : NAME_GALLERY;
   }
 
   function resetPanel(p) {
@@ -3421,6 +3469,7 @@
     if (it) hideSourceEl(it.card);
     else unhideSource();
     setView(s, 'gallery');
+    guardTaps();
     play('close', { volume: 0.7 });
     haptic('tick');
     flyOut(o, it ? it.card : null).then(function () {
@@ -3543,6 +3592,7 @@
     play('open');
     haptic('tap');
     ui.root.focus({ preventScroll: true });
+    guardTaps();
     return s.promise;
   }
 

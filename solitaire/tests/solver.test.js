@@ -20,11 +20,11 @@
  * Time. The suite must pass on a busy machine (other test files, a shared CI runner), where a
  * process can be kept waiting at any moment, also for longer than a whole maxMs or budgetMs. So
  * no test depends on how long something really took, beyond "at least its budget" and a very
- * loose upper bound (BUSY_MS), and no test on the real clock asserts how much a search got done
- * before its time ran out: a search that was kept waiting all that time has honestly done
- * nothing. Where the answer of a search is asserted, time is not what ends it (nodesOnly, or a
- * 20 s budget for a seed search). Where time is the subject (maxMs, budgetMs, sliceMs and their
- * defaults) the search runs on a test clock that only moves when the solver looks at it
+ * loose upper bound (BUSY_MS), and no test on the real clock expects a search to have got
+ * anything done before its time ran out: one that was kept waiting all that time has honestly
+ * done nothing. Where the answer of a search is asserted, time is not what ends it (nodesOnly,
+ * or a 20 s budget for a seed search). Where time is the subject (maxMs, budgetMs, sliceMs and
+ * their defaults) the search runs on a test clock that only moves when the solver looks at it
  * (testClock): when it stops, how much it searched until then, how long a slice is and how many
  * slices fit in a budget are then exact numbers, the same on every machine and every run.
  *
@@ -1176,26 +1176,40 @@ describe('findWinnableSeedAsync', () => {
 
   test('a search paused across many slices gives exactly the uninterrupted result', async () => {
     for (const drawCount of [1, 3]) {
-      // a deal that needs several thousand nodes: many 1 ms slices
+      // A deal that needs several thousand nodes, in 1 ms slices. On a test clock: how many
+      // slices that makes is then a matter of the search alone, not of how fast the machine is
+      // (on the real clock a fast one is through with such a deal in two or three slices).
       const seed = findSeed(drawCount, Solver.DEFAULTS.seedMaxNodes, (r) => r.solved && r.nodes > 7000);
       const expected = Solver.solve(deal(seed, drawCount), nodesOnly(Solver.DEFAULTS.seedMaxNodes));
-      const watch = await watchTimers(() => Solver.findWinnableSeedAsync({ drawCount: drawCount, startSeed: seed, sliceMs: 1, budgetMs: 20000 }));
+      const clock = testClock(1 / 16);
+      let watch;
+      try {
+        watch = await watchTimers(() => Solver.findWinnableSeedAsync({ drawCount: drawCount, startSeed: seed, sliceMs: 1, budgetMs: 20000 }), clock);
+      } finally {
+        clock.restore();
+      }
       const r = watch.result;
       assert.deepEqual({ seed: r.seed, certified: r.certified, tried: r.tried }, { seed: seed, certified: true, tried: 1 });
       assert.deepEqual(r.moves, expected.moves);
-      assert.ok(watch.yields >= 3, 'it yielded while searching one deal (' + watch.yields + ' timers)');
+      // A slice of 1 ms is at most 16 looks at this clock, a look comes every 16 search steps
+      // and a node takes at least one step: the search was paused at least every 256 nodes.
+      assert.ok(watch.yields >= expected.nodes / 256, 'it yielded while searching one deal (' + watch.yields + ' timers for ' + expected.nodes + ' nodes)');
+      assert.equal(watch.slices.length, watch.yields);
       assertWins(deal(seed, drawCount), r.moves, 'sliced search');
     }
   });
 
   test('yields between slices: the event loop keeps turning while a long search runs', async () => {
-    // One deal that would take much longer than the budget of 300 ms, in 5 ms slices. A search
-    // that did not yield would be one single slice with no heartbeat between its timers. How
-    // long a slice lasts in real time is not asserted here: on a busy machine the process is
-    // kept waiting in the middle of one. The next test measures the slices on a test clock.
+    // One deal that would take much longer than the budget of 300 ms, in 5 ms slices, next to a
+    // heartbeat that beats every time the event loop turns. How long a slice lasts in real time
+    // and how many slices there are is not asserted here: a busy machine keeps the process
+    // waiting in the middle of a slice, for the rest of the budget if it comes to that, and the
+    // run then looks like that of a search that never yields. The next test measures and counts
+    // the slices on a test clock.
     const hard = hardSeed(3);
+    const t0 = performance.now();
     let beats = 0;
-    let lastBeat = performance.now();
+    let lastBeat = t0;
     let longestGap = 0;
     let nextBeat = null;
     (function beat() {
@@ -1205,16 +1219,16 @@ describe('findWinnableSeedAsync', () => {
       beats++;
       nextBeat = setImmediate(beat);
     })();
-    const t0 = performance.now();
     const watch = await watchTimers(() => Solver.findWinnableSeedAsync({ drawCount: 3, startSeed: hard, budgetMs: 300, sliceMs: 5, maxNodes: 1e9 }));
     const took = performance.now() - t0;
     clearImmediate(nextBeat); // no beat may run on into the next test: it would read that test's clock
     const r = watch.result;
     assert.equal(r.certified, false);
-    assert.equal(r.tried, 1);
-    assert.notEqual(r.seed, hard);
+    // It did not get past that deal and does not hand it back (the start seed itself comes back
+    // only when it was never dealt: kept waiting for the whole budget before the first slice).
+    assert.ok(r.tried <= 1, r.tried + ' deals');
+    assert.equal(r.seed, (hard + r.tried * 0x9e3779b9) >>> 0, 'the seed after the last one examined');
     assert.ok(took >= 299 && took < 300 + BUSY_MS, 'resolved when the budget ran out (' + took.toFixed(1) + ' ms)');
-    assert.ok(watch.yields >= 3, 'the search was cut into slices (' + watch.yields + ')');
     assert.equal(watch.slices.length, watch.yields);
     assert.ok(beats >= watch.yields, 'other work ran between the slices (' + beats + ' beats)');
     // the search never held the event loop for the whole of its budget, pauses and all
@@ -1272,7 +1286,7 @@ describe('findWinnableSeedAsync', () => {
     const r = await Solver.findWinnableSeedAsync({ budgetMs: 60, maxNodes: 10, startSeed: 5, sliceMs: 4 });
     const took = performance.now() - t0;
     assert.equal(r.certified, false);
-    assert.ok(r.tried > 10, r.tried + ' deals');
+    // (how many deals fit into 60 ms of real time is up to the machine; counted below)
     assert.equal(r.seed, (5 + r.tried * 0x9e3779b9) >>> 0);
     assert.ok(took >= 59 && took < 60 + BUSY_MS, took.toFixed(1) + ' ms for a 60 ms budget');
 
@@ -1346,7 +1360,9 @@ describe('findWinnableSeedAsync', () => {
     }
     const blocked = await blocker;
     assert.equal(blocked.certified, false);
-    assert.equal(blocked.tried, 1);
+    // one deal, not finished in 120 ms (none when the process was kept waiting that long first)
+    assert.ok(blocked.tried <= 1, blocked.tried + ' deals');
+    assert.equal(blocked.seed, (hard + blocked.tried * 0x9e3779b9) >>> 0);
   });
 });
 

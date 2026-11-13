@@ -10,7 +10,7 @@
  *   UI.init() -> UI                 builds the HUD and the toolbar and subscribes to SOL.Bus. Idempotent. SOL.Game
  *                                   may be missing or half-built: the UI then shows an empty status and fills in
  *                                   from the first 'game:status' / 'game:new'.
- *   UI.openMenu()                   3D gallery, card backs, statistics, settings, how to play, sound, restart
+ *   UI.openMenu()                   3D card gallery, card backs, statistics, settings, how to play, sound, restart
  *                                   this deal, install app (only when SOL.PWA.canInstall)
  *   UI.openSettings()   UI.openStats()   UI.openHelp()
  *   UI.closeAll()                   closes every sheet / dialog (pending confirm() promises resolve false)
@@ -19,6 +19,8 @@
  *   UI.toast(message, { type = 'info' | 'success' | 'warn' | 'error', duration = 2600 }) -> { dismiss() }
  *                                   duration 0 / Infinity = until tapped or dismiss(). At most 3 are visible;
  *                                   repeating the message of a visible toast restarts it instead of stacking.
+ *                                   (extra) passive: true = it only tells: it cannot be tapped away and taps
+ *                                   go through it to whatever lies underneath.
  *   UI.confirm({ title, message, confirmLabel = 'OK', cancelLabel = 'Cancel', danger = false }) -> Promise<boolean>
  *                                   false for cancel, backdrop, Esc, Android back, drag down, closeAll().
  *
@@ -34,12 +36,14 @@
  *   UI.refresh()                    re-reads SOL.Game.getStatus() and re-renders the HUD and the toolbar
  *
  * What it listens to (SOL.Bus): 'game:status', 'game:new', 'game:tick', 'game:change', 'game:busy', 'game:won',
- * 'game:stuck', 'settings:change', 'stats:change'.
- * What it calls: SOL.Game.undo / hint / newGame / restartDeal / autoComplete / getStatus / pause('modal') /
- * resume('modal'); SOL.Settings.get / set / reset; SOL.Stats.summary / reset; SOL.Inspector.openGallery({ tab });
- * SOL.Cards.create / createBackOnly / setBack / suitSvg; SOL.Haptics.play; SOL.Audio.play;
- * SOL.App.addBackHandler; SOL.Platform.isNativeApp / canHover; SOL.PWA.canInstall / promptInstall() and its
- * 'pwa:change' event; and, inside the Android app, the shell's SolitaireNative.openSourceLicenses() (the one
+ * 'game:stuck', 'game:quality', 'celebrate:start', 'inspector:open', 'inspector:close', 'settings:change',
+ * 'stats:change'.
+ * What it calls: SOL.Game.undo / hint / newGame / restartDeal / autoComplete / getStatus / getEffects /
+ * chooseEffects / isBusy / isPaused / pause('modal') / resume('modal'); SOL.Settings.get / set / reset;
+ * SOL.Stats.summary / reset; SOL.Store.get / set (one key, 'tips.v1'); SOL.Inspector.openGallery({ tab }) /
+ * isOpen; SOL.Input.isActive; SOL.Cards.create / createBackOnly / setBack / suitSvg; SOL.Haptics.play; SOL.Audio.play;
+ * SOL.App.addBackHandler; SOL.Platform.isNativeApp / canHover / isTouch; SOL.PWA.canInstall / promptInstall()
+ * and its 'pwa:change' event; and, inside the Android app, the shell's SolitaireNative.openSourceLicenses() (the one
  * bridge method the UI calls itself; contract: the header of js/core/platform.js). Every one of them is
  * optional at run time.
  *
@@ -47,16 +51,35 @@
  * -----------------------
  * - Modal layers form a stack. Each one registers a SOL.App back handler while it is open, traps focus,
  *   restores focus when it closes, and closes on Esc / backdrop tap. SOL.Game.pause('modal') is called when
- *   the first one opens and resume('modal') when the last one starts to close (never nested).
+ *   the first one opens and resume('modal') when the last one starts to close (never nested). While the 3D
+ *   preview / gallery (SOL.Inspector) is open — it lies above every panel — Esc and Back are the inspector's:
+ *   a panel's back handler declines.
  * - The win screen opens ~2.5 s after 'game:won' (SOL.Anim.wait, so it follows the speed setting and is
  *   immediate under reduced motion), and at the latest 4 s of real time after it (SOL.Anim's clock runs slow
- *   when frames are long); a new game or an undo in between cancels it.
+ *   when frames are long); a new game or an undo in between cancels it. It never opens under something else:
+ *   while a panel (the menu) or the 3D preview / gallery covers the table it waits, and comes up when that has
+ *   closed (for the inspector: right after 'inspector:close').
+ * - The win screen is built ahead: at 'celebrate:start' it is put into the document out of sight (a "staged"
+ *   panel: `#overlay-root > .ui-staged`, visibility hidden, no aria-modal, not counted by isOpen(), nothing
+ *   paused, no back handler), so the cost of building and laying it out falls into the celebration's quiet
+ *   first beat and not into the moment it slides in. It becomes a `.ui-layer.ui-layer--win` when it opens:
+ *   a `.ui-layer` in the document is always a panel that is open (or closing).
  * - The "no more moves" card is not modal: it docks over the toolbar (which is inert and faded out while it
  *   is covered; the card has Undo / New game itself), never takes focus, registers NO back handler (see
  *   showStuck), and goes away on the next 'game:change' / 'game:new'. "Keep looking" silences it until the
  *   next deal.
  * - Settings shows a control for every key of SOL.Settings; 'fullscreen' only inside the Android app
- *   (SOL.Platform.isNativeApp), where it has an effect.
+ *   (SOL.Platform.isNativeApp), where it has an effect. "Effects quality" shows the level in force
+ *   (SOL.Game.getEffects().effective), which is Low with the hint "Lowered automatically" while the adaptive
+ *   lite mode is on, whatever is stored; a tap on either option then goes to SOL.Game.chooseEffects() and
+ *   ends lite mode. It follows 'game:quality' while the sheet is open.
+ * - The one-time tip: "Tip: touch and hold a card to see it in 3D" ("press and hold" without touch) as a
+ *   toast, once per installation (SOL.Store 'tips.v1' = { hold: true }), 1.2 s after the table has come to
+ *   rest with nothing open on it: not during a deal, not over a panel, the "no more moves" card, the win or
+ *   the inspector, and not while a finger has hold of a card. The toast is passive (taps go through it, and
+ *   showing it reads no layout) and leaves when a panel or the inspector opens. A player who opens the 3D
+ *   preview from the table first is never told; neither is a page without SOL.Input or SOL.Inspector (a
+ *   demo page), where the gesture does not exist.
  * - Inside the Android app Settings ends with "About > Open-source licences": a sheet of its own, on top of the
  *   settings, with the notices of the libraries the app bundles (the text comes from the shell, see
  *   openLicences). It closes like every sheet: its button, Back, Esc, backdrop, drag down. The row exists only
@@ -69,12 +92,14 @@
  *   56px of the tap that opened it; 320 ms when it opened by itself, 600 ms for the win screen), so the second
  *   tap of a double tap cannot press what has just slid under the finger. After a tap closes a panel (or
  *   answers the "no more moves" card, or dismisses a toast) the whole screen ignores taps for 340 ms
- *   (.ui-shield), so that second tap cannot reach the toolbar or the cards underneath either. A held
- *   Enter / Space only counts once on anything that opens or answers a panel. Keyboard, Android back and
- *   script-driven closes are not delayed by any of this.
+ *   (.ui-shield), so that second tap cannot reach the toolbar or the cards underneath either; the same when
+ *   a tap closed the inspector and it is gone at once (reduced motion). A held Enter / Space only counts once
+ *   on anything that opens or answers a panel. Keyboard, Android back and script-driven closes are not
+ *   delayed by any of this. (Taps inside the inspector: see its own header.)
  * - The HUD can never overlap itself or run off the screen: fitHud() measures it when the room or the number
  *   of characters on show changes, drops the word "Draw" when it is tight and, for absurd values, scales the
- *   bar down to the width there is. Everyday values never trigger either.
+ *   bar down to the width there is. Everyday values never trigger either. When the characters change, the
+ *   measuring happens one frame later in a task of its own (fitHudSoon), never inside the status handler.
  * - The Auto-complete pill floats above the toolbar on a phone in portrait and sits inside the toolbar, at its
  *   outer end, from 640px wide and on a phone held sideways (ui.css decides; the labels step aside when both
  *   do not fit).
@@ -84,6 +109,9 @@
  * - Sheets and dialogs open and close with CSS transitions on transform / opacity (animateIn / animateOut):
  *   they run on the compositor, so a busy main thread does not make them stutter. Their durations follow
  *   SOL.Anim.speed and they are skipped when SOL.Anim.reduced is set — the two things SOL.Anim exists for.
+ *   Opening reads no layout and forces no style pass: the starting pose is a percentage of the sheet itself,
+ *   the slide starts two frames after the panel was put into the document, and whether the body scrolls is
+ *   learnt from a ResizeObserver.
  * - Everything that must follow JS input or state runs on SOL.Anim: dragging a sheet and its release, the
  *   Auto-complete pill, the HUD's flash / chip / bumps (createPulse), the win screen's count-up, the win-rate
  *   ring, the "no more moves" card.
@@ -387,6 +415,7 @@
     els: null, roller: null, score: null, moves: null, time: null, draw: null, liveTimer: 0,
     flash: null, chipFx: null, movesFx: null, badgeFx: null, // re-fireable one-shot effects (createPulse)
     box: null, bar: null, fitKey: '', // fitHud(): what the bar was last fitted for
+    fitQueued: false, // fitHudSoon(): a fit is on its way
   };
   // Stray-tap protection (see noteClick, openLayer and shield)
   const GUARD_OPEN_MS = 160; // after a panel opens on a tap, every tap on it is ignored for this long...
@@ -410,7 +439,15 @@
   let winToken = 0;
   let winWait = null;
   let winCap = 0;
-  let pendingWin = null;
+  let pendingWin = null; // the win screen's payload while something covers the table (see releaseWin)
+  let winToStage = null; // the 'game:won' payload until the celebration starts (see stageWin)
+  let stagedWin = null; // { payload, layer, els, … }: the win screen built ahead, waiting out of sight
+  let inspUp = false; // between 'inspector:open' and 'inspector:close' (so also while it fades out)
+  // The one-time tip about touch-and-hold (see tipSoon)
+  const TIPS_KEY = 'tips.v1'; // SOL.Store: { hold: true } once the tip has been shown on this installation
+  const TIP_DELAY_MS = 1200; // how long the table has to be at rest in front of the player before the tip
+  const TIP_SHOW_MS = 5200;
+  const tip = { done: false, timer: 0, toast: null };
 
   // ================================================================== HUD
 
@@ -620,7 +657,34 @@
   function renderTimerVisibility() {
     if (!hud.els) return;
     hud.els.time.hidden = sGet('showTimer', true) === false;
-    fitHud(false);
+    fitHudSoon();
+  }
+
+  /** What the fit of the bar depends on, besides the room: the number of characters on show. */
+  function hudFitKey() {
+    return [
+      fmtInt(hud.score || 0).length, fmtInt(hud.moves || 0).length, (hud.time || '').length,
+      hud.els.time.hidden ? 0 : 1, hud.draw || 0,
+    ].join(':');
+  }
+
+  /**
+   * fitHud() for callers inside a status, tick or settings handler. Those run in the middle of the player's
+   * action or of an animation frame, right after the table has written styles: a layout read there makes the
+   * browser style and lay out everything on the spot. Nothing is read here. When the number of characters on
+   * show has changed, ONE fit is queued for after the next frame, in a task of its own — the browser has laid
+   * the page out by then and the read is free.
+   */
+  function fitHudSoon() {
+    if (!hud.bar || !hud.box || !hud.els || hud.fitQueued) return;
+    if (hudFitKey() === hud.fitKey) return;
+    hud.fitQueued = true;
+    const run = () => {
+      hud.fitQueued = false;
+      fitHud(false);
+    };
+    if (typeof root.requestAnimationFrame === 'function') root.requestAnimationFrame(() => root.setTimeout(run, 0));
+    else root.setTimeout(run, 0);
   }
 
   /**
@@ -630,16 +694,13 @@
    * that is not enough, is scaled down as a whole to the width there is.
    *
    * It reads layout, so it only runs when the room or the number of characters on show has changed (not on
-   * every status, and never inside an animation frame).
+   * every status), and never inside a handler or an animation frame: those callers use fitHudSoon().
    */
   function fitHud(force) {
     const bar = hud.bar;
     const box = hud.box;
     if (!bar || !box || !hud.els) return;
-    const key = [
-      fmtInt(hud.score || 0).length, fmtInt(hud.moves || 0).length, (hud.time || '').length,
-      hud.els.time.hidden ? 0 : 1, hud.draw || 0,
-    ].join(':');
+    const key = hudFitKey();
     if (!force && key === hud.fitKey) return;
     hud.fitKey = key;
     const hadFit = bar.classList.contains('is-tight') || bar.style.transform !== '';
@@ -811,7 +872,7 @@
     renderMoves(Math.max(0, Math.round(Number(status.moves) || 0)), isMove);
     renderTime(status.elapsedMs);
     renderDraw(status.drawCount);
-    fitHud(false);
+    fitHudSoon();
     renderToolbar();
     // The win was undone: the win screen (shown or still waiting for the celebration) no longer applies.
     if (wasWon && !status.won) cancelWin(true);
@@ -904,6 +965,11 @@
     } catch (err) {
       return false;
     }
+  }
+
+  /** The 3D preview / gallery covers the screen: open, or still fading out (until 'inspector:close'). */
+  function inspectorUp() {
+    return inspUp || inspectorOpen();
   }
 
   function focusables(rootEl) {
@@ -1017,7 +1083,7 @@
    * Opens with CSS transitions on transform / opacity: they run on the compositor, so the panel keeps gliding
    * even when the main thread is busy (the build of its own content, effects on the table, a slow phone).
    */
-  function animateIn(layer) {
+  function animateIn(layer, posed) {
     const sheet = layer.sheet;
     const backdrop = layer.backdrop;
     layer.mode = isSheetMode() ? 'sheet' : 'dialog';
@@ -1027,32 +1093,63 @@
       return;
     }
     // 1. the starting pose, without a transition
+    startPose(layer);
+    // 2. the browser takes note of it by rendering it — NOT by a style flush here (getComputedStyle, or the
+    //    sheet's offsetHeight): that would make it style and lay out the whole new panel on the spot, inside
+    //    the task that has just built it. The resting pose follows two frames later (one is not enough when
+    //    this runs before the frame's own callbacks: both poses would land in the same style pass).
+    let raf = 0;
+    const go = () => {
+      raf = 0;
+      layer.afterMotion = null;
+      // 3. the resting pose, with a transition
+      backdrop.style.transition = 'opacity ' + transitionMs(260) + 'ms ease-out';
+      backdrop.style.opacity = '1';
+      if (layer.mode === 'sheet') {
+        sheet.style.transition = 'transform ' + ms + 'ms ' + EASE_SHEET_IN;
+        sheet.style.transform = 'translate3d(0,0,0)';
+      } else {
+        sheet.style.transition = 'transform ' + ms + 'ms ' + EASE_DIALOG_IN + ', opacity ' + Math.round(ms * 0.55) + 'ms linear';
+        sheet.style.transform = 'translate3d(0,0,0)';
+        sheet.style.opacity = '1';
+      }
+      layer.y = 0;
+      layer.afterMotion = afterTransform(sheet, ms, () => settleLayer(layer));
+    };
+    // (`posed`: a staged panel was rendered in this very starting pose long ago — its slide starts at once)
+    if (posed || typeof root.requestAnimationFrame !== 'function') {
+      go();
+      return;
+    }
+    raf = root.requestAnimationFrame(() => {
+      raf = root.requestAnimationFrame(go);
+    });
+    // (freezeLayer — a close or a grab before the slide has begun — calls this: the panel stays in its
+    // starting pose, out of sight, and animateOut's zero-distance transition ends on its timer)
+    layer.afterMotion = () => {
+      if (raf) root.cancelAnimationFrame(raf);
+      raf = 0;
+    };
+  }
+
+  /**
+   * The pose a panel slides in from, without a transition: a sheet its own height (+ 24px) below its place — a
+   * percentage of itself, so nothing is measured — a dialog small and transparent; the backdrop transparent.
+   * Nothing of the panel can be seen in it (a staged panel waits in it, see stageLayer).
+   */
+  function startPose(layer) {
+    const sheet = layer.sheet;
+    const backdrop = layer.backdrop;
     sheet.style.transition = 'none';
     backdrop.style.transition = 'none';
     backdrop.style.opacity = '0';
     if (layer.mode === 'sheet') {
-      layer.y = (sheet.offsetHeight || 420) + 24;
-      sheet.style.transform = 'translate3d(0,' + layer.y + 'px,0)';
+      sheet.style.transform = 'translate3d(0,calc(100% + 24px),0)';
+      sheet.style.opacity = '';
     } else {
       sheet.style.transform = DIALOG_FROM;
       sheet.style.opacity = '0';
     }
-    // 2. make the browser take note of it (one style flush at open time: the layout is already clean)
-    void root.getComputedStyle(sheet).transform;
-    void root.getComputedStyle(backdrop).opacity;
-    // 3. the resting pose, with a transition
-    backdrop.style.transition = 'opacity ' + transitionMs(260) + 'ms ease-out';
-    backdrop.style.opacity = '1';
-    if (layer.mode === 'sheet') {
-      sheet.style.transition = 'transform ' + ms + 'ms ' + EASE_SHEET_IN;
-      sheet.style.transform = 'translate3d(0,0,0)';
-    } else {
-      sheet.style.transition = 'transform ' + ms + 'ms ' + EASE_DIALOG_IN + ', opacity ' + Math.round(ms * 0.55) + 'ms linear';
-      sheet.style.transform = 'translate3d(0,0,0)';
-      sheet.style.opacity = '1';
-    }
-    layer.y = 0;
-    layer.afterMotion = afterTransform(sheet, ms, () => settleLayer(layer));
   }
 
   /**
@@ -1256,8 +1353,11 @@
    * spec: { kind, title, header = true, closeButton = true, className, role, dismissible = true, pause = true,
    *         sound = true, returnFocus, initialFocus(layer) -> element, build(layer), onClose(result),
    *         guardMs: how long taps on the new panel are ignored (default: see GUARD_OPEN_MS / GUARD_SELF_MS) }
+   * staged: true builds the panel and puts it into the document OUT OF SIGHT and inert (see stageLayer);
+   * presentLayer(layer) opens it later. The work of building, styling and laying it out is then paid at a
+   * moment of the caller's choosing instead of the moment it has to slide in (the win screen, see stageWin).
    */
-  function openLayer(spec) {
+  function openLayer(spec, staged) {
     const titleId = 'ui-title-' + ++uid;
     const sheet = h('div.ui-sheet' + (spec.className ? '.' + spec.className : ''), {
       role: spec.role || 'dialog', 'aria-modal': 'true', 'aria-labelledby': titleId, tabindex: '-1',
@@ -1265,7 +1365,10 @@
     const content = h('div.ui-sheet__content');
     const body = h('div.ui-sheet__body', null, content);
     const backdrop = h('div.ui-backdrop');
-    const el = h('div.ui-layer.ui-layer--' + spec.kind, { 'data-kind': spec.kind }, backdrop, sheet);
+    // (a staged panel is no .ui-layer yet, so that nothing that looks for open panels finds it: stageLayer)
+    const el = staged
+      ? h('div.ui-staged', null, backdrop, sheet)
+      : h('div.ui-layer.ui-layer--' + spec.kind, { 'data-kind': spec.kind }, backdrop, sheet);
 
     const layer = {
       spec: spec, kind: spec.kind, el: el, sheet: sheet, backdrop: backdrop, body: body, content: content,
@@ -1273,6 +1376,7 @@
       scrollable: false, paused: false, cleanup: [], openedAt: nowMs(),
       returnFocus: spec.returnFocus !== undefined ? spec.returnFocus : doc.activeElement,
       removeBack: null, resolveClosed: null, closed: null,
+      staged: false, opener: null, guardAll: 0, guardNear: 0, // (see stageLayer / presentLayer)
     };
     layer.closed = new Promise((resolve) => {
       layer.resolveClosed = resolve;
@@ -1307,16 +1411,16 @@
     // Stray taps (see shield): the second tap of a double tap lands on whatever this panel has just put under
     // the finger, and a panel that comes up by itself (the win screen) slides in under a finger that was aimed
     // at the table. Neither may press anything. Capture phase on the layer: before any button's own handler.
-    const opener = lastTap && layer.openedAt - lastTap.t < 120 ? lastTap : null;
-    const guardAll = layer.openedAt + (spec.guardMs !== undefined ? spec.guardMs : opener ? GUARD_OPEN_MS : GUARD_SELF_MS);
-    const guardNear = opener ? layer.openedAt + GUARD_NEAR_MS : 0;
+    // (The times count from the moment the panel is presented: presentLayer sets layer.opener / guardAll /
+    // guardNear.)
     el.addEventListener('click', (e) => {
       if (!isPointerClick(e)) return;
       // When the tap happened, not when it is handled: on a busy phone a click can wait in the queue while
       // the panel is being built, and would otherwise look later than it was.
       const t = e.timeStamp > 0 ? Math.min(nowMs(), e.timeStamp) : nowMs();
-      const near = opener && t < guardNear && Math.abs(e.clientX - opener.x) < GUARD_NEAR_PX && Math.abs(e.clientY - opener.y) < GUARD_NEAR_PX;
-      if (t < guardAll || near) {
+      const opener = layer.opener;
+      const near = opener && t < layer.guardNear && Math.abs(e.clientX - opener.x) < GUARD_NEAR_PX && Math.abs(e.clientY - opener.y) < GUARD_NEAR_PX;
+      if (t < layer.guardAll || near) {
         e.stopPropagation();
         e.preventDefault();
       }
@@ -1346,17 +1450,80 @@
     });
 
     body.addEventListener('scroll', () => updateScrollState(layer, false), { passive: true });
+    // Whether the body scrolls is a layout question, and it is not asked here: read right after the insert
+    // below, it would make the browser style and lay out the whole new panel on the spot. The observer reports
+    // for the first time as soon as the browser has laid the panel out by itself — in the same frame, before
+    // it is painted. Until then the body counts as not scrolling (the default of layer.scrollable).
+    body.classList.add('is-static');
     if (typeof root.ResizeObserver === 'function') {
       const ro = new root.ResizeObserver(() => updateScrollState(layer, true));
       ro.observe(body);
       ro.observe(content);
       layer.cleanup.push(() => ro.disconnect());
+    } else {
+      root.setTimeout(() => {
+        if (!layer.closing) updateScrollState(layer, true);
+      }, 50);
     }
     attachDrag(layer);
 
     overlayRoot.appendChild(el);
+    if (staged) stageLayer(layer);
+    else presentLayer(layer);
+    return layer;
+  }
+
+  /**
+   * Parks a freshly built panel in the document, out of sight and out of reach, and not counted as open (not
+   * in `layers`, no pause, no back handler, no focus). Its element is a .ui-staged instead of a .ui-layer
+   * (ui.css): the same box, but visibility: hidden, which does all of it — nothing is painted, taps go through
+   * to the table, keyboard and screen readers skip it — while the browser still styles and lays the panel out
+   * with its next frame, which is the point. Whoever looks for panels in the document (.ui-layer, [data-kind],
+   * [aria-modal]) does not find it. Showing it is a change of class (presentLayer): nothing is laid out again.
+   */
+  function stageLayer(layer) {
+    layer.staged = true;
+    layer.sheet.removeAttribute('aria-modal'); // an open dialog is recognised by it (SOL.Celebrate does)
+    layer.mode = isSheetMode() ? 'sheet' : 'dialog';
+    startPose(layer);
+  }
+
+  /** Throws a staged panel away (it was never presented). */
+  function dropStaged(layer) {
+    if (!layer || !layer.staged || layer.closing) return;
+    layer.closing = true;
+    for (const off of layer.cleanup.splice(0)) {
+      try {
+        off();
+      } catch (err) {
+        /* ignore */
+      }
+    }
+    layer.el.remove();
+    layer.resolveClosed(undefined);
+  }
+
+  /** The panel opens: counted, paused for, focused, sliding in. (Second half of openLayer.) */
+  function presentLayer(layer) {
+    const spec = layer.spec;
+    const sheet = layer.sheet;
+    // A staged panel has been rendered in its starting pose: its slide can start at once — unless the screen
+    // has changed between sheet and dialog since (a rotation), which has another starting pose.
+    const posed = !!layer.staged && layer.mode === (isSheetMode() ? 'sheet' : 'dialog');
+    if (layer.staged) {
+      layer.staged = false;
+      layer.el.className = 'ui-layer ui-layer--' + layer.kind; // (the box of a .ui-staged is the same)
+      layer.el.setAttribute('data-kind', layer.kind);
+      sheet.setAttribute('aria-modal', 'true');
+      if (spec.returnFocus === undefined) layer.returnFocus = doc.activeElement;
+      layer.openedAt = nowMs(); // (an ordinary panel counts from before it was built, see the click guard)
+    }
+    const opener = lastTap && layer.openedAt - lastTap.t < 120 ? lastTap : null;
+    layer.opener = opener;
+    layer.guardAll = layer.openedAt + (spec.guardMs !== undefined ? spec.guardMs : opener ? GUARD_OPEN_MS : GUARD_SELF_MS);
+    layer.guardNear = opener ? layer.openedAt + GUARD_NEAR_MS : 0;
     layers.push(layer);
-    updateScrollState(layer, true);
+    if (tip.toast) tip.toast.dismiss(); // the tip belongs to the bare table
 
     if (spec.pause !== false) {
       layer.paused = true;
@@ -1364,6 +1531,9 @@
     }
     if (SOL.App && typeof SOL.App.addBackHandler === 'function') {
       layer.removeBack = SOL.App.addBackHandler(() => {
+        // Back acts on what the player sees: the 3D preview / gallery lies above every panel of ours, and
+        // its own handler is asked next (SOL.App tries the next handler when one declines).
+        if (inspectorOpen()) return false;
         if (spec.dismissible !== false) closeLayer(layer);
         return true; // even a panel that cannot be dismissed keeps "back" from leaving the app
       });
@@ -1381,7 +1551,7 @@
       /* focus is best effort */
     }
 
-    animateIn(layer);
+    animateIn(layer, posed);
     if (spec.sound !== false) audio('open');
     return layer;
   }
@@ -1440,11 +1610,20 @@
     }
     layer.resolveClosed(result);
 
-    if (!layers.length && pendingWin && !o.keepPendingWin) {
-      const p = pendingWin;
-      pendingWin = null;
-      if (status.won) showWin(p);
-    }
+    if (!o.keepPendingWin) releaseWin();
+    if (!layers.length) tipSoon();
+  }
+
+  /**
+   * The win screen that had to wait (pendingWin) comes up as soon as nothing covers the table any more: no
+   * panel of ours and not the 3D preview / gallery, which lies above everything of ours — a win screen opened
+   * underneath it could not be seen, and Android back would close it unseen.
+   */
+  function releaseWin() {
+    if (!pendingWin || layers.length || inspectorUp()) return;
+    const p = pendingWin;
+    pendingWin = null;
+    if (status.won) showWin(p);
   }
 
   /** Opens `spec` in place of the layer `prev` (menu -> settings): focus returns to where `prev` came from. */
@@ -1526,7 +1705,10 @@
     });
   }
 
-  /** { label, options: [{ value, label }], get(), set(value) } -> { el, sync() } */
+  /**
+   * { label, options: [{ value, label }], get(), set(value), again() } -> { el, sync() }
+   * again (optional): true while picking the option that is already selected must reach set() as well.
+   */
   function segmented(o) {
     const group = h('div.ui-seg', { role: 'radiogroup', 'aria-label': o.label });
     group.style.setProperty('--n', String(o.options.length));
@@ -1551,7 +1733,7 @@
       markRadios(btns, i);
     }
     function choose(i) {
-      if (i !== index()) o.set(o.options[i].value);
+      if (i !== index() || (o.again && o.again())) o.set(o.options[i].value);
       sync();
     }
     radioKeys(group, btns, choose);
@@ -1609,8 +1791,18 @@
         report('SOL.Inspector.openGallery threw', err);
       }
     }
-    toast('The 3D gallery is not available', { type: 'warn' });
+    toast('The 3D card gallery is not available', { type: 'warn' });
     return false;
+  }
+
+  /**
+   * From a panel into the gallery. The panel closes; a win screen that was waiting behind it (pendingWin) goes
+   * on waiting, for the gallery now — unless the gallery did not open.
+   */
+  function galleryFrom(layer, tab) {
+    closeLayer(layer, undefined, { keepFocus: true, keepPendingWin: true });
+    openGallery(tab);
+    releaseWin();
   }
 
   /**
@@ -1787,8 +1979,7 @@
       type: 'button', 'data-menu': 'gallery',
       onclick: () => {
         feedback();
-        closeLayer(layer, undefined, { keepFocus: true });
-        openGallery('cards');
+        galleryFrom(layer, 'cards');
       },
     },
       stage,
@@ -1822,8 +2013,7 @@
       tile('backs', 'backs', 'Card backs', () => {
         // The inspector's gallery has the full 3D picker; without it the settings sheet still has one.
         if (SOL.Inspector && typeof SOL.Inspector.openGallery === 'function') {
-          closeLayer(layer, undefined, { keepFocus: true });
-          openGallery('backs');
+          galleryFrom(layer, 'backs');
         } else {
           replaceLayer(layer, settingsSpec());
         }
@@ -1956,6 +2146,49 @@
       field('Card back', null, add(backPicker()), null, 'cardBack')));
 
     // ---- motion
+    // Effects quality shows the level IN FORCE, which is not always the stored one: on a struggling device the
+    // controller lowers the effects by itself for the session (adaptive lite mode, SOL.Game.getEffects()).
+    const fxNow = () => {
+      const g = SOL.Game;
+      if (g && typeof g.getEffects === 'function') {
+        try {
+          const e = g.getEffects();
+          if (e && (e.effective === 'high' || e.effective === 'low')) return e;
+        } catch (err) {
+          report('SOL.Game.getEffects threw', err);
+        }
+      }
+      const v = sGet('effects', 'high') === 'low' ? 'low' : 'high';
+      return { chosen: v, effective: v, lite: false, locked: false };
+    };
+    const fxHint = h('span.ui-field__hint', { id: layer.titleId + '-fx', 'data-settings': 'effects-hint' }, '');
+    const syncFxHint = () => {
+      fxHint.textContent = fxNow().lite ? 'Lowered automatically' : 'Low saves battery';
+    };
+    syncs.push(syncFxHint);
+    syncFxHint();
+    const fxSeg = segmented({
+      label: 'Effects quality',
+      options: [{ value: 'high', label: 'High' }, { value: 'low', label: 'Low' }],
+      get: () => fxNow().effective,
+      // While the effects are lowered automatically every tap is a choice, also one on "Low", which is
+      // selected already: it makes the automatic level the player's own.
+      again: () => !!fxNow().lite,
+      // The choice goes to the controller: it counts even when the value is the stored one ("High" while
+      // lite mode has lowered the effects), which SOL.Settings.set() would swallow.
+      set: (v) => {
+        const g = SOL.Game;
+        let done = false;
+        try {
+          done = !!(g && typeof g.chooseEffects === 'function' && g.chooseEffects(v));
+        } catch (err) {
+          report('SOL.Game.chooseEffects threw', err);
+        }
+        if (!done) sSet('effects', v);
+      },
+    });
+    fxSeg.el.setAttribute('aria-describedby', fxHint.id); // "Lowered automatically" is read out with the group
+
     c.appendChild(h('h3.ui-sec', null, 'Motion'));
     c.appendChild(h('div.ui-group', null,
       field('Animation speed', null, add(segmented(Object.assign({
@@ -1966,10 +2199,7 @@
         label: 'Reduce motion',
         options: [{ value: 'auto', label: 'Auto' }, { value: 'on', label: 'On' }, { value: 'off', label: 'Off' }],
       }, settingBinding('reducedMotion', 'auto')))), null, 'reducedMotion'),
-      field('Effects quality', 'Low saves battery', add(segmented(Object.assign({
-        label: 'Effects quality',
-        options: [{ value: 'high', label: 'High' }, { value: 'low', label: 'Low' }],
-      }, settingBinding('effects', 'high')))), null, 'effects')));
+      field('Effects quality', fxHint, add(fxSeg), null, 'effects')));
 
     // ---- sound and touch
     const range = h('input.ui-range', { type: 'range', min: '0', max: '100', step: '5', 'aria-label': 'Volume', 'data-key': 'volume' });
@@ -2060,6 +2290,7 @@
       for (const fn of syncs) fn();
     }
     layer.on('settings:change', sync);
+    layer.on('game:quality', sync); // lite mode came on (or ended) while the sheet is open
     layer.on('game:status', syncDeal);
     layer.on('game:new', syncDeal);
   }
@@ -2450,8 +2681,8 @@
 
     c.appendChild(h('h3.ui-sec', null, 'Touch controls'));
     c.appendChild(h('div.ui-group', null,
-      gest('press', '3D card preview', 'Touch and hold any face-up card to pick it up in 3D: turn it with your finger, flip it over, pinch to zoom.', true),
-      gest('cube', '3D cards button', 'Opens the whole deck as a 3D gallery, and the card backs to choose from.'),
+      gest('press', '3D preview', 'Touch and hold any face-up card to pick it up in 3D: turn it with your finger, flip it over, pinch to zoom.', true),
+      gest('cube', '3D card gallery', 'The "3D cards" button opens it: the whole deck in 3D, and the card backs to choose from.'),
       gest('tap', 'Tap a card', 'It flies to the best place it can go. Turn off "Tap to move" in Settings to use a double tap instead.'),
       gest('drag', 'Drag', 'Move a card or a run yourself. Legal places light up while you drag.'),
       gest('deck', 'Tap the deck', 'Draws one or three cards, depending on the draw mode.'),
@@ -2491,10 +2722,9 @@
         type: 'button', 'data-help': 'gallery',
         onclick: () => {
           feedback();
-          closeLayer(layer, undefined, { keepFocus: true });
-          openGallery('cards');
+          galleryFrom(layer, 'cards');
         },
-      }, h('span', { html: icon('cube'), 'aria-hidden': 'true' }), 'Open the 3D gallery')));
+      }, h('span', { html: icon('cube'), 'aria-hidden': 'true' }), 'Open the 3D card gallery')));
   }
 
   // ================================================================== confirm
@@ -2549,6 +2779,8 @@
     if (winWait && typeof winWait.cancel === 'function') winWait.cancel();
     winWait = null;
     pendingWin = null;
+    winToStage = null;
+    dropStagedWin();
     if (closeOpen) {
       const open = findLayer('win');
       if (open) {
@@ -2561,20 +2793,52 @@
     }
   }
 
+  /**
+   * 'celebrate:start': the winning card has landed and for a fifth of a second the stacks only draw breath.
+   * The win screen is built NOW, out of sight (openLayer, staged): building, styling and laying it out is the
+   * most expensive thing the UI ever does in one go, and when its delay is over the celebration is in full
+   * flight. (Not under reduced motion — the screen comes up at once there and there is no show to protect —
+   * and not for an encore: no win is waiting then.)
+   */
+  function stageWin() {
+    const payload = winToStage;
+    winToStage = null;
+    if (!payload || !inited || stagedWin || reducedMotion() || findLayer('win')) return;
+    try {
+      stagedWin = buildWin(payload, true);
+    } catch (err) {
+      stagedWin = null;
+      report('staging the win screen failed', err);
+    }
+  }
+
+  function dropStagedWin() {
+    const w = stagedWin;
+    stagedWin = null;
+    if (w) dropStaged(w.layer);
+  }
+
   function onWon(payload) {
     cancelWin(true);
     status.won = true;
     hideStuck(false);
     const token = winToken;
+    winToStage = payload; // built out of sight when the celebration starts, see stageWin
     let shown = false;
     const show = () => {
       if (shown || token !== winToken) return; // already up, or a new game / an undo cancelled it
       shown = true;
       root.clearTimeout(winCap);
       winCap = 0;
-      // Another panel is in the way (the player opened the menu during the celebration): show it afterwards.
-      if (layers.length) pendingWin = payload;
-      else showWin(payload);
+      // In a task of its own: the wait below resolves inside an animation frame of the celebration, after the
+      // table has written that frame's styles — focusing the dialog there would force a style pass on the spot.
+      root.setTimeout(() => {
+        if (token !== winToken) return; // a new game / an undo cancelled it meanwhile
+        // Something is in the way — the player opened the menu during the celebration, or the 3D card
+        // gallery during auto-complete: the screen waits and comes up when that has closed (see releaseWin).
+        if (layers.length || inspectorUp()) pendingWin = payload;
+        else showWin(payload);
+      }, 0);
     };
     // The normal path: SOL.Anim time, so the delay follows the speed setting and is immediate under reduced
     // motion. SOL.Anim counts at most 50 ms per frame; when the celebration makes frames longer than that, its
@@ -2594,13 +2858,28 @@
 
   function showWin(payload) {
     if (!inited) return;
+    const existing = findLayer('win');
+    if (existing) closeLayer(existing, undefined, { silent: true, keepFocus: true });
+    // the screen staged for this very win slides in; anything else is built on the spot
+    winToStage = null;
+    let w = stagedWin && stagedWin.payload === payload && !stagedWin.layer.closing ? stagedWin : null;
+    if (w) {
+      stagedWin = null;
+      presentLayer(w.layer);
+    } else {
+      dropStagedWin();
+      w = buildWin(payload, false);
+    }
+    if (w.els) runWinSequence(w.layer, w.els, w.score, w.bonus, w.total);
+  }
+
+  /** Builds the win screen for `payload`: opened at once, or staged (see openLayer). */
+  function buildWin(payload, staged) {
     const p = payload || {};
     const score = Math.max(0, Math.round(Number(p.score) || 0));
     const bonus = Math.max(0, Math.round(Number(p.bonus) || 0));
     const total = Number.isFinite(Number(p.total)) ? Math.round(Number(p.total)) : score + bonus;
     const drawCount = p.drawCount === 3 ? 3 : p.drawCount === 1 ? 1 : status.drawCount;
-    const existing = findLayer('win');
-    if (existing) closeLayer(existing, undefined, { silent: true, keepFocus: true });
 
     let els = null;
     const layer = openLayer({
@@ -2674,8 +2953,8 @@
           }, 'Watch the cards')));
         els = { total: totalEl, base: base, plus: plus, bonus: bonusEl, badges: Array.prototype.slice.call(badges.children) };
       },
-    });
-    if (els) runWinSequence(layer, els, score, bonus, total);
+    }, staged);
+    return { payload: payload, layer: layer, els: els, score: score, bonus: bonus, total: total };
   }
 
   /** Score counts up, the time bonus lands with a flourish, the total counts on, record badges pop in. */
@@ -2891,7 +3170,7 @@
     const card = h('div.ui-toast__card', null,
       h('span.ui-toast__icon', { html: icon(iconName), 'aria-hidden': 'true' }),
       h('span.ui-toast__msg', null, text));
-    const node = h('div.ui-toast.ui-toast--' + type, { 'data-type': type }, card);
+    const node = h('div.ui-toast.ui-toast--' + type + (o.passive ? '.ui-toast--passive' : ''), { 'data-type': type }, card);
     const t = { node: node, text: text, type: type, height: 44, timer: 0, gone: false, api: null };
     t.api = { dismiss: () => dismissToast(t) };
     card.addEventListener('click', (e) => {
@@ -2903,7 +3182,19 @@
       if (e.animationName === 'ui-toast-bump') node.classList.remove('is-bump');
     });
     toastRoot.appendChild(node);
-    t.height = node.offsetHeight || 44;
+    if (o.passive && typeof root.ResizeObserver === 'function') {
+      // It comes up by itself, in the middle of whatever the player is doing: no layout is read for it here.
+      // Its height (for stacking) is learnt when the browser has laid it out anyway.
+      const ro = new root.ResizeObserver(() => {
+        ro.disconnect();
+        if (t.gone) return;
+        t.height = node.offsetHeight || 44;
+        layoutToasts();
+      });
+      ro.observe(node);
+    } else {
+      t.height = node.offsetHeight || 44;
+    }
     toasts.push(t);
     while (toasts.length > TOAST_MAX) dismissToast(toasts[0]);
     layoutToasts();
@@ -2911,14 +3202,104 @@
     return t.api;
   }
 
+  // ================================================================== the one-time tip
+
+  /*
+   * Touch-and-hold is the only way from the table into the 3D preview, and nobody tries it on a card game by
+   * themselves. So the player is told — once per installation (SOL.Store remembers, across reloads): a toast a
+   * moment after the table has come to rest in front of them with nothing else open. It is never in the way:
+   * it cannot be tapped (taps go through it to the cards, see .ui-toast--passive) and it leaves when a panel
+   * or the preview opens. A player who finds the gesture before the tip came is never told.
+   */
+  function tipSeen() {
+    try {
+      const v = SOL.Store ? SOL.Store.get(TIPS_KEY, null) : null;
+      return !!(v && v.hold);
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function tipDone() {
+    tip.done = true;
+    root.clearTimeout(tip.timer);
+    tip.timer = 0;
+    try {
+      if (SOL.Store) SOL.Store.set(TIPS_KEY, { hold: true });
+    } catch (err) {
+      /* not remembered: it comes once more after a reload, which is better than an error */
+    }
+  }
+
+  /** The table lies at rest in front of the player and nothing of ours (or the preview) is on top of it. */
+  function tableClear() {
+    const g = SOL.Game;
+    if (!haveStatus || status.won || !g || doc.hidden) return false;
+    if (layers.length || stuck.el || inspectorUp()) return false;
+    try {
+      if ((typeof g.isBusy === 'function' && g.isBusy()) || (typeof g.isPaused === 'function' && g.isPaused())) return false;
+    } catch (err) {
+      return false;
+    }
+    return true;
+  }
+
+  /** (Re)starts the wait for the tip. Called whenever the table may just have become clear. */
+  function tipSoon() {
+    if (tip.done) return;
+    root.clearTimeout(tip.timer);
+    tip.timer = root.setTimeout(showTip, TIP_DELAY_MS);
+  }
+
+  function showTip() {
+    tip.timer = 0;
+    if (tip.done || !tableClear()) return; // not now: the next tipSoon() tries again
+    // (the gesture is SOL.Input's and what it opens is SOL.Inspector's: without either there is nothing to tell)
+    if (!SOL.Input || !SOL.Inspector || typeof SOL.Inspector.open !== 'function') return;
+    let held = false;
+    try {
+      held = typeof SOL.Input.isActive === 'function' && !!SOL.Input.isActive();
+    } catch (err) {
+      held = false;
+    }
+    if (toasts.length || held) {
+      tipSoon(); // another message is up, or a finger has hold of a card: after that
+      return;
+    }
+    tipDone();
+    const touch = SOL.Platform ? !!SOL.Platform.isTouch : mq('(pointer: coarse)');
+    tip.toast = toast('Tip: ' + (touch ? 'touch' : 'press') + ' and hold a card to see it in 3D', { duration: TIP_SHOW_MS, passive: true });
+  }
+
   // ================================================================== wiring
+
+  function onInspectorOpen(p) {
+    inspUp = true;
+    if (tip.toast) tip.toast.dismiss(); // (toasts lie above the preview)
+    if (!tip.done && p && p.mode === 'card') tipDone(); // found without being told
+  }
+
+  function onInspectorClose() {
+    inspUp = false;
+    // A tap closed it (its Close button, a tap beside the card) and it is gone before the double of that tap
+    // could have come — there is no closing animation under reduced motion: for the rest of that time the
+    // screen ignores taps, so the second one cannot reach the toolbar or the cards that have just come back.
+    const since = lastTap ? nowMs() - lastTap.t : Infinity;
+    if (since < SHIELD_MS) shield(Math.max(40, SHIELD_MS - since));
+    // In a task of its own: an open call that replaces a preview closes the old one first, and at this
+    // moment the new one is not up yet.
+    root.setTimeout(() => {
+      releaseWin();
+      tipSoon();
+    }, 0);
+  }
 
   function onSettingsChange(p) {
     const key = p && p.key;
     if (key === 'showTimer' || !key) renderTimerVisibility();
     if (key === 'drawCount' && !haveStatus) {
       renderDraw(p.value);
-      fitHud(false);
+      fitHudSoon();
     }
   }
 
@@ -2967,7 +3348,7 @@
         if (p && typeof p.elapsedMs === 'number') {
           status.elapsedMs = p.elapsedMs;
           renderTime(p.elapsedMs);
-          fitHud(false);
+          fitHudSoon();
         }
       });
       bus.on('game:change', () => {
@@ -2977,13 +3358,20 @@
         if (!p) return;
         status.busy = !!p.busy;
         renderToolbar();
+        if (!p.busy) tipSoon(); // the deal has landed
       });
       bus.on('game:won', onWon);
+      bus.on('celebrate:start', stageWin);
       bus.on('game:stuck', showStuck);
       bus.on('settings:change', onSettingsChange);
+      bus.on('inspector:open', onInspectorOpen);
+      bus.on('inspector:close', onInspectorClose);
     }
 
     applyStatus(readStatus(), true);
+    tip.done = tipSeen();
+    doc.addEventListener('visibilitychange', tipSoon); // (back in front of the player: a no-op once the tip is done)
+    tipSoon();
     return UI;
   }
 

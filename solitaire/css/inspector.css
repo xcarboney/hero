@@ -1,5 +1,6 @@
 /*
- * inspector.css — the 3D card preview (SOL.Inspector, js/view/inspector.js): card inspector + deck gallery.
+ * inspector.css — SOL.Inspector (js/view/inspector.js): the card inspector ("3D preview" on screen) and the
+ * deck gallery ("3D card gallery").
  *
  * Layout is phone portrait first (controls in the thumb zone, --safe-* insets respected, Close under the left
  * thumb for html[data-left-handed="true"]), then short landscape, then desktop. Only `transform` and `opacity`
