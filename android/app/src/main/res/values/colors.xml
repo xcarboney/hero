@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The table felt at its darkest: the web game's felt-lo token (solitaire/css/base.css). Used
+         for the window, the splash screen and the WebView so launch never flashes another colour. -->
+    <color name="table">#05241B</color>
+    <!-- Lit centre of the felt, for the launcher icon background. -->
+    <color name="table_lit">#11604A</color>
+    <!-- Flat felt for the API 24/25 launcher icon plate. -->
+    <color name="table_plate">#0C4A39</color>
+
+    <color name="gold">#F3C969</color>
+    <color name="gold_shade">#C99A2E</color>
+    <color name="card_ivory">#FDFBF5</color>
+    <color name="card_ink">#1D2230</color>
+</resources>

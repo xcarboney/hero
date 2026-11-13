@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+        One always-dark theme: the game draws its own table, the window only has to match it.
+        The Activity is an androidx.activity.ComponentActivity, so a platform theme is enough.
+
+        Launch sequence: system splash / starting window in the table colour, then the Activity
+        window in the table colour, then the WebView (same background colour), then the page.
+        MainActivity repeats the system-bar setup at runtime (enableEdgeToEdge); the attributes
+        here make the starting window look the same before any code runs.
+    -->
+    <style name="Base.Theme.Solitaire" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/table</item>
+        <item name="android:colorBackground">@color/table</item>
+        <item name="android:colorAccent">@color/gold</item>
+
+        <!-- Edge to edge: transparent bars with light icons over the dark table. -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">false</item>
+        <item name="android:enforceStatusBarContrast" tools:targetApi="29">false</item>
+        <item name="android:enforceNavigationBarContrast" tools:targetApi="29">false</item>
+
+        <!-- Android 12+ splash screen: table colour with the launcher foreground, no icon plate. -->
+        <item name="android:windowSplashScreenBackground" tools:targetApi="31">@color/table</item>
+        <item name="android:windowSplashScreenAnimatedIcon" tools:targetApi="31">@drawable/ic_launcher_foreground</item>
+    </style>
+
+    <!-- API 24-27. values-v28 and values-v30 add the display cutout mode. -->
+    <style name="Theme.Solitaire" parent="Base.Theme.Solitaire" />
+
+</resources>

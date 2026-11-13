@@ -1,0 +1,592 @@
+/*
+ * cards.css — the 3D playing card (built by SOL.Cards, js/view/cards.js).
+ *
+ * Structure:  .card > .card__shadow + .card__tilt > .card__flip > (.card__front, .card__back, .card__edges?, .card__glare)
+ *
+ * The OWNER of a card writes `transform` (and any transition) on .card itself; this file never does.
+ * Everything else is driven by custom properties set on the .card element:
+ *
+ *   --card-w     width; every other measure derives from it (40px .. 520px, no JS resize hook)
+ *   --flip       0deg face-up .. 180deg face-down          (.card__flip rotateY)
+ *   --tilt-x     \  .card__tilt rotateX / rotateY
+ *   --tilt-y     /
+ *   --lift       0..1: how far the card is off the table (the shadow spreads, softens and drops)
+ *   --glare-x    \  position of the specular highlight on the visible face, measured in that face's own
+ *   --glare-y    /  box as the viewer sees it (50% 0% = top centre)
+ *   --glare-o    0..1 highlight opacity
+ *   --sheen-o    0..1 optional iridescent band inside the glare layer (only visible while --glare-o > 0)
+ *   --shadow-o   0..1 multiplier for the lift shadow (default 1; set 0 while a card flies through 3D space)
+ *
+ * State classes (toggled by the board): .is-face-down .is-dragging .is-hint .is-target .is-dimmed .is-selectable
+ * Modifiers (set by SOL.Cards): .card--thick (visible thickness, no table shadow) .card--back-only
+ *
+ * Also honoured: <html data-effects="low"> removes the glare planes of table cards (thick cards keep a simpler one).
+ * A front narrower than 60px shows the compact layout instead of the classic one (container query, no JS);
+ * data-layout="compact" | "classic" on .card pins one of them.
+ */
+
+/*
+ * Routing of the animated properties (--flip, --tilt-*, --lift, --shadow-o, --glare-*, --sheen-o).
+ *
+ * They are ordinary inherited custom properties, read by a few inner boxes. Style recalculation is the main
+ * per-frame cost of an animating card, and a changed inherited value is re-inherited by every descendant —
+ * which would include every shape instanced by the <use> elements of the card art (the better part of a
+ * millisecond per court card per frame). So each value is cut off with `initial` at the first box below its
+ * last reader: the faces never see any of them, and the restyle normally stops there instead of walking the art.
+ *
+ * Measured in Chromium, per card per frame: owner `transform` on .card ~0.01 ms (only .card is restyled);
+ * --lift ~0.04 ms (5 boxes); --tilt-* ~0.06 ms (8 boxes); --flip / --glare-* ~0.16 ms (15 boxes: they reach
+ * the boxes around the faces). The cut-offs are an optimisation, not a guarantee: on roughly one page load in
+ * ten Blink restyles the whole card for one of the properties anyway (same picture, about 0.5 ms per court
+ * card per frame). For mass 3D choreography rotate .card itself — its transform never restyles anything else.
+ *
+ * Two things were tried and rejected, so nobody has to repeat it:
+ *  - @property registration (typed values, CSS-transitionable): with registered properties the cut-offs fail
+ *    on most page loads instead of a few, i.e. every animated frame restyles the whole card.
+ *  - `inherits: false` plus an explicit `--x: inherit` on the readers: any non-inherited change on .card —
+ *    including the owner's `transform` — then forces a restyle of .card's children, and boxes that use
+ *    explicit inheritance cannot reuse cached styles (~0.3 ms per card per frame just for moving).
+ *
+ * Consequences for owners: set these on the .card element itself, always with a unit where one is needed
+ * (--flip: 180deg, --glare-x: 30%), and animate them from JS (SOL.Anim) — unregistered properties do not
+ * interpolate in CSS transitions.
+ */
+
+/*
+ * Cut-offs. Readers: .card__shadow (and its pseudo-elements), .card__tilt, .card__flip (and its
+ * pseudo-elements) and the pseudo-elements of .card__glare.
+ */
+.card__shadow {
+  --glare-x: initial;
+  --glare-y: initial;
+  --glare-o: initial;
+  --sheen-o: initial;
+}
+.card__tilt {
+  --lift: initial;
+  --shadow-o: initial;
+}
+.card__flip {
+  --tilt-x: initial;
+  --tilt-y: initial;
+}
+.card__glare {
+  --flip: initial;
+}
+.card__face,
+.card__edges {
+  --flip: initial;
+  --glare-x: initial;
+  --glare-y: initial;
+  --glare-o: initial;
+  --sheen-o: initial;
+}
+
+.card {
+  /*
+   * Re-derived here on purpose: a custom property that contains var() is resolved where it is DECLARED, so the
+   * --card-h / --card-radius from :root would keep the root's --card-w when an ancestor overrides --card-w.
+   */
+  --card-h: calc(var(--card-w) * 1.4);
+  --card-radius: calc(var(--card-w) * 0.075);
+  --card-t: 0px;                                   /* thickness; > 0 only for .card--thick */
+  --card-paper: var(--card-face, #fdfbf5);
+  --card-paper-shade: var(--card-face-shade, #efe9da);
+
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--card-w);
+  height: var(--card-h);
+  transform-style: preserve-3d;
+  color: var(--card-ink-black, #1d2230);
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.card[data-color="red"] {
+  color: var(--card-ink-red, #c8283c);
+}
+
+.card--thick {
+  --card-t: calc(var(--card-w) * 0.025);
+}
+
+/*
+ * Whole-pixel thickness where the browser can round: every wall strip is its own compositor layer, and a layer
+ * with a fractional size gets a half-transparent last row of texels — which shows up as hairline gaps and
+ * steps where walls meet each other and the faces.
+ */
+@supports (width: round(1.5px, 1px)) {
+  .card--thick {
+    --card-t: max(1px, round(calc(var(--card-w) * 0.025), 1px));
+  }
+}
+
+/* ------------------------------------------------------------------ table shadow */
+/*
+ * Three static shadows, cross-faded by --lift, so lifting a card never repaints anything (opacity only):
+ *   - a tight contact line, baked into the faces themselves (see .card__face; always on);
+ *   - ::before — a near shadow, strongest around --lift 0.35;
+ *   - ::after  — a far, soft, dropped shadow that takes over towards --lift 1.
+ * At rest both pseudo-elements have opacity 0 and are skipped by the compositor: a resting card is one layer.
+ *
+ * All of them are outside-only box-shadows on a box with the card's footprint, so nothing is ever painted over
+ * the card whatever the depth order. The shadow box is rotated together with the faces (same tilt + flip)
+ * instead of staying flat on the table: on screen that is almost the same picture — the shadow narrows as the
+ * card turns edge-on — but it keeps every plane of a card parallel. Compositors split 3D planes that intersect,
+ * and those splits show up as hairline seams; with parallel planes there is nothing to split.
+ */
+.card__shadow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  transform-style: preserve-3d;
+  transform: rotateX(var(--tilt-x, 0deg)) rotateY(calc(var(--tilt-y, 0deg) + var(--flip, 0deg)));
+}
+
+.card__shadow::before,
+.card__shadow::after {
+  --_air: clamp(0, var(--lift, 0), 1);
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--card-radius);
+  transform: translateZ(0);                        /* own layer: its opacity changes without a repaint */
+}
+
+.card__shadow::before {
+  opacity: calc(var(--shadow-o, 1) * clamp(0, min(var(--_air) * 3, (1 - var(--_air)) * 1.6), 1));
+  box-shadow: 0 calc(var(--card-w) * 0.05) calc(var(--card-w) * 0.09) calc(var(--card-w) * -0.01) rgba(3, 8, 6, 0.42);
+}
+
+.card__shadow::after {
+  opacity: calc(var(--shadow-o, 1) * clamp(0, (var(--_air) - 0.2) * 1.25, 1));
+  box-shadow: 0 calc(var(--card-w) * 0.19) calc(var(--card-w) * 0.34) calc(var(--card-w) * -0.02) rgba(3, 8, 6, 0.46);
+}
+
+.card--thick > .card__shadow {
+  display: none;                                   /* a free-floating solid card gets its shadow from its owner */
+}
+
+/* ------------------------------------------------------------------ 3D skeleton */
+.card__tilt,
+.card__flip,
+.card__edges,
+.card__glare {
+  position: absolute;
+  inset: 0;
+  transform-style: preserve-3d;
+}
+
+.card__tilt {
+  transform: rotateX(var(--tilt-x, 0deg)) rotateY(var(--tilt-y, 0deg));
+}
+
+.card__flip {
+  transform: rotateY(var(--flip, 0deg));
+}
+
+.card__edges,
+.card__glare {
+  pointer-events: none;
+}
+
+/* ------------------------------------------------------------------ faces */
+.card__face {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--card-radius);
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+  background-color: var(--card-paper);
+  /* a whisper of top-left light: the far corner only reaches about half of the shade colour */
+  background-image: linear-gradient(152deg, #ffffff 0%, var(--card-paper) 32%, var(--card-paper) 64%, var(--card-paper-shade) 132%);
+  box-shadow:
+    inset 0 0 0 max(1px, calc(var(--card-w) * 0.006)) var(--card-border, rgba(20, 24, 36, 0.18)),
+    0 calc(var(--card-w) * 0.006) calc(var(--card-w) * 0.016) rgba(3, 8, 6, 0.42);
+}
+
+.card--thick .card__face {
+  box-shadow: inset 0 0 0 max(1px, calc(var(--card-w) * 0.006)) var(--card-border, rgba(20, 24, 36, 0.18));
+}
+
+.card__front {
+  transform: translateZ(calc(var(--card-t) / 2));
+  container: sol-card / inline-size;               /* lets the art switch layout by its own rendered width */
+}
+
+.card__back {
+  transform: rotateY(180deg) translateZ(calc(var(--card-t) / 2));
+}
+
+/*
+ * The back designs are SVG data: URIs. cards.js injects one rule per design,
+ *   .card[data-back="royal"] .card__back, .card--back-only[data-back="royal"] .card__front { background-image: url(…) }
+ * (a plain declaration rather than a custom property: a 15 KB value should not be re-substituted on every restyle).
+ */
+.card__back,
+.card--back-only .card__front {
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+}
+
+/* dim veil (also used by .is-dimmed); lives inside the face so it needs no layer of its own */
+.card__face::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: #070b12;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 180ms ease-out;
+}
+
+/* ------------------------------------------------------------------ front art */
+.card__art {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  fill: currentColor;
+  pointer-events: none;
+}
+
+.card__compact {
+  display: none;
+}
+
+/*
+ * Phone-sized cards: big rank + suit instead of pips (see compactMarkup() in cards.js). The 60px switch is
+ * published as SOL.Cards.COMPACT_BELOW and the board sizes its fans by it: change both together or not at all.
+ */
+@container sol-card (max-width: 59.9px) {
+  .card__classic {
+    display: none;
+  }
+  .card__compact {
+    display: inline;
+  }
+}
+
+/*
+ * Optional override, for owners that show one card at two sizes (the inspector flying a table card up to
+ * full size): data-layout="compact" | "classic" on .card pins the layout whatever the rendered width.
+ */
+.card[data-layout="compact"] .card__classic,
+.card[data-layout="classic"] .card__compact {
+  display: none;
+}
+.card[data-layout="compact"] .card__compact,
+.card[data-layout="classic"] .card__classic {
+  display: inline;
+}
+
+/*
+ * The fan mark (fanMarkup() in cards.js): a small suit under the compact rank, for a card whose right half is
+ * covered by the next card of a sideways fan — the compact suit sits top-right, so only the rank would show.
+ * The owner sets .is-fanned on such a card. The mark exists in the compact layout only (the classic corner
+ * index already carries its suit under the rank) and fades, so it never pops in or out on a card in view.
+ */
+.card__fan {
+  display: none;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 140ms ease-out, visibility 0s linear 140ms;
+}
+@container sol-card (max-width: 59.9px) {
+  .card__fan {
+    display: inline;
+  }
+}
+.card[data-layout="compact"] .card__fan {
+  display: inline;
+}
+.card[data-layout="classic"] .card__fan {
+  display: none;
+}
+.card.is-fanned .card__fan {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+/*
+ * The tight mark (tightMarkup() in cards.js): the suit once more, top-right, for a card of which only a strip
+ * along the top edge can be seen that is too low for the classic corner index — the suit under the rank is cut
+ * off there. The owner sets .is-tight on such a card. The mark exists in the classic layout only (the compact
+ * suit sits top-right anyway) and fades like the fan mark, so nothing pops while a column grows or shrinks.
+ */
+.card__tight {
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 140ms ease-out, visibility 0s linear 140ms;
+}
+@container sol-card (max-width: 59.9px) {
+  .card__tight {
+    display: none;
+  }
+}
+.card[data-layout="compact"] .card__tight {
+  display: none;
+}
+.card[data-layout="classic"] .card__tight {
+  display: inline;
+}
+.card.is-tight .card__tight {
+  opacity: 1;
+  visibility: visible;
+  transition-delay: 0s;
+}
+
+/* ------------------------------------------------------------------ flip shading + glare */
+/*
+ * Two overlay planes per effect, one hugging each face and culled from behind, so whichever side faces the
+ * viewer gets it — also on thick cards, where a single mid-plane would be buried inside the card.
+ *   .card__flip::before / ::after   a dark veil whose opacity deepens as --flip turns the card edge-on
+ *                                   (opacity only: no repaint);
+ *   .card__glare::before / ::after  the specular highlight (--glare-*) plus the optional sheen (--sheen-o).
+ * With nothing to show their opacity is exactly 0, so the compositor skips them. The 0.3px / 0.4px stand-off
+ * keeps each plane in front of its face for every depth-sorter without a visible parallax.
+ */
+.card__flip::before,
+.card__flip::after,
+.card__glare::before,
+.card__glare::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--card-radius);
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+  pointer-events: none;
+  outline: 1px solid transparent;                  /* pads the layer so its edge is anti-aliased in 3D */
+  opacity: 0;
+}
+
+.card__flip::before,
+.card__flip::after {
+  background: #1a130c;                             /* warm, so a turning card dims like paper instead of greying */
+}
+.card__flip::before {
+  transform: translateZ(calc(var(--card-t) / 2 + 0.3px));
+}
+.card__flip::after {
+  transform: rotateY(180deg) translateZ(calc(var(--card-t) / 2 + 0.3px));
+}
+
+.card__glare::before,
+.card__glare::after {
+  opacity: var(--glare-o, 0);
+  /*
+   * Three layers, top to bottom: the specular hot spot; its counterpart, a soft shade that pools on the side
+   * of the card turned away from the light (white paper cannot get any whiter, so without the shade a highlight
+   * would only be visible where it crosses ink); and the optional iridescent sheen.
+   */
+  background-image:
+    radial-gradient(
+      circle calc(var(--card-w) * 1.05) at var(--glare-x, 50%) var(--glare-y, 0%),
+      rgba(255, 255, 255, 0.78) 0%,
+      rgba(255, 255, 255, 0.4) 10%,
+      rgba(255, 255, 255, 0.12) 30%,
+      rgba(255, 255, 255, 0) 66%
+    ),
+    radial-gradient(
+      circle calc(var(--card-w) * 1.45) at calc(100% - var(--glare-x, 50%)) calc(100% - var(--glare-y, 0%)),
+      rgba(24, 18, 44, 0.22) 0%,
+      rgba(24, 18, 44, 0.09) 38%,
+      rgba(24, 18, 44, 0) 76%
+    ),
+    linear-gradient(
+      115deg,
+      rgba(255, 80, 140, 0) 12%,
+      rgba(255, 80, 140, calc(0.2 * var(--sheen-o, 0))) 27%,
+      rgba(255, 214, 90, calc(0.2 * var(--sheen-o, 0))) 39%,
+      rgba(90, 255, 190, calc(0.2 * var(--sheen-o, 0))) 51%,
+      rgba(90, 170, 255, calc(0.2 * var(--sheen-o, 0))) 63%,
+      rgba(190, 110, 255, calc(0.2 * var(--sheen-o, 0))) 75%,
+      rgba(190, 110, 255, 0) 90%
+    );
+  background-size: 100% 100%, 100% 100%, 220% 220%;
+  background-position: 0 0, 0 0, var(--glare-x, 50%) var(--glare-y, 0%);
+  background-repeat: no-repeat;
+}
+.card__glare::before {
+  transform: translateZ(calc(var(--card-t) / 2 + 0.4px));
+}
+.card__glare::after {
+  transform: rotateY(180deg) translateZ(calc(var(--card-t) / 2 + 0.4px));
+}
+
+/*
+ * Low-effects mode (<html data-effects="low">, contract section 14): table cards lose their glare planes, so
+ * whatever an owner writes to --glare-* costs nothing. Thick cards keep theirs — that is one card on screen,
+ * and the moving highlight is the point of looking at it.
+ */
+:root[data-effects="low"] .card:not(.card--thick) .card__glare {
+  display: none;
+}
+/* …and the thick card's highlight drops to the hot spot alone: one gradient to repaint per frame instead of three */
+:root[data-effects="low"] .card--thick .card__glare::before,
+:root[data-effects="low"] .card--thick .card__glare::after {
+  background-image: radial-gradient(
+    circle calc(var(--card-w) * 1.05) at var(--glare-x, 50%) var(--glare-y, 0%),
+    rgba(255, 255, 255, 0.78) 0%,
+    rgba(255, 255, 255, 0.4) 10%,
+    rgba(255, 255, 255, 0.12) 30%,
+    rgba(255, 255, 255, 0) 66%
+  );
+  background-size: 100% 100%;
+  background-position: 0 0;
+}
+
+/*
+ * Lighting that needs trigonometry (guarded: a var()-containing declaration with an unknown function would
+ * otherwise wipe the property instead of falling back).
+ *  - faces darken as --flip turns them edge-on;
+ *  - the shadow spreads a little while the card is up on its edge.
+ * The small subtraction clamps float noise (sin(180deg) is not exactly 0) so resting cards really reach 0.
+ */
+@supports (opacity: calc(sin(30deg))) {
+  .card__flip::before,
+  .card__flip::after {
+    opacity: max(0, 0.2 * sin(var(--flip, 0deg)) * sin(var(--flip, 0deg)) - 0.002);
+  }
+
+  .card__shadow::before,
+  .card__shadow::after {
+    --_air: clamp(0, var(--lift, 0) + 0.35 * max(sin(var(--flip, 0deg)), -1 * sin(var(--flip, 0deg))) - 0.001, 1);
+  }
+}
+
+/* ------------------------------------------------------------------ thickness (only .card--thick has edges) */
+/*
+ * Two paper slabs just inside the faces. Whatever slips through an anti-aliasing seam between two walls, or
+ * between a wall and a face, lands on one of them (or on the inside of the far wall) instead of leaving through
+ * the culled far face, so a seam can only ever show paper, never the backdrop.
+ */
+.card__edges::before,
+.card__edges::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--card-radius);
+  background: #e4ddcb;
+}
+.card__edges::before {
+  transform: translateZ(calc(var(--card-t) / 2 - 0.35px));
+}
+.card__edges::after {
+  transform: translateZ(calc(var(--card-t) / -2 + 0.35px));
+}
+
+/*
+ * One wall strip. cards.js gives each its place (--x, --y: centre, --l: length, as fractions of --card-w),
+ * its outward direction (--a) and the paper shade at its two ends (--c0, --c1: a corner strip blends from one
+ * to the other, so the lighting turns the corner smoothly). Across its width every strip gets the same
+ * profile: slightly darker where it meets the faces and a faint seam down the middle, like laminated stock.
+ *
+ * The four straight walls are culled from behind. The short corner strips are double-sided on purpose: the
+ * solid is convex, so the inside of a far strip can only ever be seen through an anti-aliasing seam between two
+ * near ones — which is exactly where it is wanted, showing paper instead of the backdrop.
+ */
+.card__edge {
+  --_len: calc(var(--card-w) * var(--l));
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--card-t);
+  height: var(--_len);
+  margin: calc(var(--_len) / -2) 0 0 calc(var(--card-t) / -2);
+  transform: translate3d(calc(var(--card-w) * var(--x)), calc(var(--card-w) * var(--y)), 0) rotateZ(var(--a)) rotateY(90deg);
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+  background-image:
+    linear-gradient(
+      90deg,
+      rgba(70, 58, 36, 0.2) 0%,
+      rgba(70, 58, 36, 0) 26%,
+      rgba(70, 58, 36, 0) 43%,
+      rgba(70, 58, 36, 0.13) 50%,
+      rgba(70, 58, 36, 0) 57%,
+      rgba(70, 58, 36, 0) 74%,
+      rgba(70, 58, 36, 0.2) 100%
+    ),
+    linear-gradient(180deg, var(--c0), var(--c1));
+}
+
+.card__edge--corner {
+  -webkit-backface-visibility: visible;
+  backface-visibility: visible;
+}
+
+@supports (width: round(1.5px, 1px)) {
+  .card__edge {
+    --_len: round(up, calc(var(--card-w) * var(--l)), 1px);   /* whole pixels, for the same reason as --card-t */
+  }
+}
+
+/* ------------------------------------------------------------------ states */
+.card.is-selectable {
+  cursor: grab;
+}
+
+.card.is-dragging,
+.card.is-dragging.is-selectable {
+  cursor: grabbing;
+}
+
+.card.is-face-down:not(.is-selectable) {
+  cursor: default;
+}
+
+.card.is-dimmed .card__face::after {
+  opacity: 0.42;
+}
+
+/*
+ * Hint + drop-target rings: an outside-only glow on the visible face. The pseudo-element only exists while the
+ * state is on, and is promoted so the pulse animates opacity/transform without repainting the card art.
+ */
+.card.is-hint .card__face::before,
+.card.is-target .card__face::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  will-change: opacity, transform;
+}
+
+.card.is-hint .card__face::before {
+  box-shadow:
+    0 0 0 calc(var(--card-w) * 0.028) var(--gold, #f3c969),
+    0 0 calc(var(--card-w) * 0.2) calc(var(--card-w) * 0.07) rgba(243, 201, 105, 0.6);
+  animation: sol-card-hint 900ms ease-in-out infinite alternate;
+}
+
+.card.is-target .card__face::before {
+  box-shadow:
+    0 0 0 calc(var(--card-w) * 0.028) var(--ok, #6ee7a8),
+    0 0 calc(var(--card-w) * 0.18) calc(var(--card-w) * 0.05) rgba(110, 231, 168, 0.55);
+  animation: sol-card-target 700ms ease-in-out infinite alternate;
+}
+
+.card.is-target .card__face::after {
+  background: #1f8a5a;
+  opacity: 0.1;
+}
+
+@keyframes sol-card-hint {
+  from { opacity: 0.35; transform: scale(0.985); }
+  to { opacity: 1; transform: scale(1.03); }
+}
+
+@keyframes sol-card-target {
+  from { opacity: 0.6; }
+  to { opacity: 1; }
+}

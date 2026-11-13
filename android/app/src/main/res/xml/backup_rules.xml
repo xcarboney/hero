@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Auto Backup rules for Android 6-11 (android:fullBackupContent).
+
+    The game in progress, the statistics and the settings (keys prefixed "sol.") live in two
+    places, and both are backed up so that a restore brings back a consistent pair:
+
+    - files/store/: the app's own key/value files (GameStorage.kt). This is the copy the game
+      reads first.
+    - The WebView's localStorage, which Chromium keeps in a LevelDB under app_webview/: the
+      copy the game falls back to. Only that database is backed up: the rest of app_webview/ is
+      caches and per-device WebView state that should not be restored onto another device.
+-->
+<full-backup-content>
+    <include domain="file" path="store" />
+    <include domain="root" path="app_webview/Default/Local Storage" />
+    <!-- Location used by old WebView versions (before the "Default" profile directory). -->
+    <include domain="root" path="app_webview/Local Storage" />
+</full-backup-content>

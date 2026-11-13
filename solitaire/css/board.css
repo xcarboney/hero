@@ -1,0 +1,457 @@
+/*
+ * board.css — the table: pile slots (#piles), the card layer (#cards) and the small DOM overlays the board
+ * needs (score popups under reduced motion, the hint ghost).
+ *
+ * Also in here, and worth knowing before touching cards.css: the "layer diet" — rules that keep a card on the
+ * table down to ONE compositor layer unless it is turning on --flip or carries a glare (see "FLAT card").
+ *
+ * The board (js/view/board.js) computes every position in JS and writes
+ *   --card-w / --card-h / --card-radius   on #table            (card size for everything inside the table)
+ *   transform: translate3d(x, y, 0) …     on each .pile and .card
+ * Nothing in here positions a card or a slot, and nothing in here transitions `transform` on a .card:
+ * all card motion is SOL.Anim driven. Only opacity / transform of decoration is animated in CSS.
+ */
+
+/* ------------------------------------------------------------------ table */
+.table {
+  /* No browser gestures on the table: the board handles every pointer itself (base.css sets touch-action). */
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+  cursor: default;
+  outline: none;
+  contain: layout style;
+}
+
+.piles,
+.cards,
+.table__overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;            /* hit-testing is done from the layout model on #table itself */
+}
+
+/*
+ * Perspective, so lifted, tilting and flipping cards read as 3D. NOT preserve-3d: every card is flattened into
+ * the table plane on its own and stacking stays plain z-index.
+ */
+.cards {
+  perspective: clamp(800px, calc(var(--card-w) * 12), 1800px);
+  perspective-origin: 50% 42%;
+}
+
+/* A restored game fades in while the cards settle. */
+.cards.is-entering {
+  animation: board-enter 320ms var(--ease-out) both;
+}
+@keyframes board-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/*
+ * "No": the whole table gives a small shudder (Board.nudgeStock — nothing to suggest). A transform on the two
+ * layers, so the compositor moves everything at once and no card is touched. Two names for the same animation:
+ * swapping the class restarts it without a forced reflow.
+ */
+.cards.is-nope,
+.piles.is-nope {
+  animation: board-nope 360ms ease-out both;
+}
+.cards.is-nope-b,
+.piles.is-nope-b {
+  animation: board-nope-b 360ms ease-out both;
+}
+@keyframes board-nope {
+  0% { transform: translate3d(0, 0, 0); }
+  18% { transform: translate3d(calc(var(--card-w) * -0.07), 0, 0); }
+  42% { transform: translate3d(calc(var(--card-w) * 0.055), 0, 0); }
+  66% { transform: translate3d(calc(var(--card-w) * -0.03), 0, 0); }
+  100% { transform: translate3d(0, 0, 0); }
+}
+@keyframes board-nope-b {
+  0% { transform: translate3d(0, 0, 0); }
+  18% { transform: translate3d(calc(var(--card-w) * -0.07), 0, 0); }
+  42% { transform: translate3d(calc(var(--card-w) * 0.055), 0, 0); }
+  66% { transform: translate3d(calc(var(--card-w) * -0.03), 0, 0); }
+  100% { transform: translate3d(0, 0, 0); }
+}
+
+/* ------------------------------------------------------------------ pile slots */
+.pile {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--card-w);
+  height: var(--card-h);
+  border-radius: var(--card-radius);
+  background: var(--slot);
+  box-shadow: inset 0 0 0 max(1px, calc(var(--card-w) * 0.014)) var(--slot-border);
+  color: var(--ink-faint);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.pile--tableau {
+  background: transparent;
+  box-shadow: inset 0 0 0 max(1px, calc(var(--card-w) * 0.012)) rgba(255, 255, 255, 0.07);
+}
+
+.pile--waste {
+  background: transparent;
+  box-shadow: inset 0 0 0 max(1px, calc(var(--card-w) * 0.012)) rgba(255, 255, 255, 0.06);
+}
+
+.pile__mark {
+  width: 46%;
+  height: auto;
+  display: block;
+  opacity: 0.55;
+}
+
+.pile--foundation .pile__mark {
+  width: 50%;
+  opacity: 0.5;
+}
+
+/*
+ * The recycle symbol is the only cue that a tap on the empty stock turns the waste over, so it is not a ghost
+ * like the suit marks of the foundations: plain ivory, at least 3:1 against its slot in all four themes
+ * (measured 4.2:1 on emerald, the brightest felt, 5.8:1 to 6.9:1 on the others).
+ */
+.pile--stock .pile__mark {
+  width: 52%;
+  color: var(--ink);
+  opacity: 0.78;
+  transition: transform var(--dur-3) var(--ease-back), opacity var(--dur-2) ease-out;
+}
+
+/*
+ * While cards rest on the stock its slot is the visible edge of the pile: the top cards sit a few px up and
+ * to the left (the pile's thickness), the slot shows as a sliver of stacked paper below and to the right.
+ * (The cards deep inside the pile are not rendered at all — see Sprite.cover in board.js.)
+ */
+.pile--stock.is-stacked {
+  background:
+    repeating-linear-gradient(135deg, rgba(60, 54, 40, 0.28) 0 0.6px, transparent 0.6px 1.8px),
+    var(--card-face-shade, #efe9da);
+  box-shadow: 0 max(1px, calc(var(--card-w) * 0.012)) calc(var(--card-w) * 0.03) rgba(3, 8, 6, 0.5);
+}
+/* …and while the deck is out (gather, shuffle, deal) the slot is simply waiting for its cards: no symbol */
+.pile--stock.is-stacked .pile__mark,
+.pile--stock.is-dealing .pile__mark {
+  opacity: 0;
+}
+/*
+ * The symbol means "the stock is empty", so it is only ever seen while the stock IS empty in the game:
+ * .has-cards is set from the game state, not from what lies on the slot at this moment. The cards of a full
+ * stock can be away from their slot — they glide to it when it moved (the screen turned, left-handed was
+ * switched), they fly to it in a recycle — and .is-stacked is off for that time: without this rule the symbol
+ * came up beside the travelling pile.
+ * (One class more in the selector: it also wins over the hint and "nothing to suggest" looks below.)
+ */
+.pile.pile--stock.has-cards .pile__mark {
+  opacity: 0;
+}
+
+/* nothing left to draw and nothing to recycle: the symbol fades back to a ghost */
+.pile--stock.is-spent .pile__mark {
+  color: inherit;
+  opacity: 0.22;
+}
+
+/* legal drop target (empty pile) while dragging */
+.pile.is-target {
+  box-shadow:
+    inset 0 0 0 max(2px, calc(var(--card-w) * 0.028)) var(--ok),
+    0 0 calc(var(--card-w) * 0.16) calc(var(--card-w) * 0.03) rgba(110, 231, 168, 0.4);
+  background: rgba(110, 231, 168, 0.1);
+}
+
+/* the pile the dragged card would land on if released now */
+.pile.is-drop {
+  box-shadow:
+    inset 0 0 0 max(2px, calc(var(--card-w) * 0.04)) var(--gold),
+    0 0 calc(var(--card-w) * 0.2) calc(var(--card-w) * 0.05) rgba(243, 201, 105, 0.5);
+  background: rgba(243, 201, 105, 0.14);
+}
+
+.pile.is-hint {
+  box-shadow:
+    inset 0 0 0 max(2px, calc(var(--card-w) * 0.028)) var(--gold),
+    0 0 calc(var(--card-w) * 0.2) calc(var(--card-w) * 0.06) rgba(243, 201, 105, 0.5);
+  animation: board-slot-hint 900ms ease-in-out infinite alternate;
+}
+.pile.is-hint .pile__mark {
+  opacity: 1;
+  color: var(--gold);
+}
+@keyframes board-slot-hint {
+  from { opacity: 0.6; }
+  to { opacity: 1; }
+}
+
+/*
+ * Arrival pulse (a card reached this pile): one ring that swells past the card and fades. Opacity and
+ * transform only; the ring is static paint.
+ */
+.pile::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow:
+    0 0 0 max(2px, calc(var(--card-w) * 0.035)) var(--pulse-color, var(--gold)),
+    0 0 calc(var(--card-w) * 0.22) calc(var(--card-w) * 0.08) var(--pulse-glow, rgba(243, 201, 105, 0.45));
+  opacity: 0;
+  pointer-events: none;
+}
+.pile.is-pulse::after {
+  animation: board-pulse 620ms var(--ease-out) both;
+}
+/* the same animation under a second name: swapping the class restarts it without a forced reflow */
+.pile.is-pulse-b::after {
+  animation: board-pulse-b 620ms var(--ease-out) both;
+}
+@keyframes board-pulse {
+  0% { opacity: 0.95; transform: scale(0.96); }
+  100% { opacity: 0; transform: scale(1.32); }
+}
+@keyframes board-pulse-b {
+  0% { opacity: 0.95; transform: scale(0.96); }
+  100% { opacity: 0; transform: scale(1.32); }
+}
+
+/* "nothing to suggest": a red outline on the stock for a moment (static — also the reduced-motion cue) */
+.pile--stock.is-refusing {
+  box-shadow:
+    inset 0 0 0 max(2px, calc(var(--card-w) * 0.035)) #ff9a9a,
+    0 0 calc(var(--card-w) * 0.2) calc(var(--card-w) * 0.05) rgba(255, 120, 120, 0.45);
+}
+.pile--stock.is-refusing .pile__mark {
+  opacity: 0.9;
+  color: #ff9a9a;
+}
+
+/* a completed foundation wears a gold crown for a moment (static — also the reduced-motion cue) */
+.pile--foundation.is-crowned {
+  box-shadow:
+    0 0 0 max(2px, calc(var(--card-w) * 0.05)) var(--gold),
+    0 0 calc(var(--card-w) * 0.34) calc(var(--card-w) * 0.12) rgba(243, 201, 105, 0.6);
+}
+
+/* the stock asks for a tap (nothing else can move) */
+.pile--stock.is-inviting .pile__mark {
+  animation: board-invite 1400ms ease-in-out infinite;
+}
+@keyframes board-invite {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.14); }
+}
+
+/* ------------------------------------------------------------------ cards on the table */
+/*
+ * Layer diet. A card is a dozen compositor layers (two faces, the lift shadow and its two cross-fading
+ * halves, the flip veil pair, the glare pair, the 3D boxes around them); 52 cards made ~700 layers and the
+ * compositor work for them was the largest per-frame cost on a throttled CPU. Most of those layers show
+ * nothing most of the time, so on the table they only exist while they are in use. The board toggles the
+ * state classes (Sprite._write):
+ *   .is-lifted    lift > 0, or the card is turning  -> the lift shadow
+ *   .is-turning   --flip between 0 and 180          -> the flip veil (faces darken edge-on)
+ *   .is-glare     set by whoever animates --glare-* -> the glare planes
+ * Together with not rendering covered cards at all (Sprite.cover) and the flat cards below, a resting table is
+ * about 70 layers.
+ * Only cards inside #cards are affected; the inspector and the gallery build their own cards.
+ */
+#cards .card:not(.is-lifted) .card__shadow,
+#cards .card:not(.is-glare) .card__glare {
+  display: none;
+}
+#cards .card:not(.is-turning) .card__flip::before,
+#cards .card:not(.is-turning) .card__flip::after {
+  display: none;
+}
+
+/*
+ * Layer diet, part two: a FLAT card. cards.css builds every card as a small 3D scene (tilt box > flip box >
+ * two faces culled from behind): five compositor layers per card even when it lies still, and the per-frame
+ * cost of committing a frame grows with every layer on the page — 52 cards flying through a celebration were
+ * ~290 layers and most of the frame time. But a table card only needs that scene while it turns on --flip
+ * (.is-turning) or carries a glare (.is-glare). The rest of the time exactly one face is visible and the board
+ * moves, tilts and spins the card by transforming .card itself — so the inner boxes are flattened, the unseen
+ * face is not rendered, and the whole card is ONE layer. (When the board turns a card by rotating .card — its
+ * 'spin' flips, the celebration — it swaps the face at the edge-on moment and never rotates past it, so a
+ * flat, double-sided face is all that is needed.)
+ * If cards.css ever restructures a card these rules simply stop matching and the cards are five layers again.
+ */
+#cards .card {
+  /*
+   * A promise to the compositor that this transform keeps changing. Its effect: the card's texture is kept
+   * while its scale animates (the deck is 1.8x, flights swell, the vortex has perspective) instead of being
+   * re-rasterised — art and all — on every frame of a scale change (measured: 23 raster tasks per frame
+   * during a deal without it).
+   */
+  will-change: transform;
+}
+#cards .card:not(.is-turning):not(.is-glare) {
+  transform-style: flat;
+}
+#cards .card:not(.is-turning):not(.is-glare) .card__tilt,
+#cards .card:not(.is-turning):not(.is-glare) .card__flip {
+  transform: none;
+  transform-style: flat;
+}
+#cards .card:not(.is-turning):not(.is-glare) .card__face {
+  transform: none;
+  -webkit-backface-visibility: visible;
+  backface-visibility: visible;
+}
+/* (visibility, not display: swapping faces must not rebuild the layout tree of the card art) */
+#cards .card:not(.is-turning):not(.is-glare):not(.is-face-down) .card__back,
+#cards .card.is-face-down:not(.is-turning):not(.is-glare) .card__front {
+  visibility: hidden;
+}
+
+
+/*
+ * The top card of the stock asks for a tap: it breathes — a slow gold glow around its back (opacity) and the
+ * faintest swell (the `scale` property of an inner box: the board's `transform` on .card and the tilt
+ * transform of cards.css are both left alone, and the compositor runs it without any style work).
+ */
+.card.is-inviting:not(.is-hint):not(.is-lifted) .card__tilt {
+  animation: board-breathe 3400ms ease-in-out infinite;
+}
+@keyframes board-breathe {
+  0%, 100% { scale: 1; }
+  50% { scale: 1.035; }
+}
+:root[data-effects="low"] .card.is-inviting .card__tilt {
+  animation: none;
+}
+
+.card.is-inviting:not(.is-hint) .card__back::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow:
+    0 0 0 calc(var(--card-w) * 0.03) var(--gold, #f3c969),
+    0 0 calc(var(--card-w) * 0.2) calc(var(--card-w) * 0.06) rgba(243, 201, 105, 0.55);
+  opacity: 0;
+  will-change: opacity;
+  animation: board-invite-card 1700ms ease-in-out infinite;
+}
+@keyframes board-invite-card {
+  0%, 100% { opacity: 0.08; }
+  50% { opacity: 0.9; }
+}
+:root[data-reduced-motion="true"] .card.is-inviting:not(.is-hint) .card__back::before {
+  animation: none;
+  opacity: 0.6;
+}
+
+/*
+ * The pile a drag would land on: the generic .is-target ring (cards.css) turns gold and stops pulsing, so the
+ * player can tell "legal" from "this one" under a thumb.
+ */
+.card.is-target.is-drop .card__face::before {
+  animation: none;
+  opacity: 1;
+  box-shadow:
+    0 0 0 calc(var(--card-w) * 0.04) var(--gold, #f3c969),
+    0 0 calc(var(--card-w) * 0.22) calc(var(--card-w) * 0.07) rgba(243, 201, 105, 0.6);
+}
+
+/* ------------------------------------------------------------------ overlay: popups + ghost */
+.table__overlay {
+  z-index: 5;
+  overflow: visible;
+}
+
+/* DOM score popup — only used when the canvas effects are off (reduced motion / no FX). */
+.score-pop {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 0.1em 0.45em;
+  border-radius: 999px;
+  font: 800 clamp(13px, calc(var(--card-w) * 0.3), 26px) / 1.2 var(--font-ui);
+  color: var(--gold);
+  background: rgba(6, 14, 12, 0.72);
+  white-space: nowrap;
+  pointer-events: none;
+  animation: board-score-pop 900ms var(--ease-out) both;
+}
+.score-pop--minus {
+  color: #ff9a9a;
+}
+@keyframes board-score-pop {
+  0% { opacity: 0; margin-top: 0; }
+  15% { opacity: 1; }
+  70% { opacity: 1; }
+  100% { opacity: 0; margin-top: -1.6em; }
+}
+/* Reduced motion: no travel, the label simply shows and goes (JS removes it). */
+:root[data-reduced-motion="true"] .score-pop {
+  animation: none;
+  opacity: 1;
+}
+
+/*
+ * Hint ghost: a translucent copy of the suggested card (and the run on it) that glides to the pile it could
+ * go to and dissolves there. One box that carries the cards; the board animates its transform and opacity.
+ */
+.board-ghost {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--card-w);
+  height: var(--card-h);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 4;
+  will-change: transform, opacity;
+  transform-origin: 50% 35%;
+}
+.board-ghost .card__shadow,
+.board-ghost .card__glare,
+.board-ghost .card__back {
+  display: none;
+}
+/* ghost cards are flat too (face-up, never turning): the whole ghost is one layer */
+.board-ghost .card,
+.board-ghost .card__tilt,
+.board-ghost .card__flip {
+  transform-style: flat;
+}
+.board-ghost .card__tilt,
+.board-ghost .card__flip,
+.board-ghost .card__face {
+  transform: none;
+  -webkit-backface-visibility: visible;
+  backface-visibility: visible;
+}
+/* a soft gold halo so the ghost reads as "an idea", not as a card that moved */
+.board-ghost::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: var(--card-radius);
+  box-shadow:
+    0 0 0 max(1px, calc(var(--card-w) * 0.02)) rgba(243, 201, 105, 0.85),
+    0 0 calc(var(--card-w) * 0.3) calc(var(--card-w) * 0.06) rgba(243, 201, 105, 0.5);
+  pointer-events: none;
+}
+
+/* ------------------------------------------------------------------ low effects quality */
+:root[data-effects="low"] .pile::after,
+:root[data-effects="low"] .pile.is-target,
+:root[data-effects="low"] .pile.is-drop,
+:root[data-effects="low"] .pile.is-hint {
+  box-shadow: inset 0 0 0 max(2px, calc(var(--card-w) * 0.035)) var(--pulse-color, var(--gold));
+}
+:root[data-effects="low"] .pile.is-target {
+  box-shadow: inset 0 0 0 max(2px, calc(var(--card-w) * 0.035)) var(--ok);
+}
