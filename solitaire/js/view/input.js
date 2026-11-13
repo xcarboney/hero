@@ -15,7 +15,7 @@
  *   hover (mouse / pen)   the top face-up card under the pointer leans towards it with a moving highlight
  *                         (SOL.Board.hoverAt) — decoration only, nothing depends on it
  * Keyboard: Space / D draw, U or Ctrl/Cmd+Z undo, H hint, N new game, A auto-complete, I inspect the card under
- * the pointer, Esc cancels a drag / skips the celebration (overlays close themselves).
+ * the pointer, Esc cancels a drag / stops auto-complete / skips the celebration (overlays close themselves).
  *
  * Hit-testing goes through the board's layout model (Board.cardAt / pileAt): no DOM reads, and a card is hit
  * where it is drawn even while it is still gliding.
@@ -457,6 +457,9 @@
         e.preventDefault();
       } else if (celebrating()) {
         SOL.Celebrate.skip();
+        e.preventDefault();
+      } else if (typeof g.isAutoCompleting === 'function' && g.isAutoCompleting()) {
+        g.cancelAuto();
         e.preventDefault();
       }
       return; // overlays handle their own Esc

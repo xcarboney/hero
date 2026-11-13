@@ -25,6 +25,9 @@
  *   Inspector.openGallery({ startCard, tab = 'cards', filter = 'all' } = {}) -> Promise<void>
  *       Opens the deck gallery. tab: 'cards' (carousel) | 'backs' (card back picker).
  *       filter: 'all' | 'spades' | 'hearts' | 'clubs' | 'diamonds' (or 0..3). Resolves when closed.
+ *       startCard   card 0..51 the carousel opens on (a card outside `filter` switches the filter to 'all').
+ *                   Default: the card the gallery was on when it was last closed (since the page loaded), else
+ *                   the first card.
  *   Inspector.close()                      Closes whatever is open (animated). No-op when nothing is open.
  *   Inspector.back() -> boolean            What Esc / Android back / the close button do: from a card that was
  *                                          opened out of the gallery it returns to the gallery, otherwise it
@@ -66,12 +69,23 @@
  * rotate, F flip, S spin, R reset, [ ] or , . previous / next, + - 0 zoom, Esc back, Tab stays inside.
  * Gallery: drag / fling / wheel / arrows / Home / End / PageUp / PageDown move the carousel, Enter opens the
  * focused card, tapping a card focuses it (or opens it when it already is), 1..5 pick a suit filter.
+ * Buttons, chips and tabs act when the pointer comes up on them (see onPress(): a `click` would be withheld
+ * by the browser right after a fling); keyboard and scripted clicks work as usual.
  *
  * How the 3D card is built: the inspector owns a wrapper (.insp-obj, transform-style: preserve-3d) that holds
  * a thick SOL.Cards card plus two overlay planes of its own (one per face) with a shade veil and a holographic
  * foil band. Every frame only `transform` / `opacity` are written (plus the card's documented --glare-*
  * properties, quantised so the highlight repaints rarely). All motion runs on SOL.Anim: springs and tweens for
- * poses, one Anim.frame subscription while open for idle float, auto-spin, device tilt and rendering.
+ * poses, and one Anim.frame subscription — only while a card is in the hand (idle float, auto-spin, device
+ * tilt, rendering) or the card backs are turning; a gallery resting on its carousel runs no loop at all. The
+ * few CSS transitions (chrome fades, the 3D turn between the two gallery tabs) are transform / opacity only
+ * and are sequenced with SOL.Anim.wait.
+ *
+ * The carousel is a cover-flow on an arc seen a little from above: the focused card faces the viewer at z = 0,
+ * its neighbours step aside, turn inwards and stand back, overlapping like a fanned deck (three a side on a
+ * portrait phone, five where there is room). It is virtualised: 7-8 cards are in the document on a portrait
+ * phone, 11-12 in landscape and on a desktop. The six card backs are thick cards; where all six are on screen
+ * on a touch device only the chosen one is (see setBackThick()).
  */
 (function (root) {
   'use strict';
@@ -99,6 +113,20 @@
   const HALF = norm3(LIGHT[0], LIGHT[1], LIGHT[2] + 1);
   const SUIT_NAMES = ['spades', 'hearts', 'clubs', 'diamonds'];
   const SUIT_LABELS = ['Spades', 'Hearts', 'Clubs', 'Diamonds'];
+  // Carousel arc, in card widths (placeItem): the first neighbour steps ARC_X1 aside, ARC_Z1 back and turns
+  // ARC_RY1 degrees inwards; every further one adds ARC_XN / ARC_ZN (+ ARC_ZQ per step squared: the arc curves
+  // away) / ARC_RYN. The steps are much smaller than a turned card is wide, so the cards overlap like a fanned
+  // deck and three or four of them fit beside the focused card even on a narrow phone.
+  const ARC_X1 = 0.62;
+  const ARC_XN = 0.18; // on a narrow screen; up to ARC_XN_WIDE where there is room to spread the arc out (G.xn)
+  const ARC_XN_WIDE = 0.34;
+  const ARC_Z1 = 0.5;
+  const ARC_ZN = 0.25;
+  const ARC_ZQ = 0.014;
+  const ARC_RY1 = 60;
+  const ARC_RYN = 2.6;
+  const ARC_PERSP = 5.2; // perspective distance of the carousel
+  const ARC_MAX = 5; // most neighbours per side that are ever shown at full strength
 
   // ------------------------------------------------------------------ small helpers
   function norm3(x, y, z) {
@@ -162,6 +190,48 @@
 
   function validCard(id) {
     return Number.isInteger(id) && id >= 0 && id <= 51;
+  }
+
+  /*
+   * Activation of the buttons, chips and tabs. A tap counts when the pointer comes up, not on `click`: after a
+   * fling (a card spun with a flick, the carousel sent on its way) the browser withholds the click of a tap
+   * that follows within a few hundred ms — it reads it as "stop the fling" — and the player's press on Flip or
+   * on a suit chip would simply be lost. `click` is still honoured when no pointer produced it (keyboard and
+   * scripts: `detail` 0; assistive technology: no pointer release before it). A pointer's own click, arriving
+   * right after its release inside the inspector, is that same tap again — wherever the browser delivers it —
+   * and is dropped.
+   */
+  let lastPointerUp = -1e9;
+
+  function onPress(container, selector, handler) {
+    let down = null;
+    const find = function (e) {
+      const el = e.target && e.target.closest ? e.target.closest(selector) : null;
+      return el && container.contains(el) ? el : null;
+    };
+    container.addEventListener('pointerdown', function (e) {
+      down = null;
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      const el = find(e);
+      if (el) down = { id: e.pointerId, el: el };
+    });
+    container.addEventListener('pointerup', function (e) {
+      const d = down;
+      down = null;
+      if (!d || d.id !== e.pointerId) return;
+      // like a native button: a finger that slid off before lifting does not press it
+      const r = d.el.getBoundingClientRect();
+      if (e.clientX < r.left - 10 || e.clientX > r.right + 10 || e.clientY < r.top - 10 || e.clientY > r.bottom + 10) return;
+      handler(d.el);
+    });
+    container.addEventListener('pointercancel', function () {
+      down = null;
+    });
+    container.addEventListener('click', function (e) {
+      if (e.detail !== 0 && nowMs() - lastPointerUp < 700) return;
+      const el = find(e);
+      if (el) handler(el);
+    });
   }
 
   function isReduced() {
@@ -299,14 +369,15 @@
     pos: 0,
     focus: -1,
     cw: 160,
+    xn: ARC_XN, // sideways step between two neighbours, in card widths (layoutGallery)
     radius: 5,
     items: new Map(), // card id -> carousel item
     cache: new Map(), // card id -> detached .card element
     morph: null, // running filter re-flow
     fl: null, // carousel flinger
-    hiddenId: -1, // card id whose carousel card is hidden while it is in the inspector
+    lastCard: -1, // the card the gallery was on when it was last closed
     lastTick: 0,
-    backs: { items: [], pos: 0, focus: -1, bw: 150, gap: 190, fits: false, angle: 0, selected: 'royal', fl: null },
+    backs: { items: [], pos: 0, focus: -1, bw: 150, gap: 190, fits: false, lean: false, angle: 0, selected: 'royal', fl: null },
     tabAnim: null,
     scrub: null,
   };
@@ -421,10 +492,10 @@
     ui.stage.addEventListener('pointerup', onStageUp);
     ui.stage.addEventListener('pointercancel', onStageCancel);
     ui.stage.addEventListener('lostpointercapture', onStageLost);
-    ui.bar.addEventListener('click', onBarClick);
+    onPress(ui.bar, '[data-act]', onBarPress);
     // gallery input
-    ui.galBar.addEventListener('click', onGalleryBarClick);
-    ui.chips.addEventListener('click', onChipClick);
+    onPress(ui.galBar, '[data-tab], [data-act="close"]', onGalleryBarPress);
+    onPress(ui.chips, '[data-filter]', onChipPress);
     ui.row.addEventListener('focusin', onRowFocus);
     G.fl = makeFlinger({
       surface: ui.ring,
@@ -439,7 +510,7 @@
         return G.list.length - 1;
       },
       unit: function () {
-        return G.cw * 0.66;
+        return G.cw * 0.56; // a card follows the finger closely as it comes to the front
       },
       locked: function () {
         return !galleryInteractive();
@@ -471,6 +542,13 @@
     });
     hookScrub();
     // the page must never scroll / zoom / pop a menu from inside the inspector
+    el.addEventListener(
+      'pointerup',
+      function () {
+        lastPointerUp = nowMs(); // see onPress()
+      },
+      true
+    );
     el.addEventListener('wheel', onWheel, { passive: false });
     el.addEventListener('contextmenu', (e) => e.preventDefault());
     el.addEventListener('dragstart', (e) => e.preventDefault());
@@ -561,25 +639,29 @@
     if (G.live && s.view === 'gallery') tickGallery(dt, sdt);
   }
 
-  function startLoop() {
-    if (!stopFrame) stopFrame = SOL.Anim.frame(frame);
-  }
-
   function stopLoop() {
     if (stopFrame) stopFrame();
     stopFrame = null;
   }
 
+  /**
+   * The per-frame loop runs only while something needs it: a card in the hand (idle float, auto-spin, device
+   * tilt, rendering) or the turning card backs. The carousel is driven by its own springs and tweens, so a
+   * gallery left open on the cards tab costs nothing; neither does a backgrounded page.
+   */
+  function syncLoop() {
+    const s = session;
+    const need = !!s && !s.done && !doc.hidden && (C.live || (G.live && s.view === 'gallery' && G.tab === 'backs'));
+    if (!need) stopLoop();
+    else if (!stopFrame) stopFrame = SOL.Anim.frame(frame);
+  }
+
   function onVisibility() {
     if (!session) return;
     // Backgrounded: no loop at all (rAF would be throttled anyway, but nothing should even be queued).
-    if (doc.hidden) {
-      stopLoop();
-      cancelGesture();
-    } else {
-      C.lastInput = nowMs();
-      startLoop();
-    }
+    if (doc.hidden) cancelGesture();
+    else C.lastInput = nowMs();
+    syncLoop();
   }
 
   function onResize() {
@@ -740,8 +822,8 @@
       });
     }
     addGlobalListeners();
-    startLoop();
-    s.coverWait = SOL.Anim.wait(COVER_MS).then(function () {
+    // (the backdrop's fade is a CSS transition and does not follow the speed setting: wait in real time)
+    s.coverWait = SOL.Anim.wait(COVER_MS * SOL.Anim.speed).then(function () {
       cover(s);
     });
     return s;
@@ -1581,10 +1663,9 @@
     zoomBy(Math.exp(-clamp(delta, -400, 400) * 0.0018));
   }
 
-  function onBarClick(e) {
-    const b = e.target.closest ? e.target.closest('[data-act]') : null;
+  function onBarPress(b) {
     const s = session;
-    if (!b || !s || s.closing || s.view !== 'card') return;
+    if (!s || s.closing || s.view !== 'card') return;
     switch (b.getAttribute('data-act')) {
       case 'prev':
         navigate(-1);
@@ -1773,7 +1854,8 @@
       o.x = x0;
       o.y = y0;
       o.s = s0;
-      o.yaw = 0;
+      // (a source that lies face down is stood in for face down, and turns over on the way in)
+      o.yaw = C.sourceEl && C.sourceEl.classList && C.sourceEl.classList.contains('is-face-down') ? 180 : 0;
       o.pitch = 0;
       o.light = 0;
       o.ground = 0;
@@ -1783,7 +1865,7 @@
       pinLayout(o, small);
       const path = A.arc({ x: x0, y: y0 }, { x: 0, y: 0 }, { lift: Math.min(80, Math.hypot(x0, y0) * 0.16) });
       const turn = x0 > 0 ? -1 : 1; // it rolls into the direction it travels
-      const t0 = COVER_MS / 640; // progress at which the lighting may start
+      const t0 = Math.min(0.62, (COVER_MS * A.speed) / 640); // progress at which the lighting may start
       o.fly = A.tween({
         duration: 640,
         ease: 'linear',
@@ -1988,6 +2070,7 @@
     updateNav();
     showHint();
     startTilt();
+    syncLoop();
     ui.root.focus({ preventScroll: true });
   }
 
@@ -2020,6 +2103,8 @@
     unhideSource();
     stopTilt();
     hideHint();
+    ui.name.textContent = ''; // the caption's letters are DOM too: nothing of a closed inspector stays behind
+    ui.meta.textContent = '';
     ui.cardView.classList.remove('is-zoomed');
     ui.shadowCore.style.opacity = '0';
     ui.shadowSoft.style.opacity = '0';
@@ -2426,7 +2511,7 @@
      * glide was heading when this drag caught it: flicking again the same way keeps that leftover distance, so
      * repeated flicks build up speed through the deck.
      */
-    function fling(v, carry) {
+    function fling(v, carry, p0) {
       const from = cfg.get();
       const max = Math.max(0, cfg.max());
       const reach = v * 0.3 + (v < 0 ? -1 : 1) * v * v * 0.011;
@@ -2434,8 +2519,11 @@
       const target = clamp(Math.round(base + reach), 0, max);
       const dist = target - from;
       if (Math.abs(v) < 1.4 || Math.abs(dist) < 0.8 || from < 0 || from > max) {
-        // slow release (or let go beyond an end): just settle on the nearest card
-        to(Math.round(from + clamp(v * 0.14, -0.55, 0.55)), v);
+        // Slow release (or let go beyond an end): settle on a card. Which one leans the way the finger went: a
+        // card dragged a good quarter of the way is meant to change, it need not be hauled past the middle.
+        const moved = typeof p0 === 'number' ? from - p0 : 0;
+        const lean = Math.abs(moved) > 0.24 ? (moved > 0 ? 0.26 : -0.26) : 0;
+        to(Math.round(from + clamp(v * 0.14 + lean, -0.55, 0.55)), v);
         return;
       }
       stop();
@@ -2545,7 +2633,7 @@
         return;
       }
       if (fixed) return;
-      fling(-releaseVelocity(d).x / cfg.unit(), d.carry);
+      fling(-releaseVelocity(d).x / cfg.unit(), d.carry, d.p0);
     });
 
     el.addEventListener('pointercancel', cancelDrag);
@@ -2585,24 +2673,36 @@
       G.cw = Math.max(72, Math.round(cw));
       G.ringW = rr.width;
       ui.ring.style.setProperty('--card-w', G.cw + 'px');
-      ui.ring.style.setProperty('--insp-persp', Math.round(G.cw * 5.2) + 'px');
+      ui.ring.style.setProperty('--insp-persp', Math.round(G.cw * ARC_PERSP) + 'px');
       // R = how many neighbours on each side are shown at full strength: the ones that can be seen. One more per
       // side fades in / out while the carousel moves, so the DOM holds 2R+1 cards at rest and 2R+2 on the move:
-      // 7..8 on a portrait phone, 9..10 in landscape, 11..12 on a desktop.
+      // 7..8 on a portrait phone, 11..12 in landscape and on a desktop.
       const half = rr.width / 2;
-      const P = G.cw * 5.2;
-      const reach = function (d) {
+      const P = G.cw * ARC_PERSP;
+      // The arc spreads out as far as the screen lets it: packed like a fanned deck on a portrait phone, wide
+      // open on a desktop (ARC_MAX cards a side, the last one about at the edge; 0.8 = what perspective leaves
+      // of a far card's offset, 0.2 = half of what a turned card covers on screen, both in card widths).
+      G.xn = clamp(((half / G.cw - 0.2) / 0.8 - ARC_X1) / (ARC_MAX - 1), ARC_XN, ARC_XN_WIDE);
+      const depth = function (d) {
         const o = d - 1;
-        const x = G.cw * (0.76 + 0.36 * o);
-        const z = G.cw * (0.66 + 0.2 * o + 0.016 * o * o);
-        return (x * P) / (P + z); // where that card sits on screen, perspective included
+        return G.cw * (ARC_Z1 + ARC_ZN * o + ARC_ZQ * o * o);
       };
-      // with a side column next to the carousel (landscape) the fading card has to stay inside the carousel
-      // (0.27 card widths = half of what a far, turned card still covers on screen)
-      const slack = rr.right < M.ox + M.vw - 30 ? G.cw * 0.27 : -G.cw * 0.2;
-      let R = 3;
-      while (R < 5 && reach(R + 1) + slack < half) R++;
+      const reach = function (d) {
+        if (d <= 0) return 0;
+        return (G.cw * (ARC_X1 + G.xn * (d - 1)) * P) / (P + depth(d)); // middle of that card on screen
+      };
+      // Every card stands behind the one before it, so what shows of card d + 1 is the strip beyond the outer
+      // edge of card d (its middle + about 0.2 card widths).
+      let R = 2;
+      while (R < ARC_MAX && reach(R) + G.cw * 0.2 < half) R++;
       G.radius = M.low ? Math.min(R, 4) : R;
+      // The eye sits above the cards (inspector.css), so the far ones also stand higher on screen. As high as
+      // looks good (1.5 card widths) — but the farthest card must not rise out of the top of the carousel.
+      // (measured at its nearer, taller edge: a turned card comes 0.45 card widths towards the eye)
+      const sFar = P / (P + depth(R) - 0.45 * G.cw);
+      const room = rr.height * 0.47 - 0.7 * sFar * G.cw - 12;
+      const eye = clamp(room / (1 - sFar), 0, G.cw * 1.5);
+      ui.ring.style.setProperty('--insp-eye', Math.round(eye) + 'px');
       const sr = ui.scrub.getBoundingClientRect();
       G.scrubL = sr.left + 12;
       G.scrubW = Math.max(1, sr.width - 24);
@@ -2615,7 +2715,7 @@
       const n = B.items.length || 6;
       const labelH = 46;
       const byHeight = ((br.height - labelH) * 0.82) / 1.4;
-      let bw = Math.min(br.width * 0.5, byHeight, 250);
+      let bw = Math.min(br.width * 0.6, byHeight, 260);
       // when all six fit side by side (desktop, tablets, most landscape phones) the row does not scroll
       const fitW = (br.width - 32) / (n * 1.24);
       B.fits = fitW >= 96;
@@ -2625,6 +2725,7 @@
       B.rowW = br.width;
       ui.row.style.setProperty('--card-w', B.bw + 'px');
       ui.row.style.setProperty('--insp-persp', Math.round(B.bw * 4.6) + 'px');
+      B.lean = B.fits && (SOL.Platform ? !!SOL.Platform.isTouch : 'ontouchstart' in root); // see setBackThick()
       ui.row.classList.toggle('is-fit', B.fits);
       if (B.fits) B.pos = (n - 1) / 2;
       else B.pos = clamp(Math.round(B.pos), 0, n - 1);
@@ -2665,15 +2766,17 @@
     const t = ad < 1 ? ad : 1;
     const o = ad - t;
     const e = t * t * (3 - 2 * t);
-    const x = sg * cw * (0.76 * e + 0.36 * o);
-    const z = -cw * (0.66 * e + 0.2 * o + 0.016 * o * o);
-    const ry = -sg * (55 * e + 3.2 * o);
+    const x = sg * cw * (ARC_X1 * e + G.xn * o);
+    const z = -cw * (ARC_Z1 * e + ARC_ZN * o + ARC_ZQ * o * o);
+    const ry = -sg * (ARC_RY1 * e + ARC_RYN * o);
     const tf = 'translate3d(' + r1(x) + 'px,' + r1(dy) + 'px,' + r1(z) + 'px) rotateY(' + r1(ry) + 'deg)';
     if (tf !== it._t) {
       it.el.style.transform = tf;
       it._t = tf;
     }
-    const veil = Math.round(clamp(0.22 * ad + 0.05 * o, 0, 0.84) * 50) / 50;
+    // (the light falls off along the arc: quickly at first, then ever more slowly)
+    const va = ad < 6 ? ad : 6;
+    const veil = Math.round(clamp(0.25 * va - 0.021 * va * va, 0, 0.76) * 50) / 50;
     if (veil !== it._v) {
       it.veil.style.opacity = String(veil);
       it._v = veil;
@@ -2855,9 +2958,8 @@
     announce((f === 'all' ? 'All suits' : SUIT_LABELS[f]) + ', ' + list.length + ' cards');
   }
 
-  function onChipClick(e) {
-    const b = e.target.closest ? e.target.closest('[data-filter]') : null;
-    if (!b || !galleryInteractive()) return;
+  function onChipPress(b) {
+    if (!galleryInteractive()) return;
     setFilter(b.getAttribute('data-filter'));
   }
 
@@ -2930,15 +3032,32 @@
       ui.row.appendChild(el);
       const dot = h('i', 'insp-gal__dot');
       ui.dots.appendChild(dot);
-      return { id: b.id, name: b.name, el: el, scene: el.querySelector('.insp-back__scene'), card: card, on: true, dot: dot, spin: 0, hop: 0, conf: null, _t: '', _f: '', _c: '' };
+      return { id: b.id, name: b.name, el: el, scene: el.querySelector('.insp-back__scene'), card: card, thick: true, on: true, dot: dot, spin: 0, hop: 0, conf: null, _t: '', _f: '', _c: '' };
     });
     B.focus = -1;
     B.angle = 0;
   }
 
   /**
-   * Places the six backs and turns them. Each one rotates through the card's own --flip (so its faces darken as
-   * they turn edge-on); the row itself only moves by transform. `dt` = ms since the last call (0: just place).
+   * Gives a back its solid (thick) or its paper-thin card. A thick card is some fifty compositor layers, and
+   * every frame in which anything moves costs time in proportion to all the layers on the page: six thick
+   * cards turning at once are too much for a phone (measured: 17 ms of main thread a frame at 4x CPU
+   * throttling). So where the whole row is on screen on a touch device, only the chosen back is solid.
+   */
+  function setBackThick(it, thick) {
+    if (it.thick === thick) return;
+    it.thick = thick;
+    const card = SOL.Cards.createBackOnly(it.id, { thick: thick });
+    // a thin card that turns freely must not drag its table shadow along (cards.css: --shadow-o)
+    if (!thick) card.style.setProperty('--shadow-o', '0');
+    if (it.card.parentNode) it.card.parentNode.replaceChild(card, it.card);
+    it.card = card;
+    it._f = it._c = '';
+  }
+
+  /**
+   * Places the six backs and turns them (see below how the turn is shared between the card's --flip and its
+   * transform); the row itself only moves by transform. `dt` = ms since the last call (0: just place).
    */
   function renderBacks(dt) {
     const B = G.backs;
@@ -2957,7 +3076,8 @@
         it.el.style.transform = tf;
         it._t = tf;
       }
-      // A thick card is some fifty compositor layers: on a phone only the backs in view keep theirs.
+      setBackThick(it, !B.lean || it.id === B.selected);
+      // …and where the row scrolls, only the backs in view are in the document at all.
       const near = B.fits || Math.abs(d) < 1.6;
       if (near !== it.on) {
         it.on = near;
@@ -2965,15 +3085,25 @@
         else if (it.card.parentNode) it.card.parentNode.removeChild(it.card);
       }
       if (!near || Math.abs(x) > half) continue; // out of sight: leave it as it is
-      // 33 degrees apart: the six never turn edge-on together, one after the other does
-      const a = (reduced ? -22 : B.angle + i * 33) + it.spin * 360;
-      const fl = r1(a) + 'deg';
+      // 33 degrees apart: the six never turn edge-on together, one after the other does. The turn is uneven on
+      // purpose: slow while a back faces the viewer, quick through edge-on — the design is what is on show.
+      let a = reduced ? -22 : B.angle + i * 33;
+      if (!reduced) a -= 19 * Math.sin(2 * a * DEG);
+      a += it.spin * 360;
+      // The turn is split in two. The card's own --flip takes it in steps of 6 degrees: that is what darkens the
+      // faces as they turn edge-on, but every new value restyles the inside of a thick card. The rest goes into
+      // the transform of the card element, which costs next to nothing — so a frame only moves the card, and the
+      // inside is touched a few times a second (six of these turn at once where the whole row fits).
+      const q = Math.round(a / 6) * 6;
+      const fl = q + 'deg';
       if (fl !== it._f) {
         it.card.style.setProperty('--flip', fl);
         it._f = fl;
       }
       const hop = it.hop;
-      const ct = 'translate3d(0,' + r1(-hop * B.bw * 0.1) + 'px,0) rotateX(7deg) scale3d(' + r3(1 + hop * 0.09) + ',' + r3(1 + hop * 0.09) + ',' + r3(1 + hop * 0.09) + ')';
+      const ct =
+        'translate3d(0,' + r1(-hop * B.bw * 0.1) + 'px,0) rotateX(7deg) rotateY(' + r1(a - q) + 'deg) scale3d(' + r3(1 + hop * 0.09) + ',' +
+        r3(1 + hop * 0.09) + ',' + r3(1 + hop * 0.09) + ')';
       if (ct !== it._c) {
         it.card.style.transform = ct;
         it._c = ct;
@@ -3080,14 +3210,31 @@
   }
 
   function resetPanel(p) {
+    p.classList.remove('is-turning', 'is-turning--in');
     p.style.transform = '';
     p.style.opacity = '';
+  }
+
+  /**
+   * Ends the turn between the two tabs now: the panel that left is hidden, both are back to their plain,
+   * untransformed selves. Safe to call at any time.
+   */
+  function endTabTurn() {
+    const t = G.tabAnim;
+    if (!t) return;
+    G.tabAnim = null;
+    if (t.wait.cancel) t.wait.cancel();
+    t.outP.hidden = true;
+    t.outP.classList.remove('is-turning');
+    t.inP.classList.remove('is-turning');
+    resetPanel(t.outP);
+    resetPanel(t.inP);
   }
 
   function setTab(tab) {
     tab = tab === 'backs' ? 'backs' : 'cards';
     if (!G.live || tab === G.tab) return;
-    if (G.tabAnim) G.tabAnim.finish();
+    endTabTurn();
     G.tab = tab;
     showTab(tab);
     G.fl.stop();
@@ -3099,42 +3246,47 @@
     const outP = tab === 'backs' ? ui.cardsPanel : ui.backsPanel;
     const dir = tab === 'backs' ? 1 : -1;
     inP.hidden = false;
-    inP.style.opacity = '0';
-    layout(); // the panel that was display:none can be measured now
+    // Not quite 0: a box at opacity 0 is not painted at all, and its first paint (six thick cards) would then
+    // fall into the middle of the turn instead of this first frame, before anything moves.
+    inP.style.opacity = '0.01';
+    layout(); // the panel that was display:none can be measured now (it must not be transformed yet)
     renderCarousel();
     renderBacks(0);
-    G.tabAnim = SOL.Anim.tween({
-      duration: 480,
-      ease: 'inOutCubic',
-      update: function (e) {
-        const q = 1 - e;
-        outP.style.transform = 'translate3d(' + r1(-dir * e * 38) + '%,0,' + r1(-e * 260) + 'px) rotateY(' + r1(dir * e * 68) + 'deg)';
-        outP.style.opacity = String(r2(clamp(1 - e * 1.5, 0, 1)));
-        inP.style.transform = 'translate3d(' + r1(dir * q * 38) + '%,0,' + r1(-q * 260) + 'px) rotateY(' + r1(-dir * q * 68) + 'deg)';
-        inP.style.opacity = String(r2(clamp(e * 1.5 - 0.5, 0, 1)));
-      },
-      done: function () {
-        outP.hidden = true;
-        resetPanel(outP);
-        resetPanel(inP);
-        G.tabAnim = null;
-      },
+    syncLoop();
+    /*
+     * The turn itself is a CSS transition of transform + opacity on the two panels (.is-turning in
+     * inspector.css), so it runs on the compositor: no frame of it needs the main thread. (Driven from JS, each
+     * frame restyled both panels and rebuilt the layer list, and half-way through the browser re-laid-out and
+     * repainted every card's art because its on-screen scale had changed: the turn stuttered on a phone.)
+     * Its length follows the speed setting through --insp-turn; reduced motion collapses it (base.css); what
+     * comes after it is sequenced with SOL.Anim.wait like everything else.
+     */
+    const ms = 480;
+    inP.style.transform = 'translate3d(' + dir * 38 + '%,0,-260px) rotateY(' + -dir * 68 + 'deg)';
+    void inP.offsetWidth; // the pose above is where the transition starts from
+    ui.panels.style.setProperty('--insp-turn', Math.round(ms / SOL.Anim.speed) + 'ms');
+    inP.classList.add('is-turning', 'is-turning--in');
+    outP.classList.add('is-turning');
+    outP.classList.remove('is-turning--in');
+    inP.style.transform = 'translate3d(0,0,0) rotateY(0deg)';
+    inP.style.opacity = '1';
+    outP.style.transform = 'translate3d(' + -dir * 38 + '%,0,-260px) rotateY(' + dir * 68 + 'deg)';
+    outP.style.opacity = '0';
+    const t = { inP: inP, outP: outP, wait: SOL.Anim.wait(ms + 30) };
+    G.tabAnim = t;
+    t.wait.then(function () {
+      if (G.tabAnim === t) endTabTurn();
     });
     play('whoosh', { duration: 220, volume: 0.4 });
     haptic('tick');
     announce(tab === 'backs' ? 'Card backs' : 'Cards');
   }
 
-  function onGalleryBarClick(e) {
+  function onGalleryBarPress(b) {
     const s = session;
     if (!s || s.closing || s.view !== 'gallery') return;
-    const t = e.target.closest ? e.target.closest('[data-tab]') : null;
-    if (t) {
-      setTab(t.getAttribute('data-tab'));
-      return;
-    }
-    const b = e.target.closest ? e.target.closest('[data-act="close"]') : null;
-    if (b) back();
+    if (b.hasAttribute('data-tab')) setTab(b.getAttribute('data-tab'));
+    else back();
   }
 
   function galleryKey(e, k) {
@@ -3207,7 +3359,8 @@
   }
 
   function tickGallery(dt, sdt) {
-    if (G.tab === 'backs' || G.tabAnim) renderBacks(sdt);
+    // (the backs hold still while the panels turn: the turn is motion enough, and its frames stay light)
+    if (G.tab === 'backs' && !G.tabAnim) renderBacks(sdt);
   }
 
   function galleryStop() {
@@ -3225,6 +3378,7 @@
   function openFromGallery(id) {
     const s = session;
     if (!galleryInteractive()) return;
+    endMorph(); // a filter re-flow still running: its cards go to their places first (the card flies out of one)
     const it = G.items.get(id);
     if (!it) return;
     galleryStop();
@@ -3265,6 +3419,7 @@
     flyOut(o, it ? it.card : null).then(function () {
       if (session !== s || s.done || !C.live) return;
       destroyCardView();
+      syncLoop();
       ui.cardView.hidden = true;
       if (!s.closing) {
         ui.ring.focus({ preventScroll: true });
@@ -3276,12 +3431,12 @@
   function destroyGallery() {
     if (!G.live) return;
     G.live = false;
+    if (G.focus >= 0 && G.focus < G.list.length) G.lastCard = G.list[G.focus];
     galleryStop();
     galleryCancelDrag();
     if (G.morph) G.morph.tween.cancel();
     G.morph = null;
-    if (G.tabAnim) G.tabAnim.cancel();
-    G.tabAnim = null;
+    endTabTurn();
     for (const it of G.backs.items) if (it.conf) it.conf.cancel();
     G.backs.items = [];
     G.items.clear();
@@ -3351,7 +3506,8 @@
       G.filter = 'all';
       G.list = listFor('all');
     }
-    G.pos = Math.max(0, G.list.indexOf(start));
+    // no card asked for: back to where the player last was (this page load), else the top of the deck
+    G.pos = Math.max(0, G.list.indexOf(start !== -1 ? start : G.lastCard));
     G.focus = -1;
     G.focusList = null;
     G.armed = false;
@@ -3374,6 +3530,7 @@
     for (const it of G.items.values()) it.fresh = true;
     renderCarousel();
     renderBacks(0);
+    syncLoop();
     G.armed = true;
     emit('inspector:open', { card: start === -1 ? null : start, mode: 'gallery' });
     play('open');

@@ -21,8 +21,11 @@
  *   Game.move(cardId, toPile, { source } = {}) -> boolean     (extra) source: 'drag' for a drop from the hand
  *   Game.autoMove(cardId) -> boolean   to SOL.Engine.bestTarget
  *   Game.undo() -> boolean
- *   Game.hint() -> boolean             shows the best hint; false (and a gentle cue) when there is none
- *   Game.autoComplete() -> Promise<boolean>    plays the game out; true when it ended in a win
+ *   Game.hint() -> boolean             shows the best hint (never blocks input); false, and a gentle "no" from
+ *                                      the stock and the table, when there is none
+ *   Game.autoComplete() -> Promise<boolean>    plays the game out as an accelerating cascade (a card every
+ *                                      140 ms shrinking to 35 ms); true when it ended in a win — which flows
+ *                                      straight into the celebration. A tap on the table stops it (cancelAuto).
  *   Game.inspect(cardId) -> boolean    opens SOL.Inspector on a face-up card, passing { sourceEl, cards } where
  *                                      cards = every card that is face-up right now (so previous / next never
  *                                      shows a hidden card)
@@ -34,8 +37,10 @@
  *   Game.getStatus() -> { score, moves, elapsedMs, canUndo, canHint, canAutoComplete, stockCount, wasteCount,
  *                         drawCount, won, started, busy, seed }
  *   (extras) Game.isPaused(), Game.inputLocked() (paused or busy), Game.hurry() (a tap during the deal: the
- *   rest of it plays 3x faster), Game.getHints() (cached SOL.Engine.hints of the current position),
- *   Game.isStuck(), Game.save() (write the save now).
+ *   rest of it plays 3x faster), Game.cancelAuto() -> boolean (stops a running auto-complete after the card
+ *   in the air; the position stays valid and saved), Game.isAutoCompleting(), Game.getHints() (cached
+ *   SOL.Engine.hints of the current position), Game.isStuck(), Game.save() (write the save now),
+ *   Game.isLite() / Game.setLite(bool) / Game.perf() (adaptive quality, see below).
  *
  * EVENTS (SOL.Bus)
  *   'game:new'     { state, restored }       a new state is on the table (emitted when the deal STARTS)
@@ -51,6 +56,10 @@
  *   'game:stuck'   {}                        once per stuck episode (Engine.isStuck, or no hint left), a
  *                                            moment after the move that caused it
  *   'game:busy'    { busy }
+ *   'game:pause'   { paused, reason }        (extra) a pause reason was taken (paused: true) or given back
+ *                                            (paused: is anything else still pausing). The celebration uses it
+ *                                            to make room for the win screen.
+ *   'game:quality' { lite, avgFrameMs, lateShare }   (extra) lite mode was switched on or off
  *
  * RULES OF THE HOUSE
  *   - The clock starts with the first action of a session (also for a restored game) and stops on a win, while
@@ -60,6 +69,12 @@
  *   - Stats: recordStart on the first action of a game, recordWin on a win (best score uses score + time bonus).
  *   - Settings apply live: theme, card back, animation speed, reduced motion, sound / volume, effects quality,
  *     handedness, haptics. drawCount applies to the next deal.
+ *   - Adaptive quality: real frame intervals are sampled during every deal and every full celebration. When
+ *     the average is well above 20 ms (> 24 ms, and more than half of the frames late) the session goes into
+ *     LITE mode: SOL.FX quality 'low', <html data-effects="low">, SOL.Board.setLite(true) (transform-only
+ *     choreography, no trails, the celebration with far fewer particles). It switches back when a later
+ *     sample is comfortably fast (< 18.5 ms). Never written to the settings; changing the 'effects' setting by
+ *     hand ends the adaptive behaviour for the session.
  *
  * The bootstrap at the bottom starts the modules in order (settings -> Anim / FX / Audio -> Board -> Input ->
  * Inspector -> UI -> Game.init()); a missing or throwing module is logged and skipped, never fatal.
@@ -78,7 +93,7 @@
   const AUTO_ACCEL = 0.9; // each gap is this fraction of the one before
   const HURRY = 3;
   // Adaptive quality: frame intervals measured during the deal (the busiest moment that every session has).
-  const PERF_MIN_FRAMES = 24;
+  const PERF_MIN_FRAMES = 12; // (SOL.Anim counts at most 50 ms per frame: a crawling deal is only ~24 frames long)
   const PERF_SLOW_MS = 20.5; // a frame that missed a 60 Hz deadline
   const PERF_LITE_AVG_MS = 24; // "struggling": average well above 20 ms and most frames late
   const PERF_LITE_SHARE = 0.5;
@@ -496,7 +511,9 @@
       const t0 = now();
       (function poll() {
         const b = board();
-        if (!b || b.busyCount() === 0 || now() - t0 >= maxMs || hidden) resolve();
+        // (travelling cards only: a stack that is still taking its bow does not hold the show up)
+        const moving = b ? (b.flyingCount ? b.flyingCount() : b.busyCount()) : 0;
+        if (moving === 0 || now() - t0 >= maxMs || hidden) resolve();
         else if (SOL.Anim) SOL.Anim.nextFrame().then(poll);
         else root.setTimeout(poll, 30); // waiting for a state, not sequencing an animation
       })();
@@ -512,19 +529,22 @@
     if (!SOL.Celebrate || typeof SOL.Celebrate.play !== 'function') return false;
     const token = ++winToken;
     setBusy('celebrate', true);
-    const done = function () {
+    const done = function (completed) {
       if (token !== winToken) return; // a new game / loadState took over meanwhile
+      // the show is the other heavy sequence: a full run is judged like a deal (see perfEnd)
+      perfEnd(completed === true);
       setBusy('celebrate', false);
     };
     // The winning card finishes its flight (and gets its landing burst) before the foundations erupt.
     whenLanded(LANDING_LIMIT_MS)
       .then(function () {
         if (token !== winToken || !state || !state.won) return null;
+        perfStart();
         return SOL.Celebrate.play(result);
       })
       .then(done, function (err) {
         log('celebration failed', err);
-        done();
+        done(false);
       });
     return true;
   }
@@ -698,6 +718,7 @@
     if (!eng) return Promise.resolve(false);
     cancelRunning();
     const token = dealToken;
+    const b0 = board();
     const drawCount = opts.drawCount === 1 || opts.drawCount === 3 ? opts.drawCount : setting('drawCount', 1) === 3 ? 3 : 1;
     if (state && clockOn) state.elapsedMs = elapsed();
     clockOn = false;
@@ -706,6 +727,13 @@
     armed = false;
     setBusy('deal', true);
     busy.delete('celebrate');
+    // The table is being swept: whatever is still falling from the last show goes too (and the particle
+    // canvas, the most expensive layer on the page while it is active, is idle during the deal).
+    try {
+      if (SOL.FX && b0 && !b0.isDeckMode()) SOL.FX.clear();
+    } catch (err) {
+      /* ignore */
+    }
     // The old game is over the moment the cards are swept up.
     if (SOL.Save) SOL.Save.clear();
     if (saveTimer) {

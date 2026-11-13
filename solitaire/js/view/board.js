@@ -24,26 +24,45 @@
  *                                    right after Board.dragEnd(): the held cards spring in from the pointer.
  *                                    `auto: true` (auto-complete): quicker flights with trails; `step` is the
  *                                    0-based index of the move inside the cascade.
- *   Board.gather() -> Promise        every card sweeps into one face-down deck, centre stage (enters deck mode)
- *   Board.shuffle() -> Promise       one visible riffle of the deck (call it again while waiting for a seed)
- *   Board.deal(state) -> Promise     deals `state` (a fresh deal) from the deck; resolves when the last card landed
+ *   Board.gather() -> Promise        the old game is swept up: one pass round the table, every card curling into
+ *                                    one face-down deck, centre stage (enters deck mode)
+ *   Board.shuffle() -> Promise       one riffle shuffle: cut into two bowed halves, riffle, square up (call it
+ *                                    again while waiting for a seed)
+ *   Board.deal(state) -> Promise     deals `state` (a fresh deal) from the deck with a dealer's flick — a turn in
+ *                                    the plane of the table, overshoot, settle; column tops turn over as they
+ *                                    land. Resolves when the last card landed (its face may still be turning).
+ *                                    gather + shuffle + deal take about 2.5 s at speed 1.
  *   Board.relayout()                 re-measure #table and glide everything to its new place (also automatic:
  *                                    ResizeObserver, window resize, 'app:insets', handedness)
  *   Board.setBack(backId)            SOL.Cards.setBack on all 52
  *   Board.setLeftHanded(bool)        mirrors the top row (stock under the left thumb)
  *
  *   -- feedback --
- *   Board.hint(action) -> boolean    pulses the hinted card and its target, sends a ghost there and back
+ *   Board.hint(action) -> boolean    move: the card and its run lift, a translucent ghost of them glides along an
+ *                                    arc to the target and dissolves — twice — while the target glows; draw: the
+ *                                    stock's top card beckons and its slot rings twice. Returns at once and never
+ *                                    blocks input (the next action clears it). Reduced motion: gold rings only.
  *   Board.clearHint()
  *   Board.shake(cardId)              "no": a quick shake of the card (and the run above it)
- *   Board.nudgeStock()               gentle "nothing to suggest" cue on the stock / waste
- *   Board.setStockInvite(bool)       the stock asks for a tap (a soft pulse on its top card / recycle symbol)
+ *   Board.nudgeStock()               "nothing to suggest": stock and waste shake their heads, the whole table
+ *                                    shudders once (CSS), the stock slot shows a red outline for a moment
+ *   Board.setStockInvite(bool)       the stock asks for a tap: its top card breathes (CSS only)
+ *   Board.hoverAt(clientX, clientY) -> boolean      idle life for fine pointers: the top face-up card under the
+ *                                    pointer leans towards it with a moving glare (a soft hold). SOL.Input calls
+ *                                    it on mouse / pen moves; Board.hoverEnd() or (-1, -1) ends it.
+ *   Board.hoverEnd()
+ *   Board.suitComplete(sprite)       the flourish of a finished foundation (shimmer, ring, stars, the King nods);
+ *                                    Board.foundationArrive calls it for a King
+ *   Board.setLite(bool) / Board.isLite()            lite mode (see SOL.Game): transform-only choreography, no
+ *                                    trails, fewer particles
  *
  *   -- dragging (called by SOL.Input; client coordinates) --
  *   Board.cardAt(clientX, clientY, slop = 0) -> cardId | -1        topmost card as currently drawn (cards in
  *                                                                   mid-flight are skipped)
  *   Board.pileAt(clientX, clientY, slop = 0) -> pileId | null      which pile's area the point is in
- *   Board.press(cardId) / Board.unpress()                           tiny "finger down" lift
+ *   Board.press(cardId) / Board.unpress()                           finger down: the card (and the run on it) is
+ *                                    pushed into the felt a little; a drag lifts it out of the dip, a release
+ *                                    lets it spring back
  *   Board.dragStart(cardId, clientX, clientY) -> number             cards picked up (0 = cannot be picked up)
  *   Board.dragMove(clientX, clientY)
  *   Board.dragEnd() -> { card, from, target, over } | null          stops following the pointer; the run stays
@@ -83,6 +102,8 @@
  *   Board.foundationArrive(sprite, { quiet })   the whole arrival effect (ring, particles, pitch, haptic)
  *   Board.TUNE                       every timing / distance constant (mutable: tune them live)
  *   Board.busyCount() -> number      sprites with a running animation
+ *   Board.flyingCount() -> number    sprites that are travelling (flights and position springs only)
+ *   Board.release(tag, { how: 'instant' })          puts the held cards exactly on their places, no animation
  *   Board.isDeckMode() -> boolean    the cards are the shuffling deck (between gather() and deal())
  *   Emits 'board:layout' <Board.layout()> on SOL.Bus after every re-layout.
  *
@@ -101,9 +122,12 @@
  * Motion vocabulary (all start from the sprite's CURRENT values, so anything can be interrupted any time):
  *   sprite.fly(opts) -> handle       a flight: one tween that owns every value. No x/y given = flies to the
  *                                    logical target and keeps tracking it if the layout moves it mid-air.
- *       { x, y, duration, delay, arc (px the path bows towards the top of the screen), side (px sideways),
- *         spin (deg, peaks mid-flight), peakLift, peakScale (added mid-flight), rot / scale / lift (END pose,
- *         default 0 / 1 / 0), flip (END flip 0 | 180), flipFrom / flipTo (0..1 window of the flight),
+ *       { x, y, duration, delay, ease (function; default outCubic), arc (px the path bows towards the top of the
+ *         screen), side (px sideways), spin (deg, peaks mid-flight), turns (whole in-plane turns — the card
+ *         lands looking the same; turnsBy: finished by this fraction of the flight), peakLift, peakScale (added
+ *         mid-flight), rot / rx / ry / scale / lift (END pose, default 0 / 0 / 0 / 1 / 0), flip (END flip 0 | 180;
+ *         a flight that does not change the face leaves --flip to a running flipTo), flipFrom / flipTo (0..1
+ *         window of the flight),
  *         flipMode ('prop' | 'spin'), overshoot (px), z, trail (colour), liftSteps (coarser --lift steps for
  *         crowded choreography; default TUNE.liftSteps), lazy (a covered card stays covered
  *         until its delay is over), onStart(s), onFrame(s, t), onLand(s) }
@@ -112,6 +136,8 @@
  *   sprite.poseTo({ rot, rx, ry, scale, lift }, { duration, delay, ease }) -> handle
  *   sprite.flipTo(deg, { duration, delay, mode, hop }) -> handle        hop: px the card jumps while it turns
  *   sprite.wobble(fn(t, sprite), { duration, delay }) -> handle         drives ox / oy (they end at 0)
+ *   sprite.act(fn(t, sprite), { duration, delay }) -> handle            a performance in place: fn writes rot /
+ *                                    rx / ry / scale / lift and brings them back to rest by t = 1
  *   sprite.cover(bool)               takes a card out of rendering (content-visibility) / puts it back. Every
  *                                    motion method uncovers; the board covers cards resting deep in the stock,
  *                                    the waste and the foundations (TUNE.keep*), so only ~30 cards are live
@@ -119,10 +145,16 @@
  *   sprite.busy() -> boolean
  * State classes the board keeps on its cards (board.css uses them to drop unused layers): .is-lifted while
  * lift > 0 or the card turns (the lift shadow is rendered only then), .is-turning while --flip is between 0 and
- * 180 (the flip shading), and .is-glare — NOT set by the board: add it to a card before you animate
- * --glare-o / --glare-x / --glare-y on it, remove it afterwards (the glare planes are display: none without it).
- * Flip modes: 'prop' animates --flip (lighting + shadow react; ~0.16 ms per card per frame) — a handful of
- * cards. 'spin' rotates .card itself and swaps the face at 90deg (transform only) — mass choreography.
+ * 180 (the flip shading), and .is-glare while a card carries a glare (the hover tilt sets it; add it yourself
+ * before you animate --glare-o / --glare-x / --glare-y on a card, remove it afterwards).
+ * FLAT CARDS (board.css): a table card that is neither .is-turning nor .is-glare is flattened into ONE
+ * compositor layer — its inner 3D boxes are switched off and only the visible face is rendered. So when you
+ * rotate a sprite yourself (rx / ry), never go past edge-on (|ry| > 90) with flip left at 0: set flip to 180
+ * and ry to the remainder instead (the back is swapped in — see face() in celebrate.js). rot, rx and small ry
+ * need no care.
+ * Flip modes: 'prop' animates --flip (lighting + shadow react; ~0.16 ms per card per frame, and the card is a
+ * full 3D scene while it turns) — a handful of cards. 'spin' rotates .card itself and swaps the face at 90deg
+ * (transform only, the card stays flat) — mass choreography, and everything in lite mode.
  * Stacking: z-index = index in the pile at rest; a flight raises its card (TUNE.flyZ + launch order) and puts
  * it back on landing; dragged cards sit at TUNE.dragZ; held "show" cards are yours.
  * Invariant kept by the board: whenever a sprite is not held and has no handle, it is exactly on its target,
@@ -288,10 +320,6 @@
   function outCubic(t) {
     const u = 1 - t;
     return 1 - u * u * u;
-  }
-  function outQuart(t) {
-    const u = 1 - t;
-    return 1 - u * u * u * u;
   }
   function outBack(t) {
     const c = 1.70158;
@@ -1576,6 +1604,7 @@
     choreoGen++;
     takeDrag();
     unpress();
+    hoverEnd(true);
     clearHint();
     deckMode = false;
     for (let i = 0; i < 52; i++) {
@@ -3312,6 +3341,13 @@
     return n;
   }
 
+  /** Sprites that are travelling (a flight or a position spring) — poses, flips and wobbles do not count. */
+  function flyingCount() {
+    let n = 0;
+    for (let i = 0; i < sprites.length; i++) if (sprites[i].hFlight || sprites[i].hPos) n++;
+    return n;
+  }
+
   function isSettled() {
     if (!inited) return false;
     if (drag || choreoBusy > 0 || deckMode) return false;
@@ -3398,6 +3434,7 @@
       return lite;
     },
     busyCount: busyCount,
+    flyingCount: flyingCount,
     isDeckMode: function () {
       return deckMode;
     },

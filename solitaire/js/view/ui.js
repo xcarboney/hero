@@ -359,7 +359,17 @@
   const hud = {
     els: null, roller: null, score: null, moves: null, time: null, draw: null, liveTimer: 0,
     flash: null, chipFx: null, movesFx: null, badgeFx: null, // re-fireable one-shot effects (createPulse)
+    box: null, bar: null, fitKey: '', // fitHud(): what the bar was last fitted for
   };
+  // Stray-tap protection (see noteClick, openLayer and shield)
+  const GUARD_OPEN_MS = 160; // after a panel opens on a tap, every tap on it is ignored for this long...
+  const GUARD_NEAR_MS = 380; // ...and for this long when it lands where the opening tap did (a double tap)
+  const GUARD_NEAR_PX = 56;
+  const GUARD_SELF_MS = 320; // a panel that opened by itself (no tap): ignore taps on it for this long
+  const SHIELD_MS = 300; // after a panel closes on a tap, the screen ignores taps for this long
+  let lastTap = null; // { x, y, t } of the pointer click being handled (or just handled)
+  let shieldEl = null;
+  let shieldTimer = 0;
   const tb = { box: null, btns: {}, auto: null, autoOn: false, autoT: 0, autoAnim: null };
   const layers = []; // open modal layers, bottom -> top
   let pauseDepth = 0;
@@ -460,8 +470,21 @@
       h('div.ui-hud__left', null, badge), score, h('div.ui-hud__right', null, time, moves));
 
     hudRoot.textContent = '';
-    hudRoot.appendChild(h('div.ui-hud-box', null, bar)); // the box is the container the bar's queries measure
+    hud.bar = bar;
+    hud.box = h('div.ui-hud-box', null, bar); // the box is the container the bar's queries measure
+    hud.fitKey = '';
+    hudRoot.appendChild(hud.box);
     hudRoot.appendChild(live);
+    if (typeof root.ResizeObserver === 'function') {
+      // rotation, side insets: the room changed, fit again (the box's own size never depends on the bar)
+      let width = -1;
+      new root.ResizeObserver((entries) => {
+        const w = entries.length ? Math.round(entries[entries.length - 1].contentRect.width) : -1;
+        if (w === width) return;
+        width = w;
+        fitHud(true);
+      }).observe(hud.box);
+    }
 
     const pop = (el, amount) => [
       (t) => {
@@ -567,7 +590,52 @@
   }
 
   function renderTimerVisibility() {
-    if (hud.els) hud.els.time.hidden = sGet('showTimer', true) === false;
+    if (!hud.els) return;
+    hud.els.time.hidden = sGet('showTimer', true) === false;
+    fitHud(false);
+  }
+
+  /**
+   * Guarantees that the bar never overlaps itself, wraps or runs off the screen, whatever the values. Normal
+   * games fit with room to spare. When they do not (a seven-digit score next to an hours-long timer on a 320px
+   * phone with side insets), the bar first goes "tight" (the badge drops the word Draw, gaps shrink) and, if
+   * that is not enough, is scaled down as a whole to the width there is.
+   *
+   * It reads layout, so it only runs when the room or the number of characters on show has changed (not on
+   * every status, and never inside an animation frame).
+   */
+  function fitHud(force) {
+    const bar = hud.bar;
+    const box = hud.box;
+    if (!bar || !box || !hud.els) return;
+    const key = [
+      fmtInt(hud.score || 0).length, fmtInt(hud.moves || 0).length, (hud.time || '').length,
+      hud.els.time.hidden ? 0 : 1, hud.draw || 0,
+    ].join(':');
+    if (!force && key === hud.fitKey) return;
+    hud.fitKey = key;
+    const hadFit = bar.classList.contains('is-tight') || bar.style.transform !== '';
+    bar.classList.remove('is-tight');
+    bar.style.width = '';
+    bar.style.transform = '';
+    const avail = box.clientWidth;
+    if (!(avail > 0)) return;
+    // Everyday values on a bar this wide always fit (up to 12 characters of score + moves + time need at most
+    // 292px): skip the layout read.
+    if (!hadFit && avail >= 320 && key.split(':').slice(0, 3).reduce((n, v) => n + Number(v), 0) <= 12) return;
+    const natural = function () {
+      bar.classList.add('is-measure'); // every column at its content's width (ui.css)
+      const w = Math.ceil(bar.getBoundingClientRect().width);
+      bar.classList.remove('is-measure');
+      return w;
+    };
+    let need = natural();
+    if (need <= avail) return;
+    bar.classList.add('is-tight');
+    need = natural();
+    if (need <= avail) return;
+    bar.style.width = need + 'px';
+    bar.style.transform = 'scale(' + (Math.floor((avail / need) * 10000) / 10000) + ')';
   }
 
   // ================================================================== toolbar
@@ -714,6 +782,7 @@
     renderMoves(Math.max(0, Math.round(Number(status.moves) || 0)), isMove);
     renderTime(status.elapsedMs);
     renderDraw(status.drawCount);
+    fitHud(false);
     renderToolbar();
     // The win was undone: the win screen (shown or still waiting for the celebration) no longer applies.
     if (wasWon && !status.won) cancelWin(true);
@@ -738,6 +807,51 @@
     const remove = () => dot.remove();
     dot.addEventListener('animationend', remove);
     root.setTimeout(remove, 900); // in case the animation never runs (hidden tab)
+  }
+
+  // ================================================================== stray taps
+
+  function nowMs() {
+    return root.performance && typeof root.performance.now === 'function' ? root.performance.now() : Date.now();
+  }
+
+  /** True for a click made with a pointer (finger, mouse, pen) — not one a key press or a script produced. */
+  function isPointerClick(e) {
+    return !!e && e.isTrusted !== false && (e.detail > 0 || (typeof e.pointerType === 'string' && e.pointerType !== ''));
+  }
+
+  /** Document, capture phase: remembers where and when the current tap landed (openLayer reads it). */
+  function noteClick(e) {
+    if (isPointerClick(e)) lastTap = { x: e.clientX, y: e.clientY, t: nowMs() };
+  }
+
+  /**
+   * A double tap must never act twice. Two things can sit under the second tap that the player never aimed at:
+   * a panel that the first tap opened (Menu twice hit "Restart this deal"; New twice confirmed the question it
+   * had just asked) — openLayer guards that — and whatever a closing panel uncovers (the toolbar's Undo under
+   * "Keep playing", the table's cards under a toast). For the second case the screen is covered by an invisible
+   * shield for a moment after a panel was closed by a tap.
+   */
+  function shield(ms) {
+    if (!overlayRoot) return;
+    if (!shieldEl) {
+      shieldEl = h('div.ui-shield', { 'aria-hidden': 'true' });
+      // a tap on the shield is a tap on nothing
+      shieldEl.addEventListener('click', (e) => {
+        e.stopPropagation();
+        e.preventDefault();
+      });
+    }
+    if (shieldEl.parentNode !== overlayRoot || shieldEl.nextSibling) overlayRoot.appendChild(shieldEl); // on top
+    root.clearTimeout(shieldTimer);
+    shieldTimer = root.setTimeout(() => {
+      if (shieldEl) shieldEl.remove();
+    }, ms || SHIELD_MS);
+  }
+
+  /** Was this close caused by a tap that is still "in the air" (its double could follow)? */
+  function tapJustNow() {
+    return !!lastTap && nowMs() - lastTap.t < 120;
   }
 
   // ================================================================== modal layers (sheets / dialogs)
@@ -1048,8 +1162,26 @@
       drag = { id: e.pointerId, x: e.clientX, y: e.clientY, offset: 0, active: false, trail: [{ t: e.timeStamp, y: e.clientY }] };
     });
 
+    // The panel is closing for another reason (Android back, Esc, a new game) while a finger still holds it:
+    // let go, so the finger does not keep dragging a sheet that is on its way out.
+    layer.cancelDrag = function () {
+      const d = drag;
+      drag = null;
+      if (!d || !d.active) return;
+      sheet.classList.remove('is-dragging');
+      try {
+        sheet.releasePointerCapture(d.id);
+      } catch (err) {
+        /* already released */
+      }
+    };
+
     sheet.addEventListener('pointermove', (e) => {
       if (!drag || e.pointerId !== drag.id) return;
+      if (layer.closing) {
+        layer.cancelDrag();
+        return;
+      }
       const dy = e.clientY - drag.y;
       const dx = e.clientX - drag.x;
       if (!drag.active) {
@@ -1093,7 +1225,8 @@
   /**
    * Opens a modal layer.
    * spec: { kind, title, header = true, closeButton = true, className, role, dismissible = true, pause = true,
-   *         sound = true, returnFocus, initialFocus(layer) -> element, build(layer), onClose(result) }
+   *         sound = true, returnFocus, initialFocus(layer) -> element, build(layer), onClose(result),
+   *         guardMs: how long taps on the new panel are ignored (default: see GUARD_OPEN_MS / GUARD_SELF_MS) }
    */
   function openLayer(spec) {
     const titleId = 'ui-title-' + ++uid;
@@ -1107,8 +1240,8 @@
 
     const layer = {
       spec: spec, kind: spec.kind, el: el, sheet: sheet, backdrop: backdrop, body: body, content: content,
-      titleId: titleId, closing: false, mode: 'sheet', y: 0, anim: null, afterMotion: null,
-      scrollable: false, paused: false, cleanup: [], openedAt: root.performance ? root.performance.now() : 0,
+      titleId: titleId, closing: false, mode: 'sheet', y: 0, anim: null, afterMotion: null, cancelDrag: null,
+      scrollable: false, paused: false, cleanup: [], openedAt: nowMs(),
       returnFocus: spec.returnFocus !== undefined ? spec.returnFocus : doc.activeElement,
       removeBack: null, resolveClosed: null, closed: null,
     };
@@ -1142,11 +1275,24 @@
       report('building the "' + spec.kind + '" panel failed', err);
     }
 
+    // Stray taps (see shield): the second tap of a double tap lands on whatever this panel has just put under
+    // the finger, and a panel that comes up by itself (the win screen) slides in under a finger that was aimed
+    // at the table. Neither may press anything. Capture phase on the layer: before any button's own handler.
+    const opener = lastTap && layer.openedAt - lastTap.t < 120 ? lastTap : null;
+    const guardAll = layer.openedAt + (spec.guardMs !== undefined ? spec.guardMs : opener ? GUARD_OPEN_MS : GUARD_SELF_MS);
+    const guardNear = opener ? layer.openedAt + GUARD_NEAR_MS : 0;
+    el.addEventListener('click', (e) => {
+      if (!isPointerClick(e)) return;
+      const t = nowMs();
+      const near = opener && t < guardNear && Math.abs(e.clientX - opener.x) < GUARD_NEAR_PX && Math.abs(e.clientY - opener.y) < GUARD_NEAR_PX;
+      if (t < guardAll || near) {
+        e.stopPropagation();
+        e.preventDefault();
+      }
+    }, true);
+
     backdrop.addEventListener('click', () => {
-      // A second tap of the gesture that opened the sheet must not close it again.
-      const now = root.performance ? root.performance.now() : 0;
-      if (spec.dismissible === false || now - layer.openedAt < 220) return;
-      closeLayer(layer);
+      if (spec.dismissible !== false) closeLayer(layer);
     });
 
     // Keys typed inside a panel are the panel's: game shortcuts on the document must not fire through it.
@@ -1217,6 +1363,8 @@
     if (!layer || layer.closing) return;
     const o = opts || {};
     layer.closing = true;
+    if (layer.cancelDrag) layer.cancelDrag();
+    if (tapJustNow()) shield(); // a tap closed it: its double must not reach what was underneath
     const i = layers.indexOf(layer);
     if (i !== -1) layers.splice(i, 1);
     if (layer.removeBack) layer.removeBack();
@@ -1285,6 +1433,16 @@
   }
 
   function onDocKeydown(e) {
+    // A held key repeats. Enter held on "New" would press the confirm button that takes the focus next; held
+    // on "Cancel" it would press the button the focus returns to, and open the question again. Only the first
+    // press of Enter / Space counts on anything that opens or answers a panel (Undo and Hint may repeat).
+    if (e.repeat && (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar')) {
+      const t = e.target;
+      const ours = t && t.closest && ((overlayRoot && overlayRoot.contains(t)) ||
+        (tbRoot && tbRoot.contains(t) && !t.closest('[data-action="undo"], [data-action="hint"]')));
+      if (ours && t.closest('button')) e.preventDefault();
+      return;
+    }
     if (e.key !== 'Escape' || e.defaultPrevented) return;
     if (inspectorOpen()) return; // the inspector sits above everything of ours and owns Esc
     const top = topLayer();
@@ -1862,21 +2020,14 @@
     ];
     const group = h('div.ui-backs', { role: 'radiogroup', 'aria-label': 'Card back' });
     const cards = [];
+    const stages = [];
+    const canCreate = !!C && typeof C.createBackOnly === 'function';
     const btns = backs.map((back, i) => {
       const stage = h('span.ui-back__stage', { 'aria-hidden': 'true' });
-      let card = null;
-      if (C && typeof C.createBackOnly === 'function') {
-        try {
-          card = C.createBackOnly(back.id);
-          card.setAttribute('aria-hidden', 'true');
-          stage.appendChild(card);
-        } catch (err) {
-          card = null;
-        }
-      }
-      if (!card) stage.appendChild(h('span.ui-back__fallback'));
+      if (!canCreate) stage.appendChild(h('span.ui-back__fallback'));
       stage.appendChild(h('span.ui-back__check', { html: icon('check') }));
-      cards.push(card);
+      cards.push(null);
+      stages.push(stage);
       const b = h('button.ui-back', { type: 'button', role: 'radio', 'data-value': back.id, 'aria-label': back.name },
         stage, h('span', { 'aria-hidden': 'true' }, back.name));
       b.addEventListener('click', () => {
@@ -1886,6 +2037,26 @@
       group.appendChild(b);
       return b;
     });
+    // The six real cards are the most expensive thing in the settings sheet (measured: about a third of its
+    // first build). They are put in one frame later, when the sheet is already on its way up — its transition
+    // runs on the compositor and does not wait for them; on a phone they are below the fold anyway.
+    const fill = function () {
+      backs.forEach((back, i) => {
+        if (cards[i]) return;
+        try {
+          const card = C.createBackOnly(back.id);
+          card.setAttribute('aria-hidden', 'true');
+          stages[i].insertBefore(card, stages[i].firstChild);
+          cards[i] = card;
+        } catch (err) {
+          stages[i].insertBefore(h('span.ui-back__fallback'), stages[i].firstChild);
+        }
+      });
+    };
+    if (canCreate) {
+      if (typeof root.requestAnimationFrame === 'function' && !reducedMotion()) root.requestAnimationFrame(fill);
+      else fill();
+    }
     let spin = null;
     function index() {
       const id = sGet('cardBack', 'royal');
@@ -1959,6 +2130,10 @@
     const setFig = (fig, text) => {
       fig.value.textContent = text === null ? '—' : text;
       fig.value.classList.toggle('is-none', text === null);
+      // Long values (an hour-long best time, a five-digit score on a 320px phone) step down in size; ui.css
+      // cuts anything longer still with an ellipsis instead of letting it spill out of its box.
+      const len = text === null ? 0 : text.length;
+      fig.value.setAttribute('data-len', len > 9 ? 'xl' : len > 6 ? 'l' : len > 5 ? 'm' : 's');
     };
 
     const seg = segmented({
@@ -2039,6 +2214,7 @@
 
     function render(animate) {
       const s = summary(mode);
+      s.winRate = clamp(Number(s.winRate) || 0, 0, 1); // a damaged stats record may hold more wins than games
       setFig(played, fmtInt(s.played));
       setFig(won, fmtInt(s.won));
       setFig(bestScore, s.won > 0 ? fmtInt(s.bestScore) : null);
@@ -2262,6 +2438,9 @@
       kind: 'win',
       className: 'ui-sheet--win',
       header: false,
+      // It comes up by itself, while the player may be tapping the table to hurry the celebration along: taps
+      // on it count only once it has arrived.
+      guardMs: 600,
       build: (ly) => {
         const c = ly.content;
         c.classList.add('ui-win');
@@ -2424,6 +2603,7 @@
       type: 'button', 'data-stuck': 'undo', disabled: !status.canUndo,
       onclick: () => {
         feedback();
+        if (tapJustNow()) shield(); // the toolbar's own Undo sits right under this button
         hideStuck(false);
         callGame('undo');
       },
@@ -2438,6 +2618,7 @@
           type: 'button', 'data-stuck': 'new',
           onclick: () => {
             feedback();
+            if (tapJustNow()) shield();
             hideStuck(false);
             // The card itself was the question: a stuck game is dealt over without another confirm.
             closeAll();
@@ -2449,6 +2630,7 @@
           type: 'button', 'data-stuck': 'keep',
           onclick: () => {
             feedback();
+            if (tapJustNow()) shield();
             hideStuck(true);
           },
         }, 'Keep looking')));
@@ -2558,7 +2740,10 @@
   function onSettingsChange(p) {
     const key = p && p.key;
     if (key === 'showTimer' || !key) renderTimerVisibility();
-    if (key === 'drawCount' && !haveStatus) renderDraw(p.value);
+    if (key === 'drawCount' && !haveStatus) {
+      renderDraw(p.value);
+      fitHud(false);
+    }
   }
 
   function init() {
@@ -2581,6 +2766,7 @@
     overlayRoot.addEventListener('pointerdown', onPressDown);
     doc.addEventListener('keydown', onDocKeydown, true);
     doc.addEventListener('focusin', onDocFocusIn);
+    doc.addEventListener('click', noteClick, true);
     // Long-press must never bring up a browser menu on the app's chrome.
     for (const el of [hudRoot, tbRoot, overlayRoot, toastRoot]) {
       el.addEventListener('contextmenu', (e) => {
@@ -2605,6 +2791,7 @@
         if (p && typeof p.elapsedMs === 'number') {
           status.elapsedMs = p.elapsedMs;
           renderTime(p.elapsedMs);
+          fitHud(false);
         }
       });
       bus.on('game:change', () => {

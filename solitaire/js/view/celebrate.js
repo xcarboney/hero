@@ -18,9 +18,11 @@
  *   - STAGE: it plays in whatever part of the screen is free. When the win screen slides up from the bottom
  *     ('game:pause' { reason: 'modal' }) the show glides into the space above it; when it closes, back.
  *   - a re-layout (rotation, resize) moves the stage and the foundations under it.
- * Cost: transforms only. The cards themselves are rotated (rx / ry / rot / scale on .card — no --flip, no
- * --lift, no shadows), z-order is re-sorted a few times a second instead of every frame, and cards buried in
- * the stacks stay unrendered until they launch and are covered again as the stacks rebuild.
+ * Cost: transforms only. The cards themselves are rotated (rx / ry / rot / scale on .card — no animated
+ * --flip, no --lift, no shadows) and stay flat, single-layer elements throughout (see "FLAT card" in
+ * board.css): a card that turns its back to the player swaps faces at the edge-on moment instead of rotating
+ * past it. z-order is re-sorted a few times a second instead of every frame, and cards buried in the stacks
+ * stay unrendered until they launch and are covered again as the stacks rebuild.
  *
  * Public API
  *   Celebrate.play(result?) -> Promise<boolean>   starts the show (while it runs the same promise is returned).
@@ -353,6 +355,25 @@
       );
     }
 
+    /**
+     * Turns a card to face `deg` about its vertical axis (0 = face to the player, 180 = back to the player).
+     * Table cards are flat (board.css): the element is never rotated past edge-on — the other face is
+     * swapped in there instead, which is the same picture for a fraction of the layers.
+     */
+    function face(s, deg) {
+      const a = wrap180(deg);
+      if (a > 90) {
+        s.flip = 180;
+        s.ry = a - 180;
+      } else if (a < -90) {
+        s.flip = 180;
+        s.ry = a + 180;
+      } else {
+        s.flip = 0;
+        s.ry = a;
+      }
+    }
+
     function beat(name) {
       if (sh.fired[name]) return false;
       sh.fired[name] = true;
@@ -443,6 +464,7 @@
               s.rot = fr.rot * (1 - q);
               s.rx = fr.rx * (1 - q);
               s.ry = fr.ry * (1 - q);
+              s.flip = 0;
               s.scale = lerp(fr.scale, 1, q) - 0.07 * breath;
               B.touch(s);
             }
@@ -532,7 +554,7 @@
           if (t >= homeAt) {
             // ---- time to go home: remember where the card is
             sh.phase[id] = ph = 4;
-            sh.from[id] = { x: s.x, y: s.y, rot: wrap180(s.rot), rx: wrap180(s.rx), ry: wrap180(s.ry), scale: s.scale, at: homeAt };
+            sh.from[id] = { x: s.x, y: s.y, rot: wrap180(s.rot), rx: wrap180(s.rx), ry: wrap180(s.ry + s.flip), scale: s.scale, at: homeAt };
             s.z = showZ + 200 + rank * 4 + suit;
           } else {
             const p = clamp((t - T.burst) / T.burstMs, 0, 1);
@@ -572,6 +594,7 @@
             s.rot = 0;
             s.rx = 0;
             s.ry = 0;
+            s.flip = 0;
             s.scale = 1;
             s.z = s.tz;
             B.touch(s);
@@ -598,7 +621,7 @@
         s.scale = sc;
         s.rot = rot;
         s.rx = rx;
-        s.ry = ry;
+        face(s, ry);
         B.touch(s);
       }
 
@@ -717,6 +740,7 @@
         peakScale: 0.03,
         spin: 0,
         overshoot: 0,
+        flipMode: 'spin', // a card caught back-to-front turns over without leaving the flat (one layer) state
       });
       return;
     }

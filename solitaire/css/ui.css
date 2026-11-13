@@ -24,10 +24,15 @@
  */
 
 :root {
-  --ui-hud-h: 44px;
-  --ui-tb-h: 62px;
+  --ui-hud-h: 40px;                             /* 40 + 56 = 96px of chrome: 15% of a 360x640 screen */
+  --ui-tb-h: 56px;
   --ui-panel-1: #18231f;                       /* sheet: top of the gradient */
   --ui-panel-2: #0c1312;                       /* sheet: bottom of the gradient */
+  --ui-toast-1: #2a3532;                       /* toast: a shade lighter than a sheet, so it reads on top of one */
+  --ui-toast-2: #141b19;
+  --ui-win-1: rgba(20, 30, 27, 0.74);          /* win screen: see-through at the top (the celebration behind it)… */
+  --ui-win-2: rgba(13, 20, 18, 0.92);
+  --ui-win-3: #0b100f;                         /* …solid where the buttons are */
   --ui-line: rgba(255, 255, 255, 0.09);
   --ui-fill: rgba(255, 255, 255, 0.05);
   --ui-fill-2: rgba(255, 255, 255, 0.1);
@@ -40,13 +45,18 @@
   :root {
     --ui-panel-1: color-mix(in srgb, var(--felt) 36%, #151b1d);
     --ui-panel-2: color-mix(in srgb, var(--felt-lo) 60%, #0b0f10);
+    --ui-toast-1: color-mix(in srgb, var(--felt) 30%, #2b3033);
+    --ui-toast-2: color-mix(in srgb, var(--felt-lo) 45%, #15191b);
+    --ui-win-1: color-mix(in srgb, var(--ui-panel-1) 74%, transparent);
+    --ui-win-2: color-mix(in srgb, var(--ui-panel-2) 92%, transparent);
+    --ui-win-3: var(--ui-panel-2);
   }
 }
 
 @media (orientation: landscape) and (max-height: 500px) {
   :root {
-    --ui-hud-h: 38px;
-    --ui-tb-h: 52px;
+    --ui-hud-h: 34px;
+    --ui-tb-h: 48px;
   }
 }
 
@@ -99,6 +109,31 @@
   white-space: nowrap;
   overflow: hidden;                              /* belt and braces: the bar can never grow or wrap */
   overflow: clip;                                /* ...and is not a scroll container (nothing can scroll it) */
+  transform-origin: 0 50%;                       /* fitHud() scales the bar down from its left edge */
+}
+/* fitHud() in ui.js: how wide the bar wants to be when every column is exactly as wide as its content */
+.ui-hud.is-measure {
+  width: max-content;
+  max-width: none;
+  grid-template-columns: max-content max-content max-content;
+}
+/* fitHud(): the values on show need more room than there is — the badge drops its word, the gaps shrink */
+.ui-hud.is-tight {
+  column-gap: 5px;
+  padding: 0 8px;
+}
+.ui-hud.is-tight .ui-hud__right {
+  gap: 8px;
+}
+.ui-hud.is-tight .ui-badge__word {
+  display: none;
+}
+.ui-hud.is-tight .ui-badge {
+  gap: 3px;
+  padding: 0 7px 0 5px;
+}
+.ui-hud.is-tight .ui-badge__n {
+  margin-left: 1px;
 }
 
 /* The HUD adapts to the width it really has (side insets included), not to the viewport. */
@@ -145,7 +180,7 @@
   height: 16px;
 }
 .ui-badge__n {
-  margin-left: 1px;
+  margin-left: 4px;
   color: var(--gold);
   font-size: 13px;
   font-weight: 800;
@@ -199,7 +234,7 @@
   left: -22px;
   right: -22px;
   top: -14px;
-  bottom: -3px;                                  /* stays inside the bar: the HUD has no overflow at all */
+  bottom: -2px;                                  /* stays inside the bar: the HUD has no overflow at all */
   border-radius: 50%;
   background: radial-gradient(closest-side, rgba(243, 201, 105, 0.6), rgba(243, 201, 105, 0));
   opacity: 0;
@@ -313,6 +348,10 @@
   .ui-badge {
     height: 24px;
   }
+  .ui-score__glow {
+    top: -12px;
+    bottom: -1px;
+  }
 }
 
 /* ================================================================== toolbar */
@@ -346,7 +385,7 @@
   height: var(--ui-tb-h);
   max-width: 560px;
   margin: 0 auto;
-  padding: 5px 6px;
+  padding: 4px 6px;                              /* 56px bar, 48px targets */
 }
 :root[data-left-handed="true"] .ui-tb {
   flex-direction: row-reverse;
@@ -367,7 +406,7 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: 3px;
   margin: 0;
   padding: 0;
   border: 0;
@@ -402,12 +441,12 @@
 }
 .ui-tb__icon {
   position: relative;
-  width: 26px;
-  height: 26px;
+  width: 25px;
+  height: 25px;
 }
 .ui-tb__icon .ui-icon {
-  width: 26px;
-  height: 26px;
+  width: 25px;
+  height: 25px;
 }
 .ui-tb__label {
   position: relative;
@@ -549,13 +588,12 @@
   }
 }
 
-/* short landscape (phones on their side): the table needs every pixel of height, so the pill
-   lives inside the toolbar, at its outer end */
+/* short landscape (phones on their side): the table needs every pixel of height */
 @media (orientation: landscape) and (max-height: 500px) {
   .ui-tb {
     justify-content: center;
     gap: 4px;
-    padding: 2px 6px;
+    padding: 0 6px;                              /* 48px bar, 48px targets */
   }
   .ui-tb__btn {
     flex: 0 1 auto;
@@ -573,6 +611,15 @@
     width: 22px;
     height: 22px;
   }
+}
+
+/*
+ * Wherever the buttons sit in one centred row (wide screens, phones on their side) the Auto-complete pill
+ * lives INSIDE the toolbar, at its outer end: floating above the bar it would cover the bottom cards of the
+ * middle columns, which reach all the way down on those tables. On a phone in portrait it floats above the
+ * bar, where the table is empty at that point of a game. (.toast-root.has-auto below uses the same condition.)
+ */
+@media (min-width: 640px), (orientation: landscape) and (max-height: 500px) {
   .ui-auto-wrap {
     left: auto;
     right: 10px;
@@ -627,8 +674,38 @@
     }
   }
 }
+/* (= wide, and not the short landscape case above) */
+@media (min-width: 640px) and (orientation: portrait), (min-width: 640px) and (min-height: 500.02px) {
+  /* The wide row: labelled buttons need 580px, icons alone 320px; the pill 165px (92px as "Auto"). */
+
+  /* room for labels, but not next to the pill: the labels step aside while the pill is showing */
+  @container ui-tb (max-width: 959px) {
+    .ui-tb-box.has-auto .ui-tb__btn {
+      min-width: 56px;
+      padding: 0 8px;
+    }
+    .ui-tb-box.has-auto .ui-tb__label {
+      display: none;
+    }
+  }
+  /* even the icons need the pill to shorten its label */
+  @container ui-tb (max-width: 699px) {
+    .ui-auto__rest {
+      display: none;
+    }
+  }
+}
 
 /* ================================================================== sheets / dialogs */
+
+/* Invisible, for a moment after a tap closed a panel: swallows the second tap of a double tap (ui.js: shield) */
+.ui-shield {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: auto;
+  touch-action: none;
+}
 
 .ui-layer {
   position: absolute;
@@ -927,6 +1004,12 @@
 }
 button.ui-row:active {
   background: rgba(255, 255, 255, 0.06);
+}
+/* Rows sit in a group that clips its children: the focus ring is drawn inside the row */
+.ui-row:focus-visible,
+.ui-range:focus-visible {
+  outline-offset: -3px;
+  border-radius: 15px;
 }
 .ui-row__icon {
   flex: none;
@@ -1445,6 +1528,45 @@ button.ui-row:active {
   transform: rotate(8deg);
 }
 
+/*
+ * Layer diet for the real cards the UI shows (menu fan, the little back in the Card backs tile, the back
+ * picker) — the same idea as board.css uses on the table. cards.css builds every card as a small 3D scene:
+ * five compositor layers each, inside a sheet that is itself sliding. These cards never flip on --flip and
+ * never tilt (ui.js only transforms .card itself), so they are flattened to the one face that shows.
+ * If cards.css ever restructures a card these rules simply stop matching and the cards are 3D scenes again.
+ */
+.ui-hero__stage .card,
+.ui-tile__mini .card,
+.ui-back__stage .card {
+  transform-style: flat;
+}
+.ui-hero__stage .card .card__tilt,
+.ui-hero__stage .card .card__flip,
+.ui-tile__mini .card .card__tilt,
+.ui-tile__mini .card .card__flip,
+.ui-back__stage .card .card__tilt,
+.ui-back__stage .card .card__flip {
+  transform: none;
+  transform-style: flat;
+}
+.ui-hero__stage .card .card__front,
+.ui-tile__mini .card .card__front,
+.ui-back__stage .card .card__front {
+  transform: none;
+  -webkit-backface-visibility: visible;
+  backface-visibility: visible;                  /* the picker spins a card once: its other side is the same back */
+}
+.ui-hero__stage .card .card__back,
+.ui-hero__stage .card .card__glare,
+.ui-tile__mini .card .card__back,
+.ui-tile__mini .card .card__glare,
+.ui-tile__mini .card .card__shadow,
+.ui-back__stage .card .card__back,
+.ui-back__stage .card .card__glare,
+.ui-back__stage .card .card__shadow {
+  display: none;
+}
+
 /* ------------------------------------------------------------------ settings */
 
 .ui-reset {
@@ -1528,18 +1650,39 @@ button.ui-row:active {
 }
 .ui-fig__label {
   font: 700 9.5px/1.1 var(--font-ui);
-  letter-spacing: 0.13em;
+  letter-spacing: 0.11em;
   text-transform: uppercase;
   color: var(--ink-dim);
 }
 .ui-fig__value {
+  margin-top: auto;                              /* values line up along the bottom when a label wraps */
   font: 700 22px/1.1 var(--font-ui);
   font-variant-numeric: tabular-nums;
   color: var(--ink);
   white-space: nowrap;
+  overflow: hidden;                              /* never outside its box, whatever the number */
+  text-overflow: ellipsis;
+}
+/* long values step down (ui.js sets data-len from the number of characters) */
+.ui-fig__value[data-len="l"] {
+  font-size: 19px;
+  line-height: 24.2px;                           /* same box height as the 22px size */
+}
+.ui-fig__value[data-len="xl"] {
+  font-size: 15px;
+  line-height: 24.2px;
+  letter-spacing: -0.01em;
 }
 .ui-fig--big .ui-fig__value {
   font-size: 30px;
+}
+.ui-fig--big .ui-fig__value[data-len="l"] {
+  font-size: 24px;
+  line-height: 33px;
+}
+.ui-fig--big .ui-fig__value[data-len="xl"] {
+  font-size: 17px;
+  line-height: 33px;
 }
 .ui-fig__value.is-none {
   color: var(--ink-faint);
@@ -1552,7 +1695,7 @@ button.ui-row:active {
 }
 .ui-stats__grid .ui-fig {
   position: relative;
-  padding: 12px 14px 12px 50px;
+  padding: 12px 10px 12px 50px;
   border: 1px solid var(--ui-line);
   border-radius: 16px;
   background: var(--ui-fill);
@@ -1757,11 +1900,12 @@ button.ui-row:active {
 
 .ui-sheet--win {
   border-top-color: rgba(243, 201, 105, 0.55);
-  background: linear-gradient(180deg, rgba(20, 30, 27, 0.78) 0%, rgba(13, 20, 18, 0.9) 34%, rgba(9, 14, 13, 0.95) 100%);
+  /* see-through where the score is, solid from the facts down: nothing of the toolbar ghosts through the buttons */
+  background: linear-gradient(180deg, var(--ui-win-1) 0%, var(--ui-win-2) 36%, var(--ui-win-3) 62%, var(--ui-win-3) 100%);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
 }
 .ui-sheet--win::after {
-  background: rgba(9, 14, 13, 0.95);
+  background: var(--ui-win-3);
 }
 .ui-sheet--win .ui-btn {
   text-shadow: none;
@@ -2009,7 +2153,8 @@ button.ui-row:active {
 .toast-root.has-stuck {
   --ui-toast-lift: 52px;
 }
-@media (orientation: landscape) and (max-height: 500px) {
+/* the pill is inside the toolbar there (same condition as .ui-auto-wrap above) */
+@media (min-width: 640px), (orientation: landscape) and (max-height: 500px) {
   .toast-root.has-auto {
     --ui-toast-lift: 0px;
   }
@@ -2033,7 +2178,7 @@ button.ui-row:active {
   padding: 8px 16px 8px 10px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 22px;
-  background: linear-gradient(180deg, #2a3532 0%, #141b19 100%);
+  background: linear-gradient(180deg, var(--ui-toast-1) 0%, var(--ui-toast-2) 100%);
   box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.1);
   color: var(--ink);
   font: 600 14px/1.3 var(--font-ui);
@@ -2042,8 +2187,8 @@ button.ui-row:active {
   animation: ui-toast-in 380ms var(--ease-back) both;
 }
 .ui-toast.is-leaving .ui-toast__card {
+  /* still takes taps while it fades: the second tap of a double tap must not reach the cards underneath */
   animation: ui-toast-out 240ms ease-in both;
-  pointer-events: none;
 }
 .ui-toast.is-bump .ui-toast__card {
   animation: ui-toast-bump 300ms var(--ease-out);
@@ -2077,6 +2222,13 @@ button.ui-row:active {
 }
 .ui-toast__msg {
   min-width: 0;
+  /* whatever is handed to toast(): at most four lines, long words break, the rest is cut with an ellipsis */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+  overflow: hidden;
+  overflow-wrap: anywhere;
 }
 @keyframes ui-toast-in {
   from { opacity: 0; transform: translate3d(0, 22px, 0) scale(0.86); }
@@ -2100,12 +2252,12 @@ button.ui-row:active {
     padding-right: 8px;
   }
   .ui-hero__stage {
-    --card-w: 42px;
-    width: 92px;
+    --card-w: 40px;
+    width: 96px;
   }
   .ui-hero__stage .card {
-    left: 25px;
-    top: 9px;
+    left: 28px;
+    top: 11px;
   }
   .ui-hero__title {
     font-size: 17px;
@@ -2125,6 +2277,27 @@ button.ui-row:active {
   }
   .ui-tile__mini {
     --card-w: 22px;
+  }
+  .ui-stats__grid .ui-fig {
+    padding: 11px 10px 11px 42px;
+  }
+  .ui-fig__icon {
+    left: 9px;
+    width: 26px;
+    height: 26px;
+    margin-top: -13px;
+    border-radius: 9px;
+  }
+  .ui-fig__icon .ui-icon {
+    width: 16px;
+    height: 16px;
+  }
+  .ui-fig__value[data-len="m"] {
+    font-size: 19px;
+    line-height: 24.2px;
+  }
+  .ui-fig__value[data-len="l"] {
+    font-size: 16px;
   }
   .ui-win__total {
     font-size: 48px;
@@ -2182,12 +2355,17 @@ button.ui-row:active {
   .ui-win__actions .ui-btn--primary {
     min-height: 48px;
   }
+  .ui-win__actions .ui-btn {
+    padding: 0 6px;
+    font-size: 14px;
+    white-space: nowrap;
+  }
 
-  /* the "no more moves" card fits inside the toolbar's own height */
+  /* the "no more moves" card fits inside the toolbar's own height (48px: 44px buttons + its border) */
   .ui-stuck {
-    bottom: calc(var(--safe-b) + 2px);
+    bottom: calc(var(--safe-b) + 1px);
     max-width: 640px;
-    padding: 1px 4px 1px 12px;
+    padding: 0 4px 0 12px;
     border-radius: 16px;
   }
 }
@@ -2215,5 +2393,8 @@ button.ui-row:active {
   .ui-badge {
     gap: 3px;
     padding: 0 7px 0 5px;
+  }
+  .ui-badge__n {
+    margin-left: 1px;
   }
 }

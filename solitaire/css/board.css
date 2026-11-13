@@ -2,6 +2,9 @@
  * board.css — the table: pile slots (#piles), the card layer (#cards) and the small DOM overlays the board
  * needs (score popups under reduced motion, the hint ghost).
  *
+ * Also in here, and worth knowing before touching cards.css: the "layer diet" — rules that keep a card on the
+ * table down to ONE compositor layer unless it is turning on --flip or carries a glare (see "FLAT card").
+ *
  * The board (js/view/board.js) computes every position in JS and writes
  *   --card-w / --card-h / --card-radius   on #table            (card size for everything inside the table)
  *   transform: translate3d(x, y, 0) …     on each .pile and .card
@@ -237,7 +240,8 @@
  *   .is-lifted    lift > 0, or the card is turning  -> the lift shadow
  *   .is-turning   --flip between 0 and 180          -> the flip veil (faces darken edge-on)
  *   .is-glare     set by whoever animates --glare-* -> the glare planes
- * Together with not rendering covered cards at all (Sprite.cover) a resting table is ~170 layers.
+ * Together with not rendering covered cards at all (Sprite.cover) and the flat cards below, a resting table is
+ * about 70 layers.
  * Only cards inside #cards are affected; the inspector and the gallery build their own cards.
  */
 #cards .card:not(.is-lifted) .card__shadow,
@@ -247,6 +251,46 @@
 #cards .card:not(.is-turning) .card__flip::before,
 #cards .card:not(.is-turning) .card__flip::after {
   display: none;
+}
+
+/*
+ * Layer diet, part two: a FLAT card. cards.css builds every card as a small 3D scene (tilt box > flip box >
+ * two faces culled from behind): five compositor layers per card even when it lies still, and the per-frame
+ * cost of committing a frame grows with every layer on the page — 52 cards flying through a celebration were
+ * ~290 layers and most of the frame time. But a table card only needs that scene while it turns on --flip
+ * (.is-turning) or carries a glare (.is-glare). The rest of the time exactly one face is visible and the board
+ * moves, tilts and spins the card by transforming .card itself — so the inner boxes are flattened, the unseen
+ * face is not rendered, and the whole card is ONE layer. (When the board turns a card by rotating .card — its
+ * 'spin' flips, the celebration — it swaps the face at the edge-on moment and never rotates past it, so a
+ * flat, double-sided face is all that is needed.)
+ * If cards.css ever restructures a card these rules simply stop matching and the cards are five layers again.
+ */
+#cards .card {
+  /*
+   * A promise to the compositor that this transform keeps changing. Its effect: the card's texture is kept
+   * while its scale animates (the deck is 1.8x, flights swell, the vortex has perspective) instead of being
+   * re-rasterised — art and all — on every frame of a scale change (measured: 23 raster tasks per frame
+   * during a deal without it).
+   */
+  will-change: transform;
+}
+#cards .card:not(.is-turning):not(.is-glare) {
+  transform-style: flat;
+}
+#cards .card:not(.is-turning):not(.is-glare) .card__tilt,
+#cards .card:not(.is-turning):not(.is-glare) .card__flip {
+  transform: none;
+  transform-style: flat;
+}
+#cards .card:not(.is-turning):not(.is-glare) .card__face {
+  transform: none;
+  -webkit-backface-visibility: visible;
+  backface-visibility: visible;
+}
+/* (visibility, not display: swapping faces must not rebuild the layout tree of the card art) */
+#cards .card:not(.is-turning):not(.is-glare):not(.is-face-down) .card__back,
+#cards .card.is-face-down:not(.is-turning):not(.is-glare) .card__front {
+  visibility: hidden;
 }
 
 
@@ -355,6 +399,19 @@
 .board-ghost .card__glare,
 .board-ghost .card__back {
   display: none;
+}
+/* ghost cards are flat too (face-up, never turning): the whole ghost is one layer */
+.board-ghost .card,
+.board-ghost .card__tilt,
+.board-ghost .card__flip {
+  transform-style: flat;
+}
+.board-ghost .card__tilt,
+.board-ghost .card__flip,
+.board-ghost .card__face {
+  transform: none;
+  -webkit-backface-visibility: visible;
+  backface-visibility: visible;
 }
 /* a soft gold halo so the ghost reads as "an idea", not as a card that moved */
 .board-ghost::after {

@@ -1,10 +1,10 @@
 /*
  * inspector.css — the 3D card preview (SOL.Inspector, js/view/inspector.js): card inspector + deck gallery.
  *
- * Layout is phone portrait first (controls in the thumb zone, --safe-* insets respected), then short
- * landscape, then desktop. Only `transform` and `opacity` ever animate; there is no blur and no filter at all.
- * html[data-effects="low"] drops the foil sheen and the lamp glow. Reduced motion is handled by base.css (CSS)
- * and SOL.Anim (JS).
+ * Layout is phone portrait first (controls in the thumb zone, --safe-* insets respected, Close under the left
+ * thumb for html[data-left-handed="true"]), then short landscape, then desktop. Only `transform` and `opacity`
+ * ever animate; there is no blur and no filter at all. html[data-effects="low"] drops the foil sheen and the
+ * lamp glows. Reduced motion is handled by base.css (CSS) and SOL.Anim (JS).
  *
  * Cards are styled by cards.css alone. This file sizes them through --card-w on an ancestor, positions the
  * wrappers it owns around them (.insp-obj, .insp-gal__item, .insp-back) and adds its own lighting planes next
@@ -14,6 +14,8 @@
  *   --card-w        on .insp-card__stage / .insp-gal__ring / .insp-gal__row
  *   --insp-cx/-cy   resting centre of the inspected card inside the stage (also the vanishing point)
  *   --insp-persp    perspective distance of the scene
+ *   --insp-eye      on .insp-gal__ring: how far above the middle of the cards the eye is
+ *   --insp-turn     on .insp-gal__panels: length of the turn between the two tabs (follows the speed setting)
  */
 
 /* ------------------------------------------------------------------ shell */
@@ -116,7 +118,7 @@ html.insp-covered .fx-layer {
   justify-content: center;
   gap: 3px;
   cursor: pointer;
-  touch-action: manipulation;
+  touch-action: none;                            /* not even a pinch on the controls may zoom the page */
   -webkit-tap-highlight-color: transparent;
   transition: opacity 140ms ease-out, transform 140ms var(--ease-out, ease-out);
 }
@@ -484,6 +486,17 @@ html[data-effects="low"] .insp-obj__sheen {
   margin-left: 4px;
 }
 
+/* left-handed players (SOL.Settings 'leftHanded'): Close sits under the left thumb */
+html[data-left-handed="true"] .insp-card__bar .insp-btn--close {
+  order: -1;
+  margin-left: 0;
+  margin-right: 4px;
+}
+
+html[data-left-handed="true"] .insp-gal__bar .insp-btn--close {
+  order: -1;
+}
+
 /* ==================================================================== DECK GALLERY */
 .insp-gal {
   display: grid;
@@ -540,6 +553,22 @@ html[data-effects="low"] .insp-obj__sheen {
   justify-items: center;
 }
 
+/*
+ * The turn between the two tabs: inspector.js gives both panels their start pose, then this class and their
+ * end pose, and the compositor does the rest. The panel that leaves is gone after two thirds of the turn; the
+ * one that arrives fades in over the last two thirds.
+ */
+.insp-gal__panel.is-turning {
+  will-change: transform, opacity;
+  transition:
+    transform var(--insp-turn, 480ms) var(--ease-in-out, ease-in-out),
+    opacity calc(var(--insp-turn, 480ms) * 0.62) linear;
+}
+
+.insp-gal__panel.is-turning--in {
+  transition-delay: 0s, calc(var(--insp-turn, 480ms) * 0.38);
+}
+
 /* ---- carousel: every item is a direct child of the perspective box (own 3D context, stacked by z-index) */
 .insp-gal__ring {
   position: relative;
@@ -547,10 +576,46 @@ html[data-effects="low"] .insp-obj__sheen {
   height: 100%;
   min-height: 0;
   perspective: var(--insp-persp, 900px);
-  perspective-origin: 50% 47%;
+  /*
+   * The eye is above the middle of the cards: the arc is seen a little from above, so the cards that stand
+   * further back also sit higher — depth you can read at a glance. The focused card is at z = 0 and does not
+   * care where the eye is: its on-screen box stays exactly its layout box.
+   */
+  perspective-origin: 50% calc(47% - var(--insp-eye, 0px));
   touch-action: none;
   cursor: grab;
   outline: none;
+}
+
+/* the lamp over the focused card, and its pool of light on the floor (static, painted once) */
+.insp-gal__ring::before,
+.insp-gal__ring::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  pointer-events: none;
+}
+
+.insp-gal__ring::before {
+  top: 47%;
+  width: calc(var(--card-w) * 4.4);
+  height: calc(var(--card-w) * 3.6);
+  margin: calc(var(--card-w) * -1.9) 0 0 calc(var(--card-w) * -2.2);
+  background: radial-gradient(closest-side, rgba(255, 238, 200, 0.15) 0%, rgba(255, 238, 200, 0.055) 48%, rgba(255, 238, 200, 0) 76%);
+}
+
+.insp-gal__ring::after {
+  top: calc(47% + var(--card-w) * 0.74);
+  width: calc(var(--card-w) * 3.4);
+  height: calc(var(--card-w) * 0.5);
+  margin: calc(var(--card-w) * -0.25) 0 0 calc(var(--card-w) * -1.7);
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(255, 244, 220, 0.13) 0%, rgba(255, 244, 220, 0.05) 56%, rgba(255, 244, 220, 0) 100%);
+}
+
+html[data-effects="low"] .insp-gal__ring::before,
+html[data-effects="low"] .insp-gal__ring::after {
+  display: none;
 }
 
 .insp-gal__ring:active {
@@ -710,7 +775,7 @@ html[data-effects="low"] .insp-obj__sheen {
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  touch-action: manipulation;
+  touch-action: none;
   -webkit-tap-highlight-color: transparent;
   transition: transform 140ms var(--ease-out, ease-out);
 }
@@ -790,7 +855,7 @@ html[data-effects="low"] .insp-obj__sheen {
   letter-spacing: 0.02em;
   white-space: nowrap;
   cursor: pointer;
-  touch-action: manipulation;
+  touch-action: none;
   -webkit-tap-highlight-color: transparent;
 }
 
@@ -986,6 +1051,11 @@ html[data-effects="low"] .insp-obj__sheen {
 
   .insp-card__bar .insp-btn--close {
     margin-left: 0;
+  }
+
+  html[data-left-handed="true"] .insp-card__bar .insp-btn--close {
+    order: 0;                                    /* the bar itself moves to the left edge instead */
+    margin-right: 0;
   }
 
   html[data-left-handed="true"] .insp-card {
