@@ -2292,6 +2292,25 @@ button.ui-row:active {
   transition: transform 320ms var(--ease-out);
   pointer-events: none;
 }
+/* A toast that comes up while a panel is open (ui.js: toast). The place above the toolbar is the lower end of
+   the panel there: its last rows and buttons, as a rule the one whose tap raised the message. Such a toast sits
+   at the top of the screen instead: over the strip above a full-height sheet and its grab handle (40px, a
+   one-line toast reaches 10px into the title bar), over the top edge of a tall dialog, above a shorter panel.
+   It is narrow enough to keep clear of the panel's Close button, the only control up there. */
+.ui-toast--top {
+  top: calc(var(--safe-t) + 4px);
+  bottom: auto;
+  max-width: min(380px, calc(100% - 2 * (max(10px, var(--safe-r)) + 52px)));
+}
+.ui-toast--top .ui-toast__msg {
+  text-wrap: balance;
+}
+/* a dialog is centred between the side insets (.ui-layer's padding), and so is the toast above it */
+@media (min-width: 640px) {
+  .ui-toast--top {
+    left: calc(50% + (max(16px, var(--safe-l)) - max(16px, var(--safe-r))) / 2);
+  }
+}
 .ui-toast__card {
   display: flex;
   align-items: center;
@@ -2311,6 +2330,13 @@ button.ui-row:active {
 .ui-toast.is-leaving .ui-toast__card {
   animation: ui-toast-out 240ms ease-in both;
   pointer-events: none;                          /* (a toast that was tapped away raises ui.js's shield instead) */
+}
+/* at the top of the screen it comes from above and leaves that way */
+.ui-toast--top .ui-toast__card {
+  animation-name: ui-toast-in-top;
+}
+.ui-toast--top.is-leaving .ui-toast__card {
+  animation-name: ui-toast-out-top;
 }
 .ui-toast.is-bump .ui-toast__card {
   animation: ui-toast-bump 300ms var(--ease-out);
@@ -2367,6 +2393,14 @@ button.ui-row:active {
 @keyframes ui-toast-out {
   from { opacity: 1; transform: none; }
   to { opacity: 0; transform: translate3d(0, 10px, 0) scale(0.92); }
+}
+@keyframes ui-toast-in-top {
+  from { opacity: 0; transform: translate3d(0, -22px, 0) scale(0.86); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes ui-toast-out-top {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translate3d(0, -10px, 0) scale(0.92); }
 }
 @keyframes ui-toast-bump {
   0% { transform: scale(1); }

@@ -19,6 +19,9 @@
  *   UI.toast(message, { type = 'info' | 'success' | 'warn' | 'error', duration = 2600 }) -> { dismiss() }
  *                                   duration 0 / Infinity = until tapped or dismiss(). At most 3 are visible;
  *                                   repeating the message of a visible toast restarts it instead of stacking.
+ *                                   Above the toolbar on the bare table. Raised while a panel is open: at the
+ *                                   top of the screen, one at a time, and gone when the last panel closes
+ *                                   (see "Where a toast goes" below).
  *                                   (extra) passive: true = it only tells: it cannot be tapped away and taps
  *                                   go through it to whatever lies underneath.
  *   UI.confirm({ title, message, confirmLabel = 'OK', cancelLabel = 'Cancel', danger = false }) -> Promise<boolean>
@@ -80,11 +83,21 @@
  *   showing it reads no layout) and leaves when a panel or the inspector opens. A player who opens the 3D
  *   preview from the table first is never told; neither is a page without SOL.Input or SOL.Inspector (a
  *   demo page), where the gesture does not exist.
+ * - Where a toast goes. Toasts stack above the toolbar, which is right on the bare table. While a sheet /
+ *   dialog is open that place is the lower end of the panel: its last rows and buttons, as a rule the very one
+ *   whose tap raised the message ("Reset settings", "Reset statistics", "Open-source licences") — the toast
+ *   would lie on it and take the next tap for itself. A toast that comes up while a panel is open is therefore
+ *   shown at the top of the screen (.ui-toast--top in ui.css: over the strip above a sheet and its grab handle,
+ *   narrow enough to keep clear of the Close button, the only control up there), a newer one replaces it
+ *   instead of stacking, and it leaves when the last panel closes, whatever its duration: up there on the bare
+ *   table it would lie on the upper edge of the cards. (A toast that is already up above the toolbar when a
+ *   panel opens stays where it is. In the game that is only the one-time tip, which leaves then.)
  * - Inside the Android app Settings ends with "About > Open-source licences": a sheet of its own, on top of the
  *   settings, with the notices of the libraries the app bundles (the text comes from the shell, see
  *   openLicences). It closes like every sheet: its button, Back, Esc, backdrop, drag down. The row exists only
  *   when the shell has SolitaireNative.openSourceLicenses(); the web page bundles no third-party code and never
- *   shows it.
+ *   shows it. A shell that hands over no text gets a toast, "The licences could not be loaded", and no empty
+ *   sheet; every tap on the row asks the shell again, and the toast leaves when a try works.
  * - No text is smaller than 11px (css/ui.css keeps that floor); the UI does not follow the system font size.
  * - "New game" (toolbar, win screen, stuck card, Deal now, restart) goes through startDeal(): the New button
  *   stays disabled from the request until the controller's 'game:new' (or its promise settling).
@@ -1611,7 +1624,12 @@
     layer.resolveClosed(result);
 
     if (!o.keepPendingWin) releaseWin();
-    if (!layers.length) tipSoon();
+    if (!layers.length) {
+      // A toast that came up over a panel (see toast) leaves with the last panel: it was about that panel,
+      // and at the top of the bare table it would lie on the upper edge of the cards.
+      for (const t of toasts.filter((x) => x.top)) dismissToast(t);
+      tipSoon();
+    }
   }
 
   /**
@@ -2445,6 +2463,8 @@
     return out.map((lines) => lines.join('\n'));
   }
 
+  let licencesToast = null; // the "could not be loaded" toast of the last try that failed (openLicences)
+
   /** Settings > Open-source licences: the notices in a sheet of their own, on top of the settings. */
   function openLicences() {
     if (!inited || findLayer('licences')) return;
@@ -2458,9 +2478,12 @@
     }
     const paragraphs = licenceParagraphs(text);
     if (!paragraphs.length) {
-      toast('The licences could not be loaded', { type: 'error' });
+      // (the shell reads the text again with the next request: a second tap on the row is a second try)
+      licencesToast = toast('The licences could not be loaded', { type: 'error' });
       return;
     }
+    if (licencesToast) licencesToast.dismiss(); // that try worked: what the toast still says is no longer true
+    licencesToast = null;
     openLayer({
       kind: 'licences',
       title: 'Open-source licences',
@@ -3122,11 +3145,15 @@
 
   // ================================================================== toasts
 
-  /** Newest at the bottom; older ones are pushed up by the height of everything newer. */
+  /**
+   * Newest at the bottom; older ones are pushed up by the height of everything newer. (The toast at the top of
+   * the screen is not part of the stack: there is one at a time, see toast.)
+   */
   function layoutToasts() {
     let offset = 0;
     for (let i = toasts.length - 1; i >= 0; i--) {
       const t = toasts[i];
+      if (t.top) continue;
       t.node.style.transform = 'translate3d(-50%,' + -offset + 'px,0)';
       offset += t.height + 8;
     }
@@ -3157,8 +3184,13 @@
     const text = String(message);
     const type = ['info', 'success', 'warn', 'error'].indexOf(o.type) !== -1 ? o.type : 'info';
     const duration = o.duration === undefined ? 2600 : Number(o.duration) || 0;
+    // Where it goes. The place above the toolbar is the lower end of a panel while one is open: its last rows
+    // and buttons, as a rule the very one whose tap raised the message ("Open-source licences", "Reset
+    // settings") — a toast there lies on that control and takes the next tap for itself. Over a panel a toast
+    // comes down at the top of the screen instead, clear of the panel's controls (ui.css: .ui-toast--top).
+    const top = layers.length > 0;
 
-    const same = toasts.find((t) => t.text === text && t.type === type);
+    const same = toasts.find((t) => t.text === text && t.type === type && t.top === top);
     if (same) {
       armToast(same, duration);
       same.node.classList.remove('is-bump');
@@ -3170,8 +3202,9 @@
     const card = h('div.ui-toast__card', null,
       h('span.ui-toast__icon', { html: icon(iconName), 'aria-hidden': 'true' }),
       h('span.ui-toast__msg', null, text));
-    const node = h('div.ui-toast.ui-toast--' + type + (o.passive ? '.ui-toast--passive' : ''), { 'data-type': type }, card);
-    const t = { node: node, text: text, type: type, height: 44, timer: 0, gone: false, api: null };
+    const node = h('div.ui-toast.ui-toast--' + type + (top ? '.ui-toast--top' : '') +
+      (o.passive ? '.ui-toast--passive' : ''), { 'data-type': type }, card);
+    const t = { node: node, text: text, type: type, top: top, height: 44, timer: 0, gone: false, api: null };
     t.api = { dismiss: () => dismissToast(t) };
     card.addEventListener('click', (e) => {
       // tapped away: the second tap of a double tap must not land on the card (or button) underneath
@@ -3195,6 +3228,8 @@
     } else {
       t.height = node.offsetHeight || 44;
     }
+    // At the top there is room for one: a stack would grow down over the panel's title bar into its controls.
+    if (top) for (const old of toasts.filter((x) => x.top)) dismissToast(old);
     toasts.push(t);
     while (toasts.length > TOAST_MAX) dismissToast(toasts[0]);
     layoutToasts();

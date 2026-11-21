@@ -55,7 +55,7 @@ Page to app, `SolitaireNative.…`:
 | `openSourceLicenses()` | string | The notices of the open-source libraries in the APK: which libraries, then the full text of their licence, as plain text with lines of at most 77 characters. `""` if it cannot be read. The page shows it under *Settings > Open-source licences* and offers that entry only when the method exists (see [Open-source notices](#open-source-notices)). |
 
 Keys are 1 to 64 characters out of `A-Z a-z 0-9 . _ -` (the page uses `sol.save.v1`,
-`sol.settings.v1`, `sol.stats.v1`). The app stores the values as they are; the page puts JSON
+`sol.settings.v1`, `sol.stats.v1` and `sol.tips.v1`). The app stores the values as they are; the page puts JSON
 there, and the one value that is not JSON, `<removed>`, is how it marks a key it has removed
 (see [Where the saved game lives](#where-the-saved-game-lives)). Such a key still counts as
 having a value for `storageKeys()`.
@@ -115,7 +115,7 @@ the game. Two things prevent that:
 The page saves the game after every move, and it does so twice:
 
 - **`files/store/`** in the app's private data directory, one file per key (`sol.save.v1.val`,
-  `sol.settings.v1.val`, `sol.stats.v1.val`), through `SolitaireNative.storageSet`
+  `sol.settings.v1.val`, `sol.stats.v1.val`, `sol.tips.v1.val`), through `SolitaireNative.storageSet`
   (`KeyValueFileStore.kt`). This is the copy the page reads first. A value is available to
   `storageGet` the moment `storageSet` returns; one background thread writes it out at once to
   a temporary file, syncs it and renames it over the old file, so the file is always either the

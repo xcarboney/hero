@@ -16,17 +16,22 @@
  *              reach neither the cache nor the network gets the cached index.html.
  *
  * Updating
- *   The game's files refresh themselves (see fetch), so editing a css/js file needs nothing here.
+ *   Raise VERSION (v1, v2, ...) with every release that changes a file in PRECACHE, and whenever
+ *   files are added, renamed or removed. A new VERSION is a new cache: the new worker downloads
+ *   the whole app shell into it while it installs, and deletes the caches of older versions when
+ *   it takes over (see activate).
+ *   A cached file also refreshes by itself (see fetch). That catches a release that forgot to
+ *   raise VERSION; it is no reason to skip it.
  *   Add every new runtime file to PRECACHE: tests/pwa.test.js fails when index.html or the
  *   manifest references a file that is not listed, or when a listed file does not exist.
- *   Bump VERSION to start from an empty cache, e.g. after files were renamed or removed.
  *   Any change to this file makes the browser install it as a new worker. That worker waits until
  *   the game is launched again (js/pwa.js sends SKIP_WAITING at launch, never during a game) and
  *   no page is ever reloaded for it.
  */
 'use strict';
 
-const VERSION = 'v1';
+/* The release of the cached files; part of the cache name. Raise it when one of them changes. */
+const VERSION = 'v2';
 
 /* The app shell: same-origin URLs relative to this file. One entry per line, load order. */
 const PRECACHE = [

@@ -23,7 +23,7 @@ internal object StorageRules {
      */
     const val MAX_VALUE_BYTES = 2 * 1024 * 1024
 
-    /** The game uses three keys (settings, statistics, the game in progress). */
+    /** The game uses four keys (settings, statistics, the game in progress, tips already shown). */
     const val MAX_KEYS = 32
 
     /**
