@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+
+    <!-- API 28-29: draw under display cutouts on the short edges ("always" only exists from 30,
+         and the platform rejects unknown values, hence the separate file). -->
+    <style name="Theme.Solitaire" parent="Base.Theme.Solitaire">
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+    </style>
+
+</resources>

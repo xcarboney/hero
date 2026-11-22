@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Launcher icon for API 24/25, which have no adaptive icons (mipmap-anydpi-v26 wins on 26+).
+    A plain vector, so no PNG densities are needed: a rounded felt plate (flat colour, to keep
+    this file free of nested resources) with the same cards as
+    drawable/ic_launcher_foreground.xml. The 72-unit viewport is the centre of the 108-unit
+    adaptive canvas (hence the -18 translation); the cards are scaled down a little to leave a
+    margin inside the plate.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="72"
+    android:viewportHeight="72">
+
+    <path
+        android:fillColor="@color/table_plate"
+        android:pathData="M18,3h36a15,15 0 0 1 15,15v36a15,15 0 0 1 -15,15h-36a15,15 0 0 1 -15,-15v-36a15,15 0 0 1 15,-15z" />
+
+    <group
+        android:translateX="-18"
+        android:translateY="-18">
+        <group
+            android:pivotX="54"
+            android:pivotY="54"
+            android:scaleX="0.88"
+            android:scaleY="0.88">
+
+            <group
+                android:pivotX="54"
+                android:pivotY="80"
+                android:rotation="-13">
+                <path
+                    android:fillColor="@color/gold"
+                    android:pathData="M41.5,31h25a4.5,4.5 0 0 1 4.5,4.5v37a4.5,4.5 0 0 1 -4.5,4.5h-25a4.5,4.5 0 0 1 -4.5,-4.5v-37a4.5,4.5 0 0 1 4.5,-4.5z" />
+                <path
+                    android:pathData="M43,34.5h22a2.5,2.5 0 0 1 2.5,2.5v34a2.5,2.5 0 0 1 -2.5,2.5h-22a2.5,2.5 0 0 1 -2.5,-2.5v-34a2.5,2.5 0 0 1 2.5,-2.5z"
+                    android:strokeWidth="1.5"
+                    android:strokeColor="@color/gold_shade" />
+            </group>
+
+            <group
+                android:pivotX="54"
+                android:pivotY="80"
+                android:rotation="8">
+                <path
+                    android:fillAlpha="0.28"
+                    android:fillColor="#000000"
+                    android:pathData="M40,32.5h25a4.5,4.5 0 0 1 4.5,4.5v37a4.5,4.5 0 0 1 -4.5,4.5h-25a4.5,4.5 0 0 1 -4.5,-4.5v-37a4.5,4.5 0 0 1 4.5,-4.5z" />
+                <path
+                    android:fillColor="@color/card_ivory"
+                    android:pathData="M41.5,31h25a4.5,4.5 0 0 1 4.5,4.5v37a4.5,4.5 0 0 1 -4.5,4.5h-25a4.5,4.5 0 0 1 -4.5,-4.5v-37a4.5,4.5 0 0 1 4.5,-4.5z" />
+                <path
+                    android:fillColor="@color/card_ink"
+                    android:pathData="M54,42c-6.75,6.75 -9.75,9.75 -9.75,14.25a5.25,5.25 0 0 0 8.25,3.75c-0.75,3 -1.5,4.5 -3,6h9c-1.5,-1.5 -2.25,-3 -3,-6a5.25,5.25 0 0 0 8.25,-3.75c0,-4.5 -3,-7.5 -9.75,-14.25z" />
+            </group>
+        </group>
+    </group>
+</vector>

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Adaptive icon foreground (also the Android 12+ splash icon): two fanned cards, a gold card
+    back behind an ivory ace of spades. Everything stays inside the 66dp safe circle of the
+    108dp canvas, so no launcher mask and no splash mask clips it.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Card back, fanned to the left. -->
+    <group
+        android:pivotX="54"
+        android:pivotY="80"
+        android:rotation="-13">
+        <path
+            android:fillColor="@color/gold"
+            android:pathData="M41.5,31h25a4.5,4.5 0 0 1 4.5,4.5v37a4.5,4.5 0 0 1 -4.5,4.5h-25a4.5,4.5 0 0 1 -4.5,-4.5v-37a4.5,4.5 0 0 1 4.5,-4.5z" />
+        <path
+            android:pathData="M43,34.5h22a2.5,2.5 0 0 1 2.5,2.5v34a2.5,2.5 0 0 1 -2.5,2.5h-22a2.5,2.5 0 0 1 -2.5,-2.5v-34a2.5,2.5 0 0 1 2.5,-2.5z"
+            android:strokeWidth="1.5"
+            android:strokeColor="@color/gold_shade" />
+    </group>
+
+    <!-- Card face, fanned to the right: soft drop shadow, ivory card, spade. -->
+    <group
+        android:pivotX="54"
+        android:pivotY="80"
+        android:rotation="8">
+        <path
+            android:fillAlpha="0.28"
+            android:fillColor="#000000"
+            android:pathData="M40,32.5h25a4.5,4.5 0 0 1 4.5,4.5v37a4.5,4.5 0 0 1 -4.5,4.5h-25a4.5,4.5 0 0 1 -4.5,-4.5v-37a4.5,4.5 0 0 1 4.5,-4.5z" />
+        <path
+            android:fillColor="@color/card_ivory"
+            android:pathData="M41.5,31h25a4.5,4.5 0 0 1 4.5,4.5v37a4.5,4.5 0 0 1 -4.5,4.5h-25a4.5,4.5 0 0 1 -4.5,-4.5v-37a4.5,4.5 0 0 1 4.5,-4.5z" />
+        <path
+            android:fillColor="@color/card_ink"
+            android:pathData="M54,42c-6.75,6.75 -9.75,9.75 -9.75,14.25a5.25,5.25 0 0 0 8.25,3.75c-0.75,3 -1.5,4.5 -3,6h9c-1.5,-1.5 -2.25,-3 -3,-6a5.25,5.25 0 0 0 8.25,-3.75c0,-4.5 -3,-7.5 -9.75,-14.25z" />
+    </group>
+</vector>

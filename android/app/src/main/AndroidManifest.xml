@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+        This app requests NO permissions, and that is deliberate.
+
+        Not even INTERNET: the game is bundled in the APK (assets/solitaire/) and every request
+        the page makes is answered locally by WebViewAssetLoader through
+        WebViewClient.shouldInterceptRequest, which works without network access. Without the
+        INTERNET permission WebView cannot fetch anything else, so no foreign content can ever
+        reach the JavaScript bridge. Haptics go through View.performHapticFeedback, which needs
+        no VIBRATE permission.
+
+        androidx.core contributes a signature permission (and its uses-permission) that is only
+        needed for ContextCompat.registerReceiver(RECEIVER_NOT_EXPORTED) below API 33. Nothing
+        here registers a broadcast receiver, so both entries are removed from the merged manifest.
+    -->
+    <permission
+        android:name="${applicationId}.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+        tools:node="remove" />
+    <uses-permission
+        android:name="${applicationId}.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+        tools:node="remove" />
+
+    <application
+        android:allowBackup="true"
+        android:appCategory="game"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Solitaire"
+        android:usesCleartextTraffic="false"
+        tools:targetApi="36">
+
+        <!-- The WebView only ever shows the bundled game: no usage metrics are uploaded. -->
+        <meta-data
+            android:name="android.webkit.WebView.MetricsOptOut"
+            android:value="true" />
+
+        <!--
+            configChanges: the page re-lays itself out on resize, so no configuration change
+            may recreate the Activity (that would reload the WebView in the middle of a game).
+            assetsPaths covers resource overlays being switched, which Android 12+ does every
+            time the wallpaper changes the system colours.
+
+            launchMode singleTask: there must only ever be one game. Started a second time with
+            a different intent (an installer's "Open" button, then the launcher icon), a standard
+            Activity can be stacked on top of itself; two pages would then share one saved game
+            and the stale one underneath would overwrite the newer one's progress.
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|density|uiMode|keyboard|keyboardHidden|navigation|touchscreen|fontScale|fontWeightAdjustment|layoutDirection|locale|grammaticalGender|colorMode|assetsPaths|mcc|mnc"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

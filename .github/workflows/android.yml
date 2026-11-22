@@ -1,0 +1,71 @@
+name: Android
+
+# Tests the web game, lints and unit-tests the Android shell and builds a debug APK that bundles
+# the game.
+# The APK is attached to the run as the artifact "solitaire-debug-apk".
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer run for the same branch or pull request supersedes the one in progress.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Test, lint and build debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Run the web game's unit tests
+        run: node --test solitaire/tests/*.test.js
+
+      - name: Set up JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # Validates the checked-in wrapper jar and caches the Gradle user home between runs
+      # ("basic" is the open-source cache provider built on actions/cache).
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+
+      # chmod: a wrapper script committed through the GitHub web UI or API loses its executable
+      # bit, and the build would then stop with "Permission denied".
+      # testDebugUnitTest: the JVM unit tests of the shell's own logic (app/src/test): the
+      # durable key/value store behind the saved game, the gesture exclusion rectangles and the
+      # open-source notices. Every build also runs checkOpenSourceNotices, which fails when the
+      # notices in the APK do not list exactly the libraries that are packaged.
+      - name: Lint, unit-test and build the debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew lint testDebugUnitTest assembleDebug
+
+      - name: Upload the debug APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: solitaire-debug-apk
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
