@@ -2198,7 +2198,7 @@
     // The cards fade in from nothing: the stock's slot is the edge of its pile again (settlePile) when they
     // are there, not a bare block before they can be seen. The fade begins with the first frame that shows
     // the cards, and after a busy start-up that can be long after this call — so the fade's own events time
-    // the wait (onEnterAnim); this timer is for a browser that sends none.
+    // the wait (onEnterAnim); this timer covers the time until they come, and a browser that sends none.
     enterWait(TUNE.enterMs);
   }
 
@@ -2218,9 +2218,11 @@
   /** animationstart / animationend / animationcancel of the cards layer's fade (board-enter in board.css). */
   function onEnterAnim(e) {
     if (e.target !== cardsEl || e.animationName !== 'board-enter') return;
-    // Its start counts the wait anew (and takes the mark back if the timer has run out meanwhile: no frame
-    // has been shown in between); its end, or its being dropped, ends the wait. The longer timer is the net
-    // for an end that never comes.
+    // Its start counts the wait anew; its end, or its being dropped, ends the wait. The longer timer is the
+    // net for an end that never comes. Known limit: the browser reports the start only when the fade really
+    // runs, two or three frames after the first frame with the cards, and on a slow device that can be later
+    // than the timer of settleIn(). The mark is then set early and taken back here; where cards rest on the
+    // stock at that moment (the pictures came late), a frame or two can show the bare block.
     if (e.type === 'animationstart') enterWait(TUNE.enterMs * 3);
     else enterDone();
   }
