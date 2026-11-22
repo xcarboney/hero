@@ -3,8 +3,9 @@
  * Run with: node --test solitaire/tests/
  *
  * The game has no build step, so nothing generates the service worker's PRECACHE list. The first
- * block keeps it honest: every css/js file index.html loads and every manifest icon must be in
- * the list, and every listed file must exist.
+ * block keeps it honest: every css/js file index.html loads, every manifest icon and every
+ * picture of the card art (art/, which the cards request from CSS and script) must be in the
+ * list, and every listed file must exist.
  *
  * While the game is still being assembled (js/main.js does not exist yet) a listed file that is
  * not written yet is skipped, not failed. As soon as js/main.js exists the check is strict.
@@ -166,6 +167,54 @@ test('every css/js file index.html references is in PRECACHE', () => {
 test('every manifest icon is in PRECACHE', () => {
   const missing = manifest.icons.map((icon) => icon.src).filter((src) => !PRECACHE.includes(src));
   assert.deepStrictEqual(missing, [], 'add these icons to PRECACHE in sw.js');
+});
+
+/** Every file under `dir` (relative to the app folder), as app-relative paths with forward slashes. */
+function filesUnder(dir) {
+  const out = [];
+  if (!exists(dir)) return out;
+  for (const entry of fs.readdirSync(path.join(ROOT, dir), { withFileTypes: true })) {
+    const rel = dir + '/' + entry.name;
+    if (entry.isDirectory()) out.push(...filesUnder(rel));
+    else out.push(rel);
+  }
+  return out.sort();
+}
+
+test('every picture of the card art is in PRECACHE', () => {
+  // The cards ask for these from injected CSS and from script (js/view/cards.js), so index.html
+  // does not name them: without the list the installed game would show empty windows offline.
+  const art = filesUnder('art');
+  assert.ok(art.length > 0, 'art/ was not found');
+  const missing = art.filter((file) => !PRECACHE.includes(file));
+  assert.deepStrictEqual(missing, [], 'add these files to PRECACHE in sw.js and raise VERSION');
+});
+
+test('the card art is complete: every file the cards can request exists', () => {
+  // What js/view/cards.js derives its URLs from: 12 court figures and 4 ace gems, the two picture
+  // backs (table size "-s" and large "-l" each) and the two foil tiles.
+  const expected = [];
+  for (const suit of ['spades', 'hearts', 'clubs', 'diamonds']) {
+    for (const size of ['s', 'l']) {
+      expected.push(`art/holo/ace-${suit}-${size}.webp`);
+      for (const rank of [11, 12, 13]) expected.push(`art/holo/court-${suit}-${rank}-${size}.webp`);
+    }
+  }
+  for (const back of ['back-a', 'back-b']) for (const size of ['s', 'l']) expected.push(`art/holo/${back}-${size}.webp`);
+  expected.push('art/holo/foil-ice.webp', 'art/holo/foil-sparkle.webp');
+  assert.deepStrictEqual(filesUnder('art/holo'), expected.sort());
+  // ...and the names really are the ones the code builds and the stylesheet uses.
+  const cards = read('js/view/cards.js');
+  for (const piece of ["'court-'", "'ace-'", "'back-a'", "'back-b'", 'foil-ice.webp', 'foil-sparkle.webp', "'-l'", "'-s'"]) {
+    assert.ok(cards.includes(piece), `js/view/cards.js no longer mentions ${piece}: update this test and PRECACHE`);
+  }
+  // Whatever a stylesheet or a script of the app shell names outright must be precached as well.
+  const named = [];
+  for (const file of PRECACHE.filter((entry) => /\.(?:css|js)$/.test(entry) && exists(entry))) {
+    for (const match of read(file).matchAll(/\bart\/[\w./-]+\.(?:webp|png|jpe?g|svg|avif)\b/g)) named.push(match[0]);
+  }
+  assert.ok(named.includes('art/holo/foil-ice.webp'), 'css/cards.css was expected to use the foil tiles');
+  assert.deepStrictEqual(Array.from(new Set(named)).filter((ref) => !PRECACHE.includes(ref)), [], 'the app names art that is not in PRECACHE');
 });
 
 test('every PRECACHE entry exists on disk', async (t) => {

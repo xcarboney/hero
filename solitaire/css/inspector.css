@@ -4,13 +4,15 @@
  *
  * Layout is phone portrait first (controls in the thumb zone, --safe-* insets respected, Close under the left
  * thumb for html[data-left-handed="true"]), then short landscape, then desktop. Only `transform` and `opacity`
- * ever animate; there is no blur and no filter at all. html[data-effects="low"] drops the foil sheen and the
- * lamp glows. Reduced motion is handled by base.css (CSS) and SOL.Anim (JS). No text is smaller than 11px
- * (the button labels and the "Selected" tag are the smallest), as in ui.css.
+ * ever animate; there is no blur and no filter at all. html[data-effects="low"] drops the foil sheen, the
+ * lamp glows and the halo of the hologram cards. Reduced motion is handled by base.css (CSS) and SOL.Anim (JS).
+ * No text is smaller than 11px (the button labels and the "Selected" tag are the smallest), as in ui.css.
  *
  * Cards are styled by cards.css alone. This file sizes them through --card-w on an ancestor, positions the
  * wrappers it owns around them (.insp-obj, .insp-gal__item, .insp-back) and adds its own lighting planes next
- * to the card element — it never reaches into .card internals.
+ * to the card element — it never reaches into .card internals. The foil and the depth of a hologram card are
+ * the card's own (cards.css; inspector.js drives them through SOL.Cards.foil()); what this file adds for such
+ * a card is the halo behind it (.insp-card__aura), and the foil band of the lighting planes stays dark.
  *
  * Custom properties set from JS (in layout(), never per frame):
  *   --card-w        on .insp-card__stage / .insp-gal__ring / .insp-gal__row
@@ -168,7 +170,13 @@ html.insp-covered .fx-layer {
 }
 
 /* ==================================================================== CARD INSPECTOR */
+/*
+ * Above the gallery (which comes later in the document): a card that leaves its slot on the carousel, or
+ * flies back into it, covers the slot in front of the neighbours — as the slot's own card does — instead of
+ * slipping in behind them and jumping to the front when it has landed.
+ */
 .insp-card {
+  z-index: 1;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr) auto auto;
@@ -238,6 +246,58 @@ html[data-effects="low"] .insp-card__glow {
   display: none;
 }
 
+/*
+ * A hologram court or ace throws light of its own: a halo in the colour of its window (indigo for the black
+ * suits, wine for the red ones) on the stage behind the card. inspector.js names the colour with
+ * data-aura="black" | "red" | "none" on .insp-card when the card changes (the two cross-fade here) and, per
+ * frame, writes transform and opacity on the box: the halo stays behind the card, narrows as the card turns
+ * away and fades with it. The box is laid out at a quarter of its size and scaled up by that transform — a
+ * blur this soft does not need the pixels, and the layer stays small.
+ */
+.insp-card__aura {
+  position: absolute;
+  left: var(--insp-cx, 50%);
+  top: var(--insp-cy, 45%);
+  width: calc(var(--card-w) * 0.44);
+  height: calc(var(--card-w) * 0.56);
+  margin: calc(var(--card-w) * -0.28) 0 0 calc(var(--card-w) * -0.22);
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* (a layer of its own only while there is a halo to show: a Classic card's preview has not one layer more) */
+.insp-card[data-aura="black"] .insp-card__aura,
+.insp-card[data-aura="red"] .insp-card__aura {
+  will-change: transform, opacity;
+}
+
+.insp-card__aura::before,
+.insp-card__aura::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  opacity: 0;
+  transition: opacity 480ms var(--ease-out, ease-out);
+}
+
+.insp-card__aura::before {
+  background: radial-gradient(closest-side, rgba(112, 126, 255, 0.52) 0%, rgba(124, 104, 255, 0.36) 56%, rgba(84, 140, 255, 0.12) 80%, rgba(84, 140, 255, 0) 100%);
+}
+
+.insp-card__aura::after {
+  background: radial-gradient(closest-side, rgba(255, 104, 158, 0.5) 0%, rgba(236, 86, 170, 0.34) 56%, rgba(255, 140, 120, 0.11) 80%, rgba(255, 140, 120, 0) 100%);
+}
+
+.insp-card[data-aura="black"] .insp-card__aura::before,
+.insp-card[data-aura="red"] .insp-card__aura::after {
+  opacity: 1;
+}
+
+html[data-effects="low"] .insp-card__aura {
+  display: none;
+}
+
 /* the floor under the card: a lit patch (so the shadow has something to fall on) and two shadow blobs */
 .insp-card__floor {
   position: absolute;
@@ -299,10 +359,22 @@ html[data-effects="low"] .insp-card__glow {
   margin: calc(var(--card-w) * -0.7) 0 0 calc(var(--card-w) * -0.5);
   transform-style: preserve-3d;
   /*
-   * No will-change here, on purpose: it would freeze the scale the card's layers were rastered at, and a card
-   * zoomed in (up to 2.4x) would turn blurry. Without it the compositor re-rasters them in whole multiples of
-   * the device scale as the card grows; the 3D transform alone already gives the wrapper its own layer.
+   * No will-change here while the card changes size, on purpose: it would freeze the scale the card's layers
+   * were rastered at, and a card zoomed in (up to 2.4x) would turn blurry. Without it the compositor re-rasters
+   * them in whole multiples of the device scale as the card grows; the 3D transform alone already gives the
+   * wrapper its own layer.
    */
+}
+
+/*
+ * …and exactly that freeze is wanted once the size has settled (inspector.js sets .is-steady a moment after the
+ * last pinch, zoom or flight, and takes it off before the next). The compositor rounds the scale it rasters a
+ * layer under perspective at, so a card zoomed in to, say, 2.4 sits on the fence between 2 and 3: every turn
+ * takes it across, and each crossing re-rasters all of the card's layers — cheap for the drawn cards, not for
+ * the pictures of a hologram card. Frozen, turning a zoomed-in card rasters nothing but its highlight.
+ */
+.insp-obj.is-steady {
+  will-change: transform;
 }
 
 /* one plane hugging each face (thickness of a thick card = 2.5% of its width), culled from behind */
@@ -334,7 +406,8 @@ html[data-effects="low"] .insp-card__glow {
 }
 
 /*
- * sheen: holographic foil. A band of upright rainbow stripes with a period of 1.1 card widths, slanted by a
+ * sheen: holographic foil for the Classic cards (a hologram card has its own; inspector.js leaves this band at
+ * opacity 0 for it). A band of upright rainbow stripes with a period of 1.1 card widths, slanted by a
  * skew and slid sideways by exactly its fractional phase (transform from JS) — it wraps without a seam and
  * never repaints. Wide enough to cover the face at every phase: 0.3 + 1.1 + 0.26 (skew) card widths of slack.
  */
@@ -865,7 +938,7 @@ html[data-effects="low"] .insp-gal__ring::after {
   color: var(--gold, #f3c969);
 }
 
-/* ---- card backs: six slowly turning 3D cards in a swipeable row */
+/* ---- card backs: eight slowly turning 3D cards in a swipeable row */
 .insp-gal__row {
   position: relative;
   width: 100%;
@@ -1023,7 +1096,7 @@ html[data-effects="low"] .insp-gal__ring::after {
 }
 
 .insp-gal__row.is-fit ~ .insp-gal__dots {
-  visibility: hidden;                            /* all six are on screen: nothing to page through */
+  visibility: hidden;                            /* all of them are on screen: nothing to page through */
 }
 
 /* ==================================================================== short landscape (phones on their side) */

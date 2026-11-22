@@ -1,6 +1,6 @@
 /*
  * SOL.Inspector — a card inspector (hold one card in your hand) and a deck gallery (a 3D carousel of all the
- * cards + a picker for the six card backs). Lives in #inspector-root, above every other layer. Styles:
+ * cards + a picker for the eight card backs). Lives in #inspector-root, above every other layer. Styles:
  * css/inspector.css.
  * On screen and to assistive technology the two views have one name each, the same ones SOL.UI uses: the card
  * inspector is the "3D preview", the deck gallery the "3D card gallery" (NAME_CARD / NAME_GALLERY: the
@@ -56,6 +56,9 @@
  *   - A SOL.App back handler is registered while open (Android back = Inspector.back()).
  *   - Choosing a card back calls SOL.Settings.set('cardBack', id).
  *   - Sound (SOL.Audio) and haptics (SOL.Haptics) are used when present; SOL.Anim and SOL.Cards are required.
+ *   - Cards are made without a style, so they follow the 'cardStyle' setting (SOL.Cards switches them, also
+ *     while the inspector is open). Hologram cards are lit through SOL.Cards.foil() and their big pictures
+ *     are asked for a step ahead with SOL.Cards.preload({ large, cards, backs }); see "Hologram cards" below.
  *   - While the inspector covers the screen, <html> carries the class `insp-covered` and inspector.css takes
  *     the table out of rendering (`.table { content-visibility: hidden }`, `.fx-layer { visibility: hidden }`).
  *     The backdrop is opaque, so nothing is lost visually, and it is what keeps the inspector smooth on a
@@ -68,7 +71,8 @@
  * flips the card or spins it a full turn, release springs back to a resting pose; two fingers pinch (zoom) and
  * twist; wheel zooms; double-tap / double-click flips; a tap on the card pokes it; a tap beside it closes; a
  * horizontal swipe that starts beside the card goes to the previous / next card; on Android, tilting the phone
- * tilts the card a little (deviceorientation; never asked for where a prompt would be needed). Keyboard: arrows
+ * tilts the card a little and moves the light on a hologram card, in the gallery too (deviceorientation; never
+ * asked for where a prompt would be needed; not under reduced motion). Keyboard: arrows
  * rotate, F flip, S spin, R reset, [ ] or , . previous / next, + - 0 zoom, Esc back, Tab stays inside.
  * Gallery: drag / fling / wheel / arrows / Home / End / PageUp / PageDown move the carousel, Enter opens the
  * focused card, tapping a card focuses it (or opens it when it already is), 1..5 pick a suit filter.
@@ -81,19 +85,34 @@
  * Such a press can still drag (turn the card, move the carousel); keyboard, Esc and Android back are not delayed.
  *
  * How the 3D card is built: the inspector owns a wrapper (.insp-obj, transform-style: preserve-3d) that holds
- * a thick SOL.Cards card plus two overlay planes of its own (one per face) with a shade veil and a holographic
- * foil band. Every frame only `transform` / `opacity` are written (plus the card's documented --glare-*
- * properties, quantised so the highlight repaints rarely). All motion runs on SOL.Anim: springs and tweens for
- * poses, and one Anim.frame subscription — only while a card is in the hand (idle float, auto-spin, device
- * tilt, rendering) or the card backs are turning; a gallery resting on its carousel runs no loop at all. The
- * few CSS transitions (chrome fades, the 3D turn between the two gallery tabs) are transform / opacity only
- * and are sequenced with SOL.Anim.wait.
+ * a thick SOL.Cards card plus two overlay planes of its own (one per face) with a shade veil and, for a Classic
+ * card, a holographic foil band. Every frame only `transform` / `opacity` are written (plus the card's
+ * documented --glare-* properties, quantised so the highlight repaints rarely; and, when the size the card is
+ * drawn at stops or starts changing, the class .is-steady on the wrapper, which makes the compositor keep
+ * the scale its layers are rastered at — see inspector.css). All motion runs on SOL.Anim:
+ * springs and tweens for poses, and one Anim.frame subscription — only while a card is in the hand (idle float,
+ * auto-spin, device tilt, rendering), the card backs are turning, or the phone is being tilted in front of a
+ * hologram card on the carousel; a gallery resting on its carousel runs no loop at all. The few CSS
+ * transitions (chrome fades, the 3D turn between the two gallery tabs) are transform / opacity only and are
+ * sequenced with SOL.Anim.wait.
+ *
+ * Hologram cards (data-style="holo", the default look; HOLO.md): the card brings its own foil and, as a thick
+ * card, its own depth — window floor, paper, indices, figure and sparkles are planes at different distances.
+ * The inspector tells it every frame where the light is (SOL.Cards.foil(card, x, y, o, edge), from the card's
+ * yaw and pitch, a twist, and the tilt of the device — see "hologram foil" below), keeps its own foil band
+ * off, and adds a halo in the colour of the card on the stage behind a court or an ace. In the hand the foil
+ * is fully alive on fronts and backs; on the carousel only the card at the front is lit (and not while the
+ * carousel races); on the Card backs tab the two picture backs are. While the card stands in for a table card
+ * (the flights out of and into the table) it is told to be flat and unlit, so it matches that card exactly;
+ * out of and into the carousel it leaves and lands with the foil its slot shows. Reduced motion: the light
+ * stands still (and there is no device tilt); effects "low": no foil at all, as for the band. A Classic card
+ * gets none of this and is lit exactly as before.
  *
  * The carousel is a cover-flow on an arc seen a little from above: the focused card faces the viewer at z = 0,
  * its neighbours step aside, turn inwards and stand back, overlapping like a fanned deck (three a side on a
  * portrait phone, five where there is room). It is virtualised: 7-8 cards are in the document on a portrait
- * phone, 11-12 in landscape and on a desktop. The six card backs are thick cards; where all six are on screen
- * on a touch device only the chosen one is (see setBackThick()).
+ * phone, 11-12 in landscape and on a desktop. The eight card backs are thick cards; where more than three of
+ * them are in view at once on a touch device only the chosen one is (see setBackThick()).
  */
 (function (root) {
   'use strict';
@@ -116,6 +135,8 @@
   const FLING_YAW = 430; // deg / s: faster horizontal releases flip / spin instead of springing back
   const FLING_PITCH = 560;
   const COVER_MS = 190; // the backdrop is opaque after this long: the table underneath can stop rendering
+  const STEADY_MS = 60; // a card whose size has not changed for this long keeps its raster scale (tickCard)
+  const WARM_MS = 650; // the pictures of the neighbours are decoded this long after a card has come up (warm())
   // light: where it comes from (towards the viewer's upper left) and the half vector for the specular term
   const LIGHT = norm3(-0.38, -0.52, 0.77);
   const HALF = norm3(LIGHT[0], LIGHT[1], LIGHT[2] + 1);
@@ -373,7 +394,7 @@
     objs: [], // every live object (the active one + cards still flying out)
     list: [],
     index: 0,
-    back: 'royal',
+    back: '', // set by startCardView()
     sourceEl: null,
     sourceId: -1, // the card sourceEl belongs to
     elementFor: null, // optional resolver: card id -> its element on the table
@@ -391,10 +412,12 @@
     lastTap: null,
     hintShown: false,
     zoomed: false,
+    aura: false, // the card in the hand throws a halo (updateAura / renderAura)
+    warmIn: 0, // ms until the pictures of the neighbours are asked for (warmNeighbours)
   };
 
   /** Layout numbers, measured in layout() — never inside an animation frame. */
-  const M = { vw: 0, vh: 0, cx: 0, cy: 0, W: 200, H: 280, fw: 0, fh: 0, sens: 0.6, low: false };
+  const M = { vw: 0, vh: 0, cx: 0, cy: 0, W: 200, H: 280, fw: 0, fh: 0, sens: 0.6, low: false, edge: 0.74 };
 
   /** Gallery state (valid while a gallery exists in the session). */
   const G = {
@@ -413,7 +436,12 @@
     fl: null, // carousel flinger
     lastCard: -1, // the card the gallery was on when it was last closed
     lastTick: 0,
-    backs: { items: [], pos: 0, focus: -1, bw: 150, gap: 190, fits: false, lean: false, angle: 0, selected: 'royal', fl: null },
+    calm: true, // the carousel is moving slowly enough for a card to be given its foil (renderCarousel)
+    dark: false, // no live foil in the gallery: the two tab panels are turning (glowUp)
+    glow: 1, // 0..1: the foil coming back up after the turn
+    glowT: null,
+    tilt: { x: 0, y: 0, until: 0, rx: 0, ry: 0 }, // device tilt as the foil of the front card sees it (tiltGallery)
+    backs: { items: [], pos: 0, focus: -1, bw: 150, gap: 190, fits: false, lean: false, angle: 0, selected: '', fl: null },
     tabAnim: null,
     scrub: null,
   };
@@ -447,7 +475,7 @@
       // ---- card inspector
       '<section class="insp__view insp-card" data-view="card" aria-label="' + NAME_CARD + '" hidden>' +
         '<div class="insp-card__stage">' +
-          '<div class="insp-card__glow"></div>' +
+          '<div class="insp-card__glow"></div><i class="insp-card__aura"></i>' +
           '<div class="insp-card__floor"><i class="insp-card__pool"></i>' +
             '<i class="insp-card__shadow insp-card__shadow--soft"></i><i class="insp-card__shadow insp-card__shadow--core"></i></div>' +
         '</div>' +
@@ -495,6 +523,7 @@
       cardView: q('.insp-card'),
       stage: q('.insp-card__stage'),
       floor: q('.insp-card__floor'),
+      aura: q('.insp-card__aura'),
       shadowSoft: q('.insp-card__shadow--soft'),
       shadowCore: q('.insp-card__shadow--core'),
       frame: q('.insp-card__frame'),
@@ -622,13 +651,19 @@
         const id = resolveBack(p.value);
         if (C.live) {
           C.back = id;
-          for (const o of C.objs) SOL.Cards.setBack(o.card, id);
+          for (const o of C.objs) {
+            SOL.Cards.setBack(o.card, id);
+            o.dirty = true; // (rendered again, so the foil of the old back does not stay on the new one)
+          }
         }
         if (G.live) markSelectedBack(id, false);
-      } else if (p.key === 'effects' || p.key === 'reducedMotion') {
+      } else if (p.key === 'effects' || p.key === 'reducedMotion' || p.key === 'cardStyle') {
+        // (SOL.Cards has switched the cards themselves by now; what follows is the lighting around them)
         ui.root.classList.toggle('is-low', lowEffects());
         layout();
+        if (C.live) updateAura();
         if (G.live) {
+          G._wl = null; // (hologram cards on the carousel want their large pictures: ask again)
           renderCarousel();
           renderBacks(0);
         }
@@ -657,6 +692,7 @@
       M.cx = fr.left - rr.left + fr.width / 2;
       M.cy = fr.top - rr.top + fr.height * 0.46;
       M.sens = 165 / M.W; // degrees per px: a drag across the card is almost half a turn
+      M.edge = foilEdgeMax(M.W);
       const st = ui.stage.style;
       st.setProperty('--card-w', M.W + 'px');
       st.setProperty('--insp-cx', r1(M.cx) + 'px');
@@ -686,12 +722,15 @@
 
   /**
    * The per-frame loop runs only while something needs it: a card in the hand (idle float, auto-spin, device
-   * tilt, rendering) or the turning card backs. The carousel is driven by its own springs and tweens, so a
-   * gallery left open on the cards tab costs nothing; neither does a backgrounded page.
+   * tilt, rendering), the turning card backs, or a phone that is being tilted while the carousel shows a
+   * hologram card (see wakeGalleryTilt). The carousel is driven by its own springs and tweens, so a gallery
+   * left open on the cards tab costs nothing; neither does a backgrounded page.
    */
   function syncLoop() {
     const s = session;
-    const need = !!s && !s.done && !doc.hidden && (C.live || (G.live && s.view === 'gallery' && G.tab === 'backs'));
+    const need =
+      !!s && !s.done && !doc.hidden &&
+      (C.live || (G.live && s.view === 'gallery' && (G.tab === 'backs' || G.tilt.until > nowMs())));
     if (!need) stopLoop();
     else if (!stopFrame) stopFrame = SOL.Anim.frame(frame);
   }
@@ -699,8 +738,10 @@
   function onVisibility() {
     if (!session) return;
     // Backgrounded: no loop at all (rAF would be throttled anyway, but nothing should even be queued).
-    if (doc.hidden) cancelGesture();
-    else C.lastInput = nowMs();
+    if (doc.hidden) {
+      cancelGesture();
+      if (G.glowT) G.glowT.finish(); // (the foil coming back up after a tab turn: it is simply up)
+    } else C.lastInput = nowMs();
     syncLoop();
   }
 
@@ -920,6 +961,15 @@
     }
     emit('inspector:close', {});
     s.resolve();
+    // Where the table itself shows cards big enough for the large pictures (a tablet, a desktop), a table with
+    // only the cards that happened to be looked at in sharp would be odd: now that nothing of ours is moving,
+    // SOL.Cards may fetch the rest (two at a time, once per page). A phone's table never uses them.
+    try {
+      const onTable = doc.querySelector('.table .card');
+      if (onTable && onTable.getBoundingClientRect().width >= 125) SOL.Cards.preload({ large: true });
+    } catch (err) {
+      /* only a head start */
+    }
   }
 
   function close() {
@@ -1024,6 +1074,7 @@
       yawT: undefined, // rotation spring targets while one runs
       pitchT: undefined,
       light: 1, // 0..1 how much of the lighting rig is on (0 while it imitates the flat source card)
+      rest: null, // { x, y, o }: the foil of the card it imitates at light 0, when that one's foil is live (a carousel card)
       ground: 1, // 0..1 floor shadow strength
       alpha: 1,
       rot: null,
@@ -1037,6 +1088,8 @@
       retired: false, // flying out: no input, no idle, no floor
       pendingSpin: false, // opening flourish not started yet (it waits for the table to be covered)
       compact: false, // front pinned to the compact layout (see pinLayout)
+      steady: false, // the wrapper carries .is-steady (tickCard); calmAt: since when its size has not changed
+      calmAt: 0,
       _ly: 0, // last rendered angles: fast turns update the highlight less often
       _lp: 0,
       _gs: 0,
@@ -1273,6 +1326,70 @@
     announce(SOL.Cards.label(o.id) + (isFlipped(o) ? ', showing the back' : ', showing the front'));
   }
 
+  // ------------------------------------------------------------------ hologram foil (SOL.Cards.foil)
+  /*
+   * A hologram card (data-style="holo") brings its own foil and its own depth; the inspector only tells it,
+   * through SOL.Cards.foil(card, x, y, o, edge), where the light is on the face the viewer sees, how alive the
+   * foil is and how far the card is turned away. That is two to ten small transform / opacity writes inside
+   * the card, and nothing for a Classic card, which keeps the rainbow band of the lighting planes instead.
+   *
+   * The light is a function of the visible face's normal (x right, y down, as the viewer sees that face). It
+   * swings: straight on it is in the middle, turning the card 35 degrees takes it to one side, and from there
+   * it comes back — so through a whole spin the foil never stands still, and nothing jumps at edge-on, where
+   * one face hands over to the other.
+   */
+  const FOIL_SWING = 2.7; // radians of swing per unit of the normal's sideways component
+  const FOIL_LAMP = 0.2; // the lamp is above the card: straight on, the light sits this much above the middle
+  const FOIL_TILT = 1.4; // tilting the device moves the light this much further than it turns the card
+  const FOIL_STILL = [0.74, 0.36]; // reduced motion: the light does not move at all
+  /*
+   * The most "turned away" a lit card is ever told it is. SOL.Cards lets the floating planes of a thick card
+   * sink as the card turns away, completely from Cards.HOLO.edgeFadeTo. Here they stop a little earlier, with
+   * the figure still FOIL_CLEAR px above the face: no depth to speak of on a card seen almost edge-on, but
+   * above the inspector's shade plane (.insp-obj__plane, 0.7px above the face) — sinking through that, the
+   * figure would lose its light from one frame to the next.
+   */
+  const FOIL_CLEAR = 1.3;
+
+  function foilEdgeMax(cardW) {
+    const H = SOL.Cards.HOLO;
+    if (!H || !H.depth) return 0.74;
+    return H.edgeFadeTo - ((H.edgeFadeTo - H.edgeFadeFrom) * FOIL_CLEAR) / (H.depth.figure * cardW + 0.2);
+  }
+  // "No foil yet, but be ready": too faint to show (every sheet rounds to opacity 0), yet more than nothing, so
+  // SOL.Cards builds the card's foil sheets now — in the frame the card itself is built in, which is heavy
+  // anyway — and not in the middle of a flight, when the light comes on.
+  const FOIL_PRIME = 0.001;
+
+  function isHolo(card) {
+    return !!card && card.getAttribute('data-style') === 'holo';
+  }
+
+  function foilAt(v) {
+    return 0.5 + 0.5 * Math.sin(FOIL_SWING * v);
+  }
+
+  /**
+   * The big pictures of the hologram cards (figures, gems, the two picture backs) are loaded on demand, and a
+   * step ahead: this asks SOL.Cards for the ones that may be shown next — the neighbours of the card in the
+   * hand, the cards on the carousel and the ones about to come onto it — so that a card which comes into view
+   * is painted sharp and complete at once, not a moment after it has appeared. (A thick card asks for its own
+   * when it is made.) Costs next to nothing for pictures that are still decoded.
+   */
+  function warm(cards, backs) {
+    if (!(cards && cards.length) && !(backs && backs.length)) return;
+    try {
+      SOL.Cards.preload({ large: true, cards: cards || [], backs: backs || [] });
+    } catch (err) {
+      /* only a head start */
+    }
+  }
+
+  /** How alive the foil is for a face turned `turn` (0 facing .. 1 edge-on): grazing angles bring it out. */
+  function foilGlow(turn) {
+    return 0.74 + 0.26 * clamp(turn / 0.3, 0, 1);
+  }
+
   // ------------------------------------------------------------------ rendering (styles are written here only)
   function setPlane(p, shade, sheen, tx) {
     if (shade !== p._sh) {
@@ -1325,6 +1442,7 @@
     let nx = sy;
     let ny = -cy * sp;
     let nz = cy * cp;
+    const facing = nz < 0 ? -1 : 1; // -1: the back is the face the viewer sees
     if (nz < 0) {
       nx = -nx;
       ny = -ny;
@@ -1332,19 +1450,51 @@
     }
     const cr = Math.cos(roll * DEG);
     const sr = Math.sin(roll * DEG);
+    const L = o.light;
+    const holo = isHolo(o.card);
+    if (holo) {
+      // ---- the card's own foil and depth (see "hologram foil"); nx, ny are still in the face's own frame here
+      let fx = FOIL_STILL[0];
+      let fy = FOIL_STILL[1];
+      if (!SOL.Anim.reduced) {
+        let lx = nx;
+        let ly = ny;
+        const T = C.tilt;
+        if (active && (T.yaw !== 0 || T.pitch !== 0)) {
+          const ty = (yaw + T.yaw * FOIL_TILT) * DEG;
+          lx = facing * Math.sin(ty);
+          ly = -facing * Math.cos(ty) * Math.sin((pitch + T.pitch * FOIL_TILT) * DEG);
+        }
+        // (a twist turns the lamp's place round the face; a face seen upside-down has both axes reversed)
+        const up = cp < 0 ? -1 : 1;
+        fx = foilAt(up * (-lx - FOIL_LAMP * sr));
+        fy = foilAt(up * (-ly - FOIL_LAMP * cr));
+      }
+      // While the card stands in for its flat source (light 0) its floating planes lie sunk in the card and its
+      // foil is the source's (none, on the table); both come on with the lighting. Towards edge-on the card
+      // lets the planes sink again — but only as far as M.edge says, so they stay above the shade planes.
+      let fo = foilGlow(1 - nz) * L;
+      const rest = o.rest;
+      if (rest && L < 1) {
+        fx = lerp(rest.x, fx, L);
+        fy = lerp(rest.y, fy, L);
+        fo += rest.o * (1 - L);
+      }
+      SOL.Cards.foil(o.card, fx, fy, fo || FOIL_PRIME, 1 - (1 - Math.min(1 - nz, M.edge)) * L);
+    }
     if (roll !== 0) {
       const tx = nx * cr - ny * sr;
       ny = nx * sr + ny * cr;
       nx = tx;
     }
-    const L = o.light;
     const diffuse = Math.max(0, nx * LIGHT[0] + ny * LIGHT[1] + nz * LIGHT[2]);
     const ndh = Math.max(0, nx * HALF[0] + ny * HALF[1] + nz * HALF[2]);
     const spec = Math.pow(ndh, 12);
     // a face turned away from the lamp goes dark; grazing angles bring the foil out
     const shade = Math.round(clamp(0.7 * (1 - diffuse) - 0.06, 0, 0.62) * L * 100) / 100;
-    // (the foil glows where the lamp reaches it and is subdued on a face in shadow)
-    const sheen = M.low
+    // (the foil glows where the lamp reaches it and is subdued on a face in shadow; a hologram card has its
+    //  own foil, so the band stays off)
+    const sheen = M.low || holo
       ? 0
       : Math.round(clamp(0.08 + 0.62 * Math.pow(1 - nz, 0.8), 0, 0.66) * (0.45 + 0.55 * diffuse) * L * 100) / 100;
     // The foil pattern is periodic: slide it by the fractional part and it wraps without a seam.
@@ -1397,7 +1547,33 @@
       o.dirty = true; // catch up on a following frame
     }
 
-    if (active) renderFloor(o, cy, sy, cp, sp, sc, y);
+    if (active) {
+      renderFloor(o, cy, sy, cp, sp, sc, y);
+      renderAura(o, cy, cp, roll, sc, y);
+    }
+  }
+
+  /**
+   * The halo a hologram court or ace throws on the stage behind it (inspector.css: .insp-card__aura): it stays
+   * behind the card, narrows as the card turns away and fades with the card's lighting. One transform and one
+   * opacity on a small layer; nothing at all for any other card.
+   */
+  function renderAura(o, cy, cp, roll, sc, y) {
+    let op = 0;
+    if (C.aura && !M.low) op = r2(C.fg * o.light * o.alpha * (0.3 + 0.7 * Math.abs(cy * cp)));
+    if (op > 0) {
+      const t =
+        'translate3d(' + r1(o.x + o.nx) + 'px,' + r1(y) + 'px,0) rotate(' + r1(roll) + 'deg) scale(' +
+        r3(4 * sc * (0.36 + 0.64 * Math.abs(cy))) + ',' + r3(4 * sc * (0.36 + 0.64 * Math.abs(cp))) + ')';
+      if (t !== C._at) {
+        ui.aura.style.transform = t;
+        C._at = t;
+      }
+    }
+    if (op !== C._ao) {
+      ui.aura.style.opacity = String(op);
+      C._ao = op;
+    }
   }
 
   /**
@@ -1474,6 +1650,24 @@
         C.zoomed = zoomed;
         ui.cardView.classList.toggle('is-zoomed', zoomed);
       }
+      // "Steady": the size the card is drawn at has not changed for a moment (no pinch, no zoom on its way, no
+      // flight). The wrapper then keeps the scale its layers are rastered at (inspector.css: .is-steady, and
+      // why); it lets go of it before the size changes again, so a card that grows is rastered sharp.
+      if (o.zoomS || o.fly || o.s !== 1 || (busy && C.g.mode === 'pinch')) {
+        o.calmAt = 0;
+        if (o.steady) {
+          o.steady = false;
+          o.el.classList.remove('is-steady');
+        }
+      } else if (!o.steady) {
+        if (!o.calmAt) o.calmAt = now;
+        else if (now - o.calmAt >= STEADY_MS) {
+          o.steady = true;
+          o.el.classList.add('is-steady');
+        }
+      }
+      // decode ahead, a moment after the card has come up: never while it is still flying in
+      if (C.warmIn > 0 && (C.warmIn -= dt) <= 0) warmNeighbours();
 
       // idle float: a slow bob and a few degrees of sway once the card has been left alone for a moment
       const idle = C.idle;
@@ -1544,6 +1738,7 @@
     }
     T.rx = x;
     T.ry = y;
+    if (G.live && !C.live) wakeGalleryTilt(x, y);
   }
 
   function tickTilt(dt, off, o) {
@@ -1579,11 +1774,63 @@
     root.addEventListener('deviceorientation', onTilt);
   }
 
+  /** Called when a view that listened goes away; the listener itself goes when neither view is left. */
   function stopTilt() {
     const T = C.tilt;
+    T.yaw = T.pitch = 0;
+    if (!G.live) G.tilt.x = G.tilt.y = G.tilt.until = 0;
+    if (C.live || G.live) return;
     if (T.on) root.removeEventListener('deviceorientation', onTilt);
     T.on = T.has = false;
-    T.yaw = T.pitch = 0;
+  }
+
+  /*
+   * Device tilt in the gallery turns nothing: it only moves the light on the hologram card at the front of
+   * the carousel. A carousel at rest runs no frame loop, so a tilt event that shows the phone really moving
+   * (half a degree: more than a sensor's noise) starts one, and it stops again when the phone has been still
+   * for a moment. No tilt under reduced motion, with low effects or while no card is lit.
+   */
+  function wakeGalleryTilt(x, y) {
+    const g = G.tilt;
+    if (Math.abs(wrap180(x - g.rx)) + Math.abs(wrap180(y - g.ry)) < 0.5) return;
+    g.rx = x;
+    g.ry = y;
+    const s = session;
+    if (!s || s.closing || s.view !== 'gallery' || G.tab !== 'cards' || M.low || isReduced()) return;
+    let lit = false;
+    for (const it of G.items.values()) lit = lit || it.lit;
+    if (!lit) return;
+    g.until = nowMs() + 1200;
+    syncLoop();
+  }
+
+  function tiltGallery(dt) {
+    const T = C.tilt;
+    const g = G.tilt;
+    const moving = nowMs() <= g.until;
+    let dx = 0;
+    let dy = 0;
+    if (T.has && !M.low && !isReduced()) {
+      if (moving) {
+        // "neutral" follows the way the phone is held, as in the hand (tickTilt) — while the phone moves;
+        // once it is still the light stays where it is and the loop can end
+        const kb = 1 - Math.exp(-dt / 4500);
+        T.bx += wrap180(T.rx - T.bx) * kb;
+        T.by += wrap180(T.ry - T.by) * kb;
+      }
+      dx = clamp(wrap180(T.rx - T.bx), -28, 28);
+      dy = clamp(wrap180(T.ry - T.by), -28, 28);
+    }
+    const k = 1 - Math.exp(-dt / 110);
+    const x = g.x + (dx - g.x) * k;
+    const y = g.y + (dy - g.y) * k;
+    if (Math.abs(x - g.x) > 0.02 || Math.abs(y - g.y) > 0.02) {
+      g.x = x;
+      g.y = y;
+      for (const it of G.items.values()) if (it.lit) foilItem(it);
+    } else if (!moving) {
+      syncLoop(); // nothing has moved for a while: the loop goes back to sleep
+    }
   }
 
   // ------------------------------------------------------------------ actions
@@ -1750,6 +1997,20 @@
       SOL.Cards.suitSvg(info.suit, { size: 13 }) + '<span>' + (n > 1 ? C.index + 1 + ' of ' + n : SUIT_LABELS[info.suit]) + '</span>';
     ui.meta.setAttribute('data-color', info.color);
     announce(info.label + (n > 1 ? ', card ' + (C.index + 1) + ' of ' + n : ''));
+    updateAura();
+  }
+
+  /** Which halo the card in the hand throws (see renderAura): a hologram court or ace has one, in its colour. */
+  function updateAura() {
+    const o = C.active;
+    let aura = 'none';
+    if (o && !o.dead && isHolo(o.card)) {
+      const info = SOL.Cards.info(o.id);
+      if (info.rank === 1 || info.rank > 10) aura = info.color;
+    }
+    C.aura = aura !== 'none';
+    ui.cardView.setAttribute('data-aura', aura);
+    if (o) o.dirty = true;
   }
 
   function updateNav() {
@@ -1857,6 +2118,7 @@
     });
     // turns from edge-on to the resting pose as it arrives (with auto-spin on it simply keeps turning)
     springRot(o, C.spin ? { pitch: REST_PITCH } : { yaw: REST_YAW, pitch: REST_PITCH }, { yaw: 0, pitch: 0 }, 52, 10.5);
+    C.warmIn = WARM_MS / 2;
     updateCaption();
     updateNav();
     ui.name.setAttribute('data-dir', dir > 0 ? 'next' : 'prev');
@@ -2096,6 +2358,9 @@
     ui.cardView.classList.remove('is-zoomed');
     C.fg = 0;
     C.floorKey = '';
+    C.aura = false;
+    C._at = '';
+    C._ao = -1;
     C.lastInput = nowMs();
     const idle = C.idle;
     idle.amp = idle.t = idle.yaw = idle.pitch = idle.roll = idle.y = 0;
@@ -2104,10 +2369,12 @@
     setView(s, 'card');
     layout();
     const o = makeObj(p.id);
+    if (src && p.foil) o.rest = p.foil;
     attach(o);
     C.active = o;
     flyIn(o, src, s);
     renderObj(o, true); // first frame: already standing in for the source when it disappears
+    C.warmIn = WARM_MS;
     if (src && C.hideSource) hideSourceEl(C.sourceEl);
     updateCaption();
     ui.name.removeAttribute('data-dir');
@@ -2117,6 +2384,17 @@
     syncLoop();
     ui.root.focus({ preventScroll: true });
     guardTaps();
+  }
+
+  /** Decode ahead (see warm()): the pictures of the cards one and two steps away in the list, and of the back. */
+  function warmNeighbours() {
+    C.warmIn = 0;
+    const ids = [];
+    for (const k of [1, -1, 2, -2]) {
+      const i = C.index + k;
+      if (i >= 0 && i < C.list.length) ids.push(C.list[i]);
+    }
+    warm(ids, [C.back]);
   }
 
   /**
@@ -2150,6 +2428,12 @@
     hideHint();
     ui.name.textContent = ''; // the caption's letters are DOM too: nothing of a closed inspector stays behind
     ui.meta.textContent = '';
+    ui.cardView.removeAttribute('data-aura');
+    ui.aura.style.opacity = '0';
+    C.aura = false;
+    C.warmIn = 0;
+    C._at = '';
+    C._ao = 0;
     ui.cardView.classList.remove('is-zoomed');
     ui.shadowCore.style.opacity = '0';
     ui.shadowSoft.style.opacity = '0';
@@ -2766,11 +3050,11 @@
     const br = ui.row.getBoundingClientRect();
     if (br.width > 0 && br.height > 0) {
       const B = G.backs;
-      const n = B.items.length || 6;
+      const n = B.items.length || SOL.Cards.BACKS.length;
       const labelH = 46;
       const byHeight = ((br.height - labelH) * 0.82) / 1.4;
       let bw = Math.min(br.width * 0.6, byHeight, 260);
-      // when all six fit side by side (desktop, tablets, most landscape phones) the row does not scroll
+      // when all of them fit side by side (desktop, large tablets) the row does not scroll
       const fitW = (br.width - 32) / (n * 1.24);
       B.fits = fitW >= 96;
       if (B.fits) bw = Math.min(byHeight, fitW, 220);
@@ -2779,7 +3063,8 @@
       B.rowW = br.width;
       ui.row.style.setProperty('--card-w', B.bw + 'px');
       ui.row.style.setProperty('--insp-persp', Math.round(B.bw * 4.6) + 'px');
-      B.lean = B.fits && (SOL.Platform ? !!SOL.Platform.isTouch : 'ontouchstart' in root); // see setBackThick()
+      // more than three backs in view at once on a touch device (a phone on its side, a tablet): see setBackThick()
+      B.lean = (B.fits || br.width > B.gap * 3.4) && (SOL.Platform ? !!SOL.Platform.isTouch : 'ontouchstart' in root);
       ui.row.classList.toggle('is-fit', B.fits);
       if (B.fits) B.pos = (n - 1) / 2;
       else B.pos = clamp(Math.round(B.pos), 0, n - 1);
@@ -2798,14 +3083,59 @@
     el.appendChild(card);
     el.appendChild(veil);
     ui.ring.appendChild(el);
-    const it = { id: id, el: el, card: card, veil: veil, idx: 0, keep: true, exiting: false, fresh: false, from: undefined, _t: '', _v: -1, _o: -1, _z: -1 };
+    const it = {
+      id: id, el: el, card: card, veil: veil, idx: 0, keep: true, exiting: false, fresh: false, from: undefined,
+      d: 0, a: 1, // where placeItem() last put it, and how solid
+      lit: false, fx: 0.5, fy: 0.5, fo: 0, // its hologram foil is live, and what it shows (foilItem)
+      _t: '', _v: -1, _o: -1, _z: -1,
+    };
     G.items.set(id, it);
     return it;
   }
 
   function detachItem(it) {
     if (it.el.parentNode) it.el.parentNode.removeChild(it.el);
+    if (it.lit) SOL.Cards.foil(it.card, null); // the card goes back into the cache as it came out of it: at rest
+    it.lit = false;
+    it.fo = 0;
     G.items.delete(it.id);
+  }
+
+  /*
+   * The foil of the hologram cards in the carousel. Only the card at the front is alive: it is given its foil
+   * when it comes closer than FOIL_NEAR cards to the front — but not while the carousel races past it (a fling
+   * through the deck builds nothing; see G.calm) — and gives it up again beyond FOIL_FAR. The light follows
+   * the card's own turn on the arc, so it crosses the face as the card comes round, and the tilt of the device.
+   * Nothing here runs unless the carousel moves or the phone is tilted.
+   */
+  const FOIL_NEAR = 0.9;
+  const FOIL_FAR = 1.5;
+
+  function foilItem(it) {
+    const ad = Math.abs(it.d);
+    if (ad >= (it.lit ? FOIL_FAR : FOIL_NEAR) || M.low || G.dark || !isHolo(it.card)) {
+      if (it.lit) SOL.Cards.foil(it.card, null);
+      it.lit = false;
+      it.fo = 0;
+      return;
+    }
+    if (!it.lit) {
+      if (!G.calm) return;
+      it.lit = true;
+    }
+    let fx = FOIL_STILL[0];
+    let fy = FOIL_STILL[1];
+    if (!isReduced()) {
+      const t = ad < 1 ? ad : 1;
+      const lean = (it.d < 0 ? 1 : -1) * Math.sin(ARC_RY1 * t * t * (3 - 2 * t) * DEG); // the normal's sideways part
+      fx = foilAt(-lean - Math.sin(G.tilt.x * 1.2 * DEG));
+      fy = foilAt(-FOIL_LAMP - Math.sin(G.tilt.y * DEG));
+    }
+    const w = clamp(1 - ad / FOIL_NEAR, 0, 1);
+    it.fx = fx;
+    it.fy = fy;
+    it.fo = r2(0.9 * w * w * (3 - 2 * w) * it.a * G.glow);
+    SOL.Cards.foil(it.card, fx, fy, it.fo || FOIL_PRIME);
   }
 
   /**
@@ -2847,6 +3177,9 @@
       it.el.style.zIndex = String(zi);
       it._z = zi;
     }
+    it.d = d;
+    it.a = alpha;
+    if (it.lit || ad < FOIL_NEAR) foilItem(it);
   }
 
   function renderCarousel() {
@@ -2856,6 +3189,9 @@
     const pos = G.pos;
     const m = G.morph;
     const cw = G.cw;
+    // "calm": less than a ninth of a card since the last call (some seven cards a second at 60 Hz)
+    G.calm = !(Math.abs(pos - G._rp) > 0.11);
+    G._rp = pos;
     const settled = !m || m.t >= 0.36; // re-flow: nothing new joins before the leavers are gone (DOM stays small)
     if (settled) {
       const lo = Math.max(0, Math.ceil(pos - R - 0.999));
@@ -2876,6 +3212,21 @@
         it.keep = true;
       }
       for (const it of Array.from(G.items.values())) if (!it.keep) detachItem(it);
+      if (lo !== G._lo || hi !== G._hi || G._wl !== G.list) {
+        // the large pictures of the cards on the arc, and — decode ahead — of the three that come onto it
+        // next on either side (a card whose large picture is not in yet shows its small one). Each card is
+        // asked for once, as it comes into that range.
+        G._lo = lo;
+        G._hi = hi;
+        const a = Math.max(0, lo - 3);
+        const b = Math.min(n - 1, hi + 3);
+        const ids = [];
+        for (let i = a; i <= b; i++) if (G._wl !== G.list || i < G._wa || i > G._wb) ids.push(G.list[i]);
+        G._wl = G.list;
+        G._wa = a;
+        G._wb = b;
+        warm(ids, null);
+      }
     }
     for (const it of G.items.values()) {
       let d = it.idx - pos;
@@ -3082,12 +3433,11 @@
         '<i class="insp-back__ring" aria-hidden="true"></i><div class="insp-back__scene"></div>' +
         '<div class="insp-back__label" aria-hidden="true"><span class="insp-back__name">' + b.name + '</span>' +
         '<span class="insp-back__tag">' + icon('check') + 'Selected</span></div>';
-      const card = SOL.Cards.createBackOnly(b.id, { thick: true });
-      el.querySelector('.insp-back__scene').appendChild(card);
       ui.row.appendChild(el);
       const dot = h('i', 'insp-gal__dot');
       ui.dots.appendChild(dot);
-      return { id: b.id, name: b.name, el: el, scene: el.querySelector('.insp-back__scene'), card: card, thick: true, on: true, dot: dot, spin: 0, hop: 0, conf: null, _t: '', _f: '', _c: '' };
+      // (the card itself is made when the back first comes into view: renderBacks / setBackThick)
+      return { id: b.id, name: b.name, el: el, scene: el.querySelector('.insp-back__scene'), card: null, thick: true, on: false, lit: false, dot: dot, spin: 0, hop: 0, conf: null, _t: '', _f: '', _c: '' };
     });
     B.focus = -1;
     B.angle = 0;
@@ -3097,21 +3447,27 @@
    * Gives a back its solid (thick) or its paper-thin card. A thick card is some fifty compositor layers, and
    * every frame in which anything moves costs time in proportion to all the layers on the page: six thick
    * cards turning at once are too much for a phone (measured: 17 ms of main thread a frame at 4x CPU
-   * throttling). So where the whole row is on screen on a touch device, only the chosen back is solid.
+   * throttling). So where more than three backs are in view at once on a touch device (the whole row on a
+   * tablet, six or seven of the eight on a phone that lies on its side), only the chosen back is solid.
    */
   function setBackThick(it, thick) {
-    if (it.thick === thick) return;
+    if (it.card && it.thick === thick) return;
     it.thick = thick;
     const card = SOL.Cards.createBackOnly(it.id, { thick: thick });
     // a thin card that turns freely must not drag its table shadow along (cards.css: --shadow-o)
     if (!thick) card.style.setProperty('--shadow-o', '0');
-    if (it.card.parentNode) it.card.parentNode.replaceChild(card, it.card);
+    if (it.card && it.card.parentNode) it.card.parentNode.replaceChild(card, it.card);
+    else warm(null, [it.id]); // its first card: a picture back is shown large here (a thick card asks by itself)
     it.card = card;
+    it.lit = false;
     it._f = it._c = '';
   }
 
+  const BACK_SIN = Math.sin(7 * DEG); // the backs lean back by 7 degrees (the rotateX in renderBacks)
+  const BACK_COS = Math.cos(7 * DEG);
+
   /**
-   * Places the six backs and turns them (see below how the turn is shared between the card's --flip and its
+   * Places the backs and turns them (see below how the turn is shared between the card's --flip and its
    * transform); the row itself only moves by transform. `dt` = ms since the last call (0: just place).
    */
   function renderBacks(dt) {
@@ -3131,16 +3487,22 @@
         it.el.style.transform = tf;
         it._t = tf;
       }
-      setBackThick(it, !B.lean || it.id === B.selected);
-      // …and where the row scrolls, only the backs in view are in the document at all.
-      const near = B.fits || Math.abs(d) < 1.6;
-      if (near !== it.on) {
-        it.on = near;
-        if (near) it.scene.appendChild(it.card);
-        else if (it.card.parentNode) it.card.parentNode.removeChild(it.card);
+      // …and where the row scrolls, only the backs in view are in the document at all (three on a portrait
+      // phone, six or seven on one that lies on its side); a back gets its card when it first comes into view.
+      const near = B.fits || Math.abs(x) < half;
+      if (!near) {
+        if (it.on) {
+          it.on = false;
+          if (it.card.parentNode) it.card.parentNode.removeChild(it.card);
+        }
+        continue; // out of sight: leave it as it is
       }
-      if (!near || Math.abs(x) > half) continue; // out of sight: leave it as it is
-      // 33 degrees apart: the six never turn edge-on together, one after the other does. The turn is uneven on
+      setBackThick(it, !B.lean || it.id === B.selected);
+      if (!it.on || it.card.parentNode !== it.scene) {
+        it.on = true;
+        it.scene.appendChild(it.card);
+      }
+      // 33 degrees apart: they never turn edge-on together, one after the other does. The turn is uneven on
       // purpose: slow while a back faces the viewer, quick through edge-on — the design is what is on show.
       let a = reduced ? -22 : B.angle + i * 33;
       if (!reduced) a -= 19 * Math.sin(2 * a * DEG);
@@ -3148,7 +3510,7 @@
       // The turn is split in two. The card's own --flip takes it in steps of 6 degrees: that is what darkens the
       // faces as they turn edge-on, but every new value restyles the inside of a thick card. The rest goes into
       // the transform of the card element, which costs next to nothing — so a frame only moves the card, and the
-      // inside is touched a few times a second (six of these turn at once where the whole row fits).
+      // inside is touched a few times a second (all eight of these turn at once where the whole row fits).
       const q = Math.round(a / 6) * 6;
       const fl = q + 'deg';
       if (fl !== it._f) {
@@ -3162,6 +3524,24 @@
       if (ct !== it._c) {
         it.card.style.transform = ct;
         it._c = ct;
+      }
+      // The picture backs are foil (SOL.Cards knows which ones; for a drawn back this does nothing): the light
+      // crosses the back as it turns, like a card in the hand. Under reduced motion nothing turns, so it is still.
+      // (Not while the panels turn: see glowUp().)
+      if (!M.low && !G.dark && isHolo(it.card)) {
+        const ar = a * DEG;
+        const side = Math.cos(ar) < 0 ? -1 : 1;
+        const nz = side * Math.cos(ar) * BACK_COS;
+        it.lit = true;
+        SOL.Cards.foil(
+          it.card,
+          reduced ? FOIL_STILL[0] : foilAt(-side * Math.sin(ar)),
+          reduced ? FOIL_STILL[1] : foilAt(side * Math.cos(ar) * BACK_SIN - FOIL_LAMP),
+          0.9 * foilGlow(1 - nz) * G.glow || FOIL_PRIME
+        );
+      } else if (it.lit) {
+        it.lit = false;
+        SOL.Cards.foil(it.card, null);
       }
     }
     const f = clamp(Math.round(B.pos), 0, n - 1);
@@ -3284,12 +3664,51 @@
     t.inP.classList.remove('is-turning');
     resetPanel(t.outP);
     resetPanel(t.inP);
+    if (G.dark) {
+      G.dark = false;
+      if (G.live) glowUp();
+    }
+  }
+
+  /*
+   * No live foil while the two panels turn (G.dark, from setTab() to endTabTurn()): the foil of a hologram card
+   * is a handful of blended layers, and the turn would have them composited for every one of its frames, on
+   * the panel that leaves and on the one that arrives (measured at 4x CPU throttle: 35.6 ms a frame with
+   * them, 29.3 without; the cards before this work: 27.2). The cards turn in their resting look, and the foil
+   * comes back up (G.glow, 0..1) on the panel that has arrived.
+   */
+  function glowUp() {
+    if (G.glowT) G.glowT.cancel();
+    G.glow = 0;
+    const relight = function () {
+      // (the carousel rests: its front card may have its foil again; the backs are rendered by the frame loop)
+      if (G.tab !== 'cards') return;
+      G.calm = true;
+      for (const it of G.items.values()) if (it.lit || Math.abs(it.d) < FOIL_NEAR) foilItem(it);
+    };
+    const tw = SOL.Anim.tween({
+      duration: 320,
+      ease: 'linear',
+      update: function (t) {
+        G.glow = t;
+        relight();
+      },
+      done: function () {
+        G.glow = 1;
+        if (G.glowT === tw) G.glowT = null;
+        relight();
+      },
+    });
+    G.glowT = tw;
   }
 
   function setTab(tab) {
     tab = tab === 'backs' ? 'backs' : 'cards';
     if (!G.live || tab === G.tab) return;
     endTabTurn();
+    if (G.glowT) G.glowT.cancel();
+    G.glowT = null;
+    G.dark = true; // (the renderCarousel() / renderBacks() below take the foil off)
     G.tab = tab;
     showTab(tab);
     G.fl.stop();
@@ -3301,7 +3720,7 @@
     const outP = tab === 'backs' ? ui.cardsPanel : ui.backsPanel;
     const dir = tab === 'backs' ? 1 : -1;
     inP.hidden = false;
-    // Not quite 0: a box at opacity 0 is not painted at all, and its first paint (six thick cards) would then
+    // Not quite 0: a box at opacity 0 is not painted at all, and its first paint (the thick cards) would then
     // fall into the middle of the turn instead of this first frame, before anything moves.
     inP.style.opacity = '0.01';
     layout(); // the panel that was display:none can be measured now (it must not be transformed yet)
@@ -3415,7 +3834,11 @@
 
   function tickGallery(dt, sdt) {
     // (the backs hold still while the panels turn: the turn is motion enough, and its frames stay light)
-    if (G.tab === 'backs' && !G.tabAnim) renderBacks(sdt);
+    if (G.tab === 'backs') {
+      if (!G.tabAnim) renderBacks(sdt);
+    } else {
+      tiltGallery(dt);
+    }
   }
 
   function galleryStop() {
@@ -3444,6 +3867,7 @@
       back: G.backs.selected,
       hideSource: true,
       fromGallery: true,
+      foil: it.lit ? { x: it.fx, y: it.fy, o: it.fo } : null, // the card leaves with the foil its slot shows
     });
     play('open', { volume: 0.8 });
     haptic('tap');
@@ -3463,11 +3887,14 @@
     const idx = G.list.indexOf(id);
     G.armed = false;
     if (idx !== -1) G.pos = idx;
+    G._rp = G.pos; // (a jump, not a fling: the card in the slot is given its foil at once)
     renderCarousel();
     G.armed = true;
     const it = G.items.get(id);
     if (it) hideSourceEl(it.card);
     else unhideSource();
+    // …and the card in the hand lands with exactly that foil
+    if (o) o.rest = it && it.lit ? { x: it.fx, y: it.fy, o: it.fo } : null;
     setView(s, 'gallery');
     guardTaps();
     play('close', { volume: 0.7 });
@@ -3493,10 +3920,15 @@
     if (G.morph) G.morph.tween.cancel();
     G.morph = null;
     endTabTurn();
+    if (G.glowT) G.glowT.cancel();
+    G.glowT = null;
+    G.dark = false;
+    G.glow = 1;
     for (const it of G.backs.items) if (it.conf) it.conf.cancel();
     G.backs.items = [];
     G.items.clear();
     G.cache.clear();
+    stopTilt();
     G.focus = -1;
     G.focusList = null;
     ui.ring.textContent = '';
@@ -3567,9 +3999,15 @@
     G.focus = -1;
     G.focusList = null;
     G.armed = false;
+    G._rp = NaN;
+    G._lo = G._hi = -1;
+    G._wl = null;
+    G.dark = false;
+    G.glow = 1;
     G.tab = o.tab === 'backs' ? 'backs' : 'cards';
     B.selected = resolveBack();
     buildBacks();
+    startTilt();
     B.pos = Math.max(0, B.items.findIndex((b) => b.id === B.selected));
     setView(s, 'gallery');
     ui.cardsPanel.hidden = G.tab !== 'cards';

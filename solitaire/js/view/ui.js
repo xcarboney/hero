@@ -44,7 +44,8 @@
  * What it calls: SOL.Game.undo / hint / newGame / restartDeal / autoComplete / getStatus / getEffects /
  * chooseEffects / isBusy / isPaused / pause('modal') / resume('modal'); SOL.Settings.get / set / reset;
  * SOL.Stats.summary / reset; SOL.Store.get / set (one key, 'tips.v1'); SOL.Inspector.openGallery({ tab }) /
- * isOpen; SOL.Input.isActive; SOL.Cards.create / createBackOnly / setBack / suitSvg; SOL.Haptics.play; SOL.Audio.play;
+ * isOpen; SOL.Input.isActive; SOL.Cards.create / createBackOnly / setBack / suitSvg / preload / BACKS /
+ * DEFAULT_BACK; SOL.Haptics.play; SOL.Audio.play;
  * SOL.App.addBackHandler; SOL.Platform.isNativeApp / canHover / isTouch; SOL.PWA.canInstall / promptInstall()
  * and its 'pwa:change' event; and, inside the Android app, the shell's SolitaireNative.openSourceLicenses() (the one
  * bridge method the UI calls itself; contract: the header of js/core/platform.js). Every one of them is
@@ -76,6 +77,10 @@
  *   (SOL.Game.getEffects().effective), which is Low with the hint "Lowered automatically" while the adaptive
  *   lite mode is on, whatever is stored; a tap on either option then goes to SOL.Game.chooseEffects() and
  *   ends lite mode. It follows 'game:quality' while the sheet is open.
+ * - "Card style" (Table group: Hologram / Classic, the 'cardStyle' setting) applies without a reload: SOL.Cards
+ *   switches every card itself, the menu's fan and the back picker included. Choosing Hologram first lets
+ *   SOL.Cards.preload({ style: 'holo' }) fetch the pictures (STYLE_WAIT_MS at most) and stores the setting
+ *   when they are in; the control shows the choice at once. "Card back" lists every back of SOL.Cards.BACKS.
  * - The one-time tip: "Tip: touch and hold a card to see it in 3D" ("press and hold" without touch) as a
  *   toast, once per installation (SOL.Store 'tips.v1' = { hold: true }), 1.2 s after the table has come to
  *   rest with nothing open on it: not during a deal, not over a panel, the "no more moves" card, the win or
@@ -134,7 +139,7 @@
  * - HUD and toolbar adapt to the width they really have (container queries on .ui-hud-box / .ui-tb-box), so
  *   side insets count; see ui.css for the measured thresholds.
  * - The real cards the UI shows (menu fan, card-back tile, back picker) are flattened to one compositor layer
- *   each by ui.css; the six picker cards are created one frame after the settings sheet, which does not wait
+ *   each by ui.css; the eight picker cards are created one frame after the settings sheet, which does not wait
  *   for them.
  */
 (function (root) {
@@ -159,6 +164,7 @@
   const SHEET_QUERY = '(max-width: 639.98px)'; // below this the panels are bottom sheets (must match ui.css)
   const WIN_DELAY_MS = 2500; // how long the celebration plays before the win screen comes up (SOL.Anim time)
   const WIN_DELAY_CAP_MS = 4000; // ...and the longest it may take in real time (see onWon)
+  const STYLE_WAIT_MS = 700; // longest the "Hologram" card style waits for its pictures before it is applied
   const TOAST_MAX = 3;
   const RING_R = 42;
   const RING_C = 2 * Math.PI * RING_R;
@@ -347,6 +353,11 @@
     } catch (err) {
       return false;
     }
+  }
+
+  /** The chosen card back; without a stored one, the deck's own default (SOL.Cards.DEFAULT_BACK). */
+  function cardBack() {
+    return sGet('cardBack', (SOL.Cards && SOL.Cards.DEFAULT_BACK) || 'prism');
   }
 
   function audio(name, opts) {
@@ -1954,7 +1965,7 @@
     for (const f of fan) {
       let card;
       try {
-        card = C.create(f.id, { back: sGet('cardBack', 'royal') });
+        card = C.create(f.id, { back: cardBack() });
       } catch (err) {
         continue;
       }
@@ -2011,7 +2022,7 @@
     let miniCard = null;
     if (SOL.Cards && typeof SOL.Cards.createBackOnly === 'function') {
       try {
-        miniCard = SOL.Cards.createBackOnly(sGet('cardBack', 'royal'));
+        miniCard = SOL.Cards.createBackOnly(cardBack());
         miniCard.setAttribute('aria-hidden', 'true');
         mini.appendChild(miniCard);
       } catch (err) {
@@ -2158,9 +2169,48 @@
         : null));
 
     // ---- table
+    // Card style applies at once: SOL.Cards switches every card on the table, in the menu and in the 3D
+    // preview by itself. Hologram faces are pictures, and a session that began in Classic has not loaded them:
+    // they are fetched first (SOL.Cards.preload, a few frames for local files; STYLE_WAIT_MS at most) and the
+    // setting is stored when they are in, so no card is ever switched to a window that is still empty. The
+    // control shows the choice right away.
+    let styleWant = null; // 'holo' while that choice waits for its pictures
+    const styleNow = () => styleWant || (sGet('cardStyle', 'holo') === 'classic' ? 'classic' : 'holo');
+    const styleSeg = hasSetting('cardStyle')
+      ? segmented({
+        label: 'Card style',
+        options: [{ value: 'holo', label: 'Hologram' }, { value: 'classic', label: 'Classic' }],
+        get: styleNow,
+        set: (v) => {
+          const C = SOL.Cards;
+          if (v !== 'holo' || !C || typeof C.preload !== 'function') {
+            styleWant = null;
+            sSet('cardStyle', v);
+            return;
+          }
+          styleWant = 'holo';
+          let stored = false;
+          const store = () => {
+            if (stored || styleWant !== 'holo') return;
+            stored = true;
+            styleWant = null;
+            sSet('cardStyle', 'holo');
+          };
+          try {
+            Promise.resolve(C.preload({ style: 'holo' })).then(store, store);
+          } catch (err) {
+            report('SOL.Cards.preload threw', err);
+            store();
+          }
+          root.setTimeout(store, STYLE_WAIT_MS);
+        },
+      })
+      : null;
+
     c.appendChild(h('h3.ui-sec', null, 'Table'));
     c.appendChild(h('div.ui-group', null,
       field('Table theme', null, add(themeSwatches()), null, 'theme'),
+      styleSeg ? field('Card style', 'Shimmers as cards move', add(styleSeg), null, 'cardStyle') : null,
       field('Card back', null, add(backPicker()), null, 'cardBack')));
 
     // ---- motion
@@ -2340,12 +2390,13 @@
     return { el: group, sync: sync };
   }
 
-  /** The six backs as real cards (SOL.Cards.createBackOnly); the chosen one spins once in 3D. */
+  /** Every back of SOL.Cards.BACKS (eight) as a real card (SOL.Cards.createBackOnly); the chosen one spins once in 3D. */
   function backPicker() {
     const C = SOL.Cards;
     const backs = (C && C.BACKS) || [
       { id: 'royal', name: 'Royal' }, { id: 'aurora', name: 'Aurora' }, { id: 'ember', name: 'Ember' },
       { id: 'lattice', name: 'Lattice' }, { id: 'petal', name: 'Petal' }, { id: 'mono', name: 'Mono' },
+      { id: 'prism', name: 'Prism' }, { id: 'pearl', name: 'Pearl' },
     ];
     const group = h('div.ui-backs', { role: 'radiogroup', 'aria-label': 'Card back' });
     const cards = [];
@@ -2366,7 +2417,7 @@
       group.appendChild(b);
       return b;
     });
-    // The six real cards are the most expensive thing in the settings sheet (measured: about a third of its
+    // The real cards are the most expensive thing in the settings sheet (measured: about a third of its
     // first build). They are put in one frame later, when the sheet is already on its way up — its transition
     // runs on the compositor and does not wait for them; on a phone they are below the fold anyway.
     const fill = function () {
@@ -2388,9 +2439,12 @@
     }
     let spin = null;
     function index() {
-      const id = sGet('cardBack', 'royal');
+      const id = cardBack();
       const i = backs.findIndex((b) => b.id === id);
-      return i < 0 ? 0 : i;
+      if (i >= 0) return i;
+      // (a stored id this deck does not know: the cards show the default back, so that one is marked)
+      const d = backs.findIndex((b) => b.id === ((C && C.DEFAULT_BACK) || 'prism'));
+      return d < 0 ? 0 : d;
     }
     function sync() {
       markRadios(btns, index());

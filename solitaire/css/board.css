@@ -40,6 +40,15 @@
   perspective-origin: 50% 42%;
 }
 
+/*
+ * At start-up the cards — the deck, or a restored table — are laid out at once but stay out of sight until
+ * the card pictures are in (veilUntilArt() in board.js): not at all where the files are local, a few frames
+ * otherwise, and no card is ever seen with an empty window or a blank back.
+ */
+.cards.is-waiting {
+  visibility: hidden;
+}
+
 /* A restored game fades in while the cards settle. */
 .cards.is-entering {
   animation: board-enter 320ms var(--ease-out) both;
@@ -284,6 +293,16 @@
  * 'spin' flips, the celebration — it swaps the face at the edge-on moment and never rotates past it, so a
  * flat, double-sided face is all that is needed.)
  * If cards.css ever restructures a card these rules simply stop matching and the cards are five layers again.
+ *
+ * Hologram cards (cards.css, "Hologram style") need nothing more. Their front holds more boxes — the window
+ * floor, the figure, the paper and the ink, and the foil sheets while SOL.Cards.foil() lights the card — but
+ * on a table card none of them is a plane of its own or promoted: they are painted into the face, so the
+ * rules below flatten such a card to the same single layer, and the hidden face takes its boxes with it
+ * (visibility is inherited: no window ever shows on a card that lies face-down). The live foil of a lifted,
+ * turning or hinted card is paint inside that layer too. Measured with CDP LayerTree at 390x844 (the whole
+ * page): a dealt table is 80 layers, a mid-game table with 28 cards face-up 83 and a run of three in the hand
+ * 96 — the same three numbers with Classic cards, with Hologram cards (foil alive on the card in the hand)
+ * and for the code before the hologram style existed.
  */
 #cards .card {
   /*

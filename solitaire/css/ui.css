@@ -1360,12 +1360,12 @@ button.ui-row:active {
   background: radial-gradient(120% 110% at 50% 0%, #4a5868 0%, #2c3642 48%, #0d1116 100%);
 }
 
-/* card back picker: real cards from SOL.Cards */
+/* card back picker: real cards from SOL.Cards — eight backs, two rows of four */
 .ui-backs {
-  --card-w: clamp(54px, 19vw, 76px);
+  --card-w: clamp(46px, 15.5vw, 64px);
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px 6px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px 2px;
   justify-items: center;
 }
 .ui-back {
@@ -1444,8 +1444,7 @@ button.ui-row:active {
 @media (min-width: 640px) {
   .ui-backs {
     --card-w: 62px;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
-    gap: 8px 4px;
+    gap: 10px 4px;
   }
 }
 

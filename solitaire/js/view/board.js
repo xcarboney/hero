@@ -19,6 +19,12 @@
  *   -- rendering a state (called by SOL.Game) --
  *   Board.render(state)              instant: every card at its place, nothing animates (also leaves deck mode)
  *   Board.restore(state)             render + a quick settle-in (restored game)
+ *                                    (At start-up the cards — the deck, or a restored table — stay out of sight
+ *                                    until the card pictures of SOL.Cards.preload() are in, TUNE.veilMs at
+ *                                    most: no card is seen with an empty window or a blank back. Where they
+ *                                    are in when the board is built nothing is hidden. A table that was
+ *                                    restored meanwhile settles in when they show; Board.isSettled() is
+ *                                    false until then.)
  *   Board.apply(state, record, { source, auto, step } = {})
  *                                    animates one engine record (draw / recycle / move / undo). `source: 'drag'`
  *                                    right after Board.dragEnd(): the held cards spring in from the pointer.
@@ -151,12 +157,14 @@
  *         flipMode ('prop' | 'spin'; default 'prop', in lite mode 'spin'), overshoot (px), z, trail (colour),
  *         liftSteps (coarser --lift steps for
  *         crowded choreography; default TUNE.liftSteps), lazy (a covered card stays covered
- *         until its delay is over), onStart(s), onFrame(s, t), onLand(s) }
+ *         until its delay is over), foil (false: no live foil on this flight — see LIVE FOIL),
+ *         onStart(s), onFrame(s, t), onLand(s) }
  *   sprite.springTo(x, y, { stiffness, damping, velocity: { x, y } }) -> handle     position only; retargets a
  *                                    running spring instead of restarting it
  *   sprite.poseTo({ rot, rx, ry, scale, lift }, { duration, delay, ease }) -> handle
- *   sprite.flipTo(deg, { duration, delay, mode, hop }) -> handle        hop: px the card jumps while it turns;
- *                                    mode: 'prop' | 'spin' (default as flipMode above)
+ *   sprite.flipTo(deg, { duration, delay, mode, hop, foil }) -> handle  hop: px the card jumps while it turns;
+ *                                    mode: 'prop' | 'spin' (default as flipMode above); foil: true gives the
+ *                                    turn live foil although the card's flight was a quiet one
  *   sprite.wobble(fn(t, sprite), { duration, delay }) -> handle         drives ox / oy (they end at 0)
  *   sprite.act(fn(t, sprite), { duration, delay }) -> handle            a performance in place: fn writes rot /
  *                                    rx / ry / scale / lift and brings them back to rest by t = 1
@@ -189,6 +197,43 @@
  * it back on landing; dragged cards sit at TUNE.dragZ; held "show" cards are yours.
  * Invariant kept by the board: whenever a sprite is not held and has no handle, it is exactly on its target,
  * face, pose and z included (see Sprite._settled); Board.sync() re-places anything whose target moved.
+ *
+ * LIVE FOIL (hologram cards; SOL.Cards.foil is the card's side of it)
+ * ---------
+ * A resting card is static paint. A card that is up in the air shimmers: the board calls SOL.Cards.foil() for it
+ * from Sprite._write — the same place, and the same once-per-frame rhythm, as its transform — and hands it back
+ * with foil(el, null) the moment its values are at rest again. Nothing else in the board touches the foil.
+ *   who        a free card, or one the board holds itself ('drag', 'hint', 'hover'), that is lifted (lift > 0),
+ *              turning over (flip between 0 and 180, either flip mode) or leaning in 3D (rx / ry): the card in
+ *              the hand, a card flying to its pile, a draw, the tableau card that is uncovered, the hinted card,
+ *              the King's nod, the hover tilt. Cards held by anyone else (the deck, the celebration's 'show',
+ *              a director's own tag) never: mass choreography moves 52 cards at once.
+ *   how alive  from those same values (TUNE.foilLift, foilTurn, foilLean): it fades in and out with the lift
+ *              and the turn by itself, there is no separate fade.
+ *   the light  from where the card is on the table (it crosses the card as the card crosses the table:
+ *              TUNE.foilTravel), its 3D tilt, how far it has turned — and for a hinted card, which hangs still,
+ *              a slow sweep in time.
+ *   budget     every update repaints the card (the foil is paint inside the card's one layer, no layer is
+ *              added), so lit cards are updated in every 2nd frame, all in the same one — every 3rd or 4th
+ *              while frames come late (foilPace()) — and at most TUNE.foilMax cards are lit at a time. Of a
+ *              run that travels together only the last card — the one whose whole face shows — is lit on
+ *              the phone art, the last three on the classic art (a covered card of a column shows its
+ *              indices and little else). Crowds are QUIET: sprite.quiet
+ *              is set by fly({ foil: false }) (the deal, the recycle, the auto-complete cascade, cards
+ *              released from a show) and by the settle-in of a restored game, and is cleared when the sprite
+ *              has come to rest. Quick play is a crowd too: an action that follows the last one within
+ *              TUNE.foilCalmMs moves its cards quietly — the foil is for the move that can be watched.
+ *              (TUNE.foilDeal lets the column tops of a deal turn over with foil, flipTo({ foil: true });
+ *              it is off: the deal is the busiest animation there is, and the one the adaptive lite mode
+ *              is judged by.)
+ *   off        Classic style, lite mode / effects 'low', reduced motion: no call is made at all.
+ * Device tilt (phones that deliver 'deviceorientation' events without being asked; TUNE.foilTilt, 0 = off):
+ * while the device is being tilted and nothing on the table moves, the cards on top of the piles — whole
+ * faces, a dozen at most — get a faint foil that follows the tilt, a few times a second (TUNE.foilTiltMs) and
+ * only when the angle really changed; it fades and is taken away about a second after the device came to
+ * rest, so a phone lying still costs nothing, and a frame in which cards move never pays for it. Off in lite
+ * mode, with effects 'low', under reduced motion, in Classic, while the page is hidden, and while the deck is
+ * out or a show holds the cards.
  *
  * Needs SOL.Anim, SOL.Cards, SOL.Engine. SOL.FX, SOL.Audio, SOL.Haptics and SOL.Bus are optional.
  */
@@ -295,6 +340,7 @@
     dealGap: 30,
     dealAhead: 5, // cards kept rendered on top of the deck while dealing
     dealFlipMs: 270,
+    veilMs: 1600, // the cards are shown after this long at the latest, pictures in or not (see veilUntilArt())
     // ---- glide (layout changes, neighbours)
     glideStiffness: 230,
     glideDamping: 27,
@@ -307,6 +353,24 @@
     hoverGlare: 0.42,
     hoverLift: 0.3,
     hoverScale: 1.035,
+    // ---- live foil (hologram cards; see LIVE FOIL in the header)
+    foilMax: 6, // cards with live foil at the same time
+    foilLift: 0.66, // how alive the foil of a fully lifted card is (0..1)
+    foilTurn: 0.92, // …of a card half-way through turning over
+    foilLean: 16, // deg of 3D tilt (|rx| + |ry|) at which a leaning card is as alive as a turning one
+    foilTravel: 1.2, // how far the light crosses a card while the card crosses the whole table (1 = edge to edge)
+    foilTiltK: 34, // deg of 3D tilt that carry the light from the middle of a card to its edge
+    foilRun: 3, // classic art: cards from the end of a travelling run that shimmer (phone art: 1)
+    foilDeal: false, // the column tops of a deal turn over with foil (off: the deal is the busiest animation,
+    // and the one the adaptive lite mode is judged by)
+    foilCalmMs: 320, // an action that follows the last one sooner than this moves its cards without live foil
+    foilSlowMs: 18.5, // average frame interval from which the foil is updated every 3rd frame instead of every 2nd
+    foilSlowerMs: 23, // …and every 4th
+    foilTilt: 0.34, // device tilt: how alive the foil of the top cards is while the phone is tilted (0 = off)
+    foilTiltMs: 100, // …the least time between two updates
+    foilTiltDeg: 0.7, // …the least change of angle that counts
+    foilTiltSpan: 26, // …deg of device tilt that carry the light from the middle of a card to its edge
+    foilTiltHold: 900, // …ms after the last change until the foil fades away
   };
 
   // ------------------------------------------------------------------ module state
@@ -326,6 +390,9 @@
   let deckMode = true; // true while the cards form the shuffling deck (no state on the table yet)
   let choreoGen = 0; // bumped by anything that invalidates a running multi-step choreography
   let choreoBusy = 0; // running gather / shuffle / deal promises
+  let veiled = false; // the cards are out of sight until their pictures are in (see veilUntilArt())
+  let stopVeilWatch = null; // …and this frame subscription looks for them meanwhile
+  let settleGen = -1; // choreoGen of a restore() that waits for the veil to lift before it settles in
   let zSeq = 0;
 
   const dirty = []; // sprites whose styles need writing
@@ -343,6 +410,18 @@
   let resizeObserver = null;
   let inviteOn = false;
   let inviteEl = null;
+  // live foil (see LIVE FOIL in the header)
+  let foilHolo = false; // the cards are hologram cards and SOL.Cards can light them
+  let foilCount = 0; // sprites that have live foil right now (at most TUNE.foilMax)
+  let foilFrame = 0; // frames counted by tick()
+  let foilHush = false; // the action being applied follows the last one too closely for foil (see apply())
+  let foilLastApply = -1e9;
+  let foilEvery = 2; // lit cards get a foil update in every n-th frame (see foilPace())
+  let foilDt = 16.7; // running average of the frame interval, ms
+  let hintSweep = 0; // the light's slow sweep across a hinted card, -1..1 (driven by the hint's tween)
+  // device tilt: listening, has a reading; bb / bg "neutral" beta and gamma, ab / ag the angles of the last
+  // update and `at` its time; the sprites that carry the tilt foil; the fade's timer and step
+  const tiltFoil = { on: false, has: false, bb: 0, bg: 0, ab: 0, ag: 0, at: 0, cards: [], timer: 0, step: 0 };
 
   // ------------------------------------------------------------------ small helpers
   function clamp(v, lo, hi) {
@@ -455,6 +534,9 @@
       this.fanned = false; // a covered card of the sideways draw-3 waste fan (see markFanned())
       this.tight = false; // a covered face-up card of a column squeezed below its corner index (see markTight())
       this.liftQ = 0; // --lift quantisation of the running flight (0 = TUNE.liftSteps)
+      this.quiet = false; // part of a crowd (or covered in its run): no live foil until it has come to rest
+      this._foil = false; // has live foil right now (see foilWrite())
+      this._tilt = false; // carries the device-tilt foil (see tiltApply())
       // style cache
       this._dirty = false;
       this._wT = '';
@@ -574,6 +656,7 @@
 
       if (flip1 !== flip0) s.flipMode = o.flipMode === SPIN || (o.flipMode === undefined && lite) ? SPIN : PROP;
       s.liftQ = o.liftSteps || 0;
+      s.quiet = o.foil === false;
       s.tracking = tracking;
       if (tracking) {
         s.dx = s.tx;
@@ -759,6 +842,7 @@
           if (!started) {
             started = true;
             air = !!hop && !s.hFlight && !s.hPose && !s.held;
+            if (o.foil === true) s.quiet = false;
             if (o.onStart) o.onStart(s);
           }
           s.flip = flip0 + (deg - flip0) * inOutSine(t);
@@ -884,6 +968,7 @@
         relax(s);
         return;
       }
+      s.quiet = false; // at rest: whatever crowd it travelled with has landed
       settlePile(s.pile);
     }
 
@@ -963,6 +1048,233 @@
         st.zIndex = String(s.z);
         s._wZ = s.z;
       }
+
+      // ---- live foil (after the face classes: SOL.Cards.foil lights the face that shows)
+      if (foilHolo || s._foil) foilWrite(s);
+    }
+  }
+
+  // ------------------------------------------------------------------ live foil (see LIVE FOIL in the header)
+  /**
+   * The foil of one sprite, from the values that were just written: how alive (0 = at rest) and where the
+   * light is. Called by Sprite._write, so once per frame and only for sprites that changed.
+   */
+  function foilWrite(s) {
+    let a = 0;
+    const held = s.held;
+    if (foilHolo && !lite && !s.quiet && !deckMode && L && (!held || held === 'drag' || held === 'hint' || held === 'hover') && !reduced()) {
+      a = s.lift * TUNE.foilLift;
+      const flip = s.flip;
+      if (flip !== 0 && flip !== 180) a = Math.max(a, Math.sin((flip * PI) / 180) * TUNE.foilTurn);
+      if (s.rx !== 0 || s.ry !== 0) {
+        a = Math.max(a, Math.min(1, (Math.abs(s.rx) + Math.abs(s.ry)) / TUNE.foilLean) * TUNE.foilTurn);
+      }
+    }
+    if (a < 0.02) {
+      if (s._foil) {
+        s._foil = false;
+        foilCount--;
+        // (a top card that had the device-tilt foil before it took off gets it back with the next tilt)
+        s._tilt = false;
+        SOL.Cards.foil(s.el, null);
+      }
+      return;
+    }
+    if (!s._foil) {
+      if (foilCount >= TUNE.foilMax) return;
+      s._foil = true;
+      foilCount++;
+    } else if (foilFrame % foilEvery !== 0) {
+      // Not on every frame: see foilPace(). All lit cards are updated in the same frames.
+      return;
+    }
+    const flip = s.flip;
+    let lx = 0.5 + ((s.x + s.ox + L.cardW * 0.5) / L.w - 0.5) * TUNE.foilTravel + s.ry / TUNE.foilTiltK;
+    const ly = 0.5 + ((s.y + s.oy + L.cardH * 0.5) / L.h - 0.5) * TUNE.foilTravel - s.rx / TUNE.foilTiltK - s.lift * 0.1;
+    // turning over: the light runs off the face that turns away and onto the one that comes round
+    if (flip !== 0 && flip !== 180) lx += ((flip <= 90 ? flip : flip - 180) / 90) * 0.45;
+    if (held === 'hint') lx += hintSweep * 0.3;
+    SOL.Cards.foil(s.el, lx, ly, a);
+  }
+
+  /**
+   * How often lit cards get a foil update. An update is not free: the foil is paint inside the card's own
+   * layer, so it repaints the card, and a frame with a repaint costs the main thread about three times a frame
+   * that only moves layers (measured at 4x CPU throttle: 2 ms -> 8 ms; the second and third lit card add
+   * little). So the foil runs at a fraction of the frame rate — every 2nd frame while frames come on time,
+   * every 3rd or 4th when they come late (TUNE.foilSlowMs, foilSlowerMs) — and all lit cards share the same
+   * frames, which leaves the frames in between as cheap as before. The card itself moves on every frame.
+   */
+  function foilPace(dt) {
+    foilFrame++;
+    foilDt += (Math.min(dt, 50) - foilDt) * 0.12;
+    foilEvery = foilDt < TUNE.foilSlowMs ? 2 : foilDt < TUNE.foilSlowerMs ? 3 : 4;
+  }
+
+  /** Something that decides about the foil changed (style, lite mode, reduced motion): lit cards are re-judged. */
+  function foilRefresh() {
+    let on = false;
+    try {
+      on = !!SOL.Cards && typeof SOL.Cards.foil === 'function' && (!SOL.Cards.currentStyle || SOL.Cards.currentStyle() === 'holo');
+    } catch (err) {
+      on = false;
+    }
+    foilHolo = on;
+    for (let i = 0; i < sprites.length; i++) if (sprites[i]._foil) touch(sprites[i]);
+    tiltSync();
+  }
+
+  /** How many cards from the end of a run that travels together shimmer (the others are covered). */
+  function foilRunKeep() {
+    return L && L.compact ? 1 : TUNE.foilRun;
+  }
+
+  // ---- device tilt
+  function tiltAllowed() {
+    return foilHolo && !lite && TUNE.foilTilt > 0 && !reduced() && !(doc && doc.visibilityState === 'hidden');
+  }
+
+  /**
+   * Listens to the device's orientation while that can have an effect, and not otherwise. It only listens:
+   * Android delivers the events as they are; where a permission prompt would be needed (iOS) nobody is asked,
+   * no events arrive and the table simply does not shimmer (the 3D preview does the same).
+   */
+  function tiltSync() {
+    const T = tiltFoil;
+    const want = inited && tiltAllowed() && !!root.DeviceOrientationEvent;
+    if (want === T.on) return;
+    T.on = want;
+    if (want) {
+      T.has = false;
+      root.addEventListener('deviceorientation', onDeviceTilt);
+    } else {
+      root.removeEventListener('deviceorientation', onDeviceTilt);
+      tiltClear();
+    }
+  }
+
+  function onDeviceTilt(e) {
+    const T = tiltFoil;
+    if (!T.on || !e || typeof e.beta !== 'number' || typeof e.gamma !== 'number') return;
+    const now = root.performance && root.performance.now ? root.performance.now() : Date.now();
+    const b = e.beta;
+    const g = e.gamma;
+    if (!T.has) {
+      // the first reading is "neutral": however the phone is held right now
+      T.has = true;
+      T.bb = T.ab = b;
+      T.bg = T.ag = g;
+      T.at = now;
+      return;
+    }
+    const dt = now - T.at;
+    if (dt < TUNE.foilTiltMs) return;
+    if (Math.abs(wrap180(b - T.ab)) + Math.abs(wrap180(g - T.ag)) < TUNE.foilTiltDeg) return;
+    // Only while the table lies still: a frame in which cards move is never asked to repaint a dozen more.
+    if (!tiltCalm()) return;
+    // "neutral" drifts towards however the phone is being held, so a new grip re-centres within seconds
+    const k = 1 - Math.exp(-Math.min(dt, 2000) / 4000);
+    T.bb += wrap180(b - T.bb) * k;
+    T.bg += wrap180(g - T.bg) * k;
+    T.ab = b;
+    T.ag = g;
+    T.at = now;
+    tiltApply(1);
+    if (T.timer) root.clearTimeout(T.timer);
+    T.step = 0;
+    T.timer = root.setTimeout(tiltFade, TUNE.foilTiltHold);
+  }
+
+  /** A game is on the table and nothing on it moves: no drag, no hint, no choreography, no card in the air. */
+  function tiltCalm() {
+    return !!state && !deckMode && !!L && choreoBusy === 0 && !drag && !hintState && !stopTick && tiltAllowed();
+  }
+
+  /** The phone has come to rest: the foil fades in three steps and is taken away. */
+  function tiltFade() {
+    const T = tiltFoil;
+    T.timer = 0;
+    T.step++;
+    if (T.step >= 3 || !T.on) {
+      tiltClear();
+      return;
+    }
+    tiltApply(1 - T.step / 3);
+    T.timer = root.setTimeout(tiltFade, 90);
+  }
+
+  /** Takes the device-tilt foil off every card that carries it, now. */
+  function tiltClear() {
+    const T = tiltFoil;
+    if (T.timer) {
+      root.clearTimeout(T.timer);
+      T.timer = 0;
+    }
+    for (let i = 0; i < T.cards.length; i++) {
+      const s = T.cards[i];
+      if (!s._tilt) continue;
+      s._tilt = false;
+      if (!s._foil) SOL.Cards.foil(s.el, null);
+    }
+    T.cards.length = 0;
+  }
+
+  /**
+   * One update of the device-tilt foil (`k` 0..1: its strength while it fades). The cards on top of the piles
+   * whose whole face shows and that are lying still: tableau columns, the waste, the foundations.
+   */
+  function tiltApply(k) {
+    const T = tiltFoil;
+    const next = [];
+    if (tiltCalm()) {
+      for (let p = 1; p < PILE_IDS.length; p++) {
+        const arr = state.piles[PILE_IDS[p]];
+        const s = arr.length ? sprites[arr[arr.length - 1]] : null;
+        if (!s || !s.faceUp || s.held || s.covered || s._foil || s.busy() || s.flip !== 0) continue;
+        next.push(s);
+      }
+    }
+    for (let i = 0; i < T.cards.length; i++) {
+      const s = T.cards[i];
+      if (s._tilt && next.indexOf(s) === -1) {
+        s._tilt = false;
+        if (!s._foil) SOL.Cards.foil(s.el, null);
+      }
+    }
+    T.cards = next;
+    if (!next.length) return;
+    // how far the device is tilted away from "neutral", in the axes of the screen as it is turned now
+    let dx = wrap180(T.ag - T.bg);
+    let dy = wrap180(T.ab - T.bb);
+    let turned = 0;
+    try {
+      turned = (root.screen && root.screen.orientation && root.screen.orientation.angle) || root.orientation || 0;
+    } catch (err) {
+      turned = 0;
+    }
+    if (turned === 90 || turned === 270 || turned === -90) {
+      const side = turned === 90 ? 1 : -1;
+      const t = dx;
+      dx = side * dy;
+      dy = -side * t;
+    } else if (turned === 180) {
+      dx = -dx;
+      dy = -dy;
+    }
+    const span = TUNE.foilTiltSpan;
+    const gx = clamp(dx / span, -1, 1) * 0.5;
+    const gy = clamp(dy / span, -1, 1) * 0.5;
+    const o = TUNE.foilTilt * k;
+    for (let i = 0; i < next.length; i++) {
+      const s = next[i];
+      s._tilt = true;
+      // each card catches the light a little differently: where it lies on the table shifts it
+      SOL.Cards.foil(
+        s.el,
+        0.5 + gx + ((s.x + L.cardW * 0.5) / L.w - 0.5) * 0.5,
+        0.5 + gy + ((s.y + L.cardH * 0.5) / L.h - 0.5) * 0.5,
+        o
+      );
     }
   }
 
@@ -1068,6 +1380,7 @@
   }
 
   function tick(dt) {
+    foilPace(dt);
     if (drag && !drag.released) dragFrame(dt);
     if (hover) hoverFrame(dt);
     if (dirty.length !== 0) {
@@ -1469,6 +1782,7 @@
       s.dx = s.tx;
       s.dy = s.ty;
       s.dflip = flipT;
+      s.quiet = false;
       touch(s);
       return null;
     }
@@ -1599,6 +1913,7 @@
     for (let i = 0; i < 52; i++) sprites[i].index = i;
     deckSnap();
     flush();
+    veilUntilArt();
 
     if (typeof root.ResizeObserver === 'function') {
       resizeObserver = new root.ResizeObserver(function () {
@@ -1612,7 +1927,15 @@
       SOL.Bus.on('app:insets', function () {
         relayout();
       });
+      // Live foil follows the card style and the motion settings. A task later: by then every other listener
+      // (SOL.Cards switching the cards, SOL.Game applying reduced motion) has done its part.
+      SOL.Bus.on('settings:change', function () {
+        root.setTimeout(foilRefresh, 0);
+      });
+      SOL.Bus.on('celebrate:start', tiltClear);
     }
+    doc.addEventListener('visibilitychange', tiltSync);
+    foilRefresh();
     return true;
   }
 
@@ -1722,6 +2045,7 @@
     unpress();
     hoverEnd(true);
     clearHint();
+    tiltClear();
     deckMode = false;
     setDealing(false);
     for (let i = 0; i < 52; i++) {
@@ -1771,6 +2095,69 @@
   function restore(next) {
     if (!inited || !next) return;
     render(next);
+    if (veiled) {
+      // The cards are in place but still out of sight (see veilUntilArt): they settle in when they show.
+      settleGen = choreoGen;
+      return;
+    }
+    settleIn();
+  }
+
+  /**
+   * The cards — the deck of a first launch, or a restored table — stay out of sight until the pictures they
+   * are painted with are in (SOL.Cards.preload(): the hologram figures, the two picture backs), so that no
+   * card is ever seen with an empty window or a blank back. With local files, in the Android app and from the
+   * service worker's cache the pictures are in before the board is built, and nothing is hidden at all; on a
+   * slow network the cards are shown after TUNE.veilMs anyway and the pictures fill in. Everything else on
+   * the page paints at once.
+   *
+   * The veil lifts on whichever comes first: the promise of preload(), a frame that finds the pictures in
+   * (SOL.Cards.preloaded(), asked at the start of every frame), or the time limit. The promise alone is not
+   * enough: after a busy start-up the browser renders a frame before it runs the task that resolves it, and
+   * the cards would be shown one whole frame — the most expensive one of the start — later than they could be.
+   */
+  function veilUntilArt() {
+    let wait = null;
+    try {
+      wait = SOL.Cards && typeof SOL.Cards.preload === 'function' ? SOL.Cards.preload() : null;
+    } catch (err) {
+      wait = null;
+    }
+    if (!wait || typeof wait.then !== 'function') return;
+    if (artIn()) return;
+    veiled = true;
+    cardsEl.classList.add('is-waiting');
+    wait.then(unveil, unveil);
+    root.setTimeout(unveil, TUNE.veilMs);
+    stopVeilWatch = SOL.Anim.frame(function () {
+      if (artIn()) unveil();
+    });
+  }
+
+  /** The card pictures have arrived (SOL.Cards.preloaded(); false where Cards cannot tell). */
+  function artIn() {
+    try {
+      return !!SOL.Cards && typeof SOL.Cards.preloaded === 'function' && SOL.Cards.preloaded() === true;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function unveil() {
+    if (!veiled) return;
+    veiled = false;
+    if (stopVeilWatch) {
+      stopVeilWatch();
+      stopVeilWatch = null;
+    }
+    cardsEl.classList.remove('is-waiting');
+    // a table that was restored meanwhile settles in now — unless something else has taken the cards since
+    if (settleGen === choreoGen && state && !deckMode) settleIn();
+    settleGen = -1;
+  }
+
+  /** A restored table fades in while every pile drops into place. */
+  function settleIn() {
     if (reduced()) return;
     cardsEl.classList.remove('is-entering');
     cardsEl.classList.add('is-entering');
@@ -1780,11 +2167,13 @@
       const from = Math.max(0, arr.length - 14); // deep cards of a tall pile are hidden anyway
       for (let i = from; i < arr.length; i++) {
         const s = sprites[arr[i]];
+        if (s.held || s.busy()) continue; // (the player was quicker: this card is on its way already)
         const delay = p * 16 + (i - from) * 7;
         const drop = L.cardH * 0.16;
         s.oy = -drop;
         s.lift = 0.5;
         s.scale = 1.03;
+        s.quiet = true; // the whole table settles in at once: no live foil
         touch(s);
         s.wobble(
           function (t, sp) {
@@ -2009,6 +2398,12 @@
     setState(next);
     retarget();
 
+    // Live foil is for the move that can be watched: when actions follow each other faster than that (a run
+    // of quick taps, undo held down) the cards of this one travel quietly (see LIVE FOIL in the header).
+    const at = root.performance && root.performance.now ? root.performance.now() : Date.now();
+    foilHush = at - foilLastApply < TUNE.foilCalmMs;
+    foilLastApply = at;
+
     const undo = record.type === 'undo';
     const base = undo ? record.undone : record;
     const tempo = undo ? TUNE.undoTempo : 1;
@@ -2063,6 +2458,7 @@
         flipMode: SPIN,
         flipFrom: 0.08,
         flipTo: 0.78,
+        foil: !foilHush,
         onStart: undo
           ? null
           : function (sp) {
@@ -2097,6 +2493,7 @@
         flipFrom: 0.1,
         flipTo: 0.85,
         overshoot: 0,
+        foil: false,
       });
     }
     if (!undo) {
@@ -2160,6 +2557,7 @@
         if (auto) side *= 1 + (step % 3) * 0.7;
       }
       const spin = clamp((lead.tx - lead.x) / (L.cardW * 4), -1, 1) * (toFoundation ? 9 : 5) + (auto ? (step % 2 ? 10 : -10) : 0);
+      const lit = n - foilRunKeep(); // (of a run only the cards whose faces show get live foil)
       for (let i = 0; i < n; i++) {
         const s = sprites[transfers[i].card];
         const isLead = i === 0;
@@ -2169,6 +2567,8 @@
           arc: arc,
           side: side,
           spin: spin,
+          // (the auto-complete cascade is a crowd — a dozen cards in the air — and so is a run of quick moves)
+          foil: i >= lit && !auto && !foilHush,
           peakLift: auto && lite ? 0 : 0.9,
           liftSteps: auto ? 3 : 0,
           peakScale: toFoundation ? (auto ? 0.22 : 0.16) : 0.09,
@@ -2215,6 +2615,7 @@
         continue;
       }
       if (s.flip === flipT) continue;
+      if (foilHush || auto) s.quiet = true; // (until it lies still again)
       if (f.faceUp) {
         s.flipTo(0, {
           duration: TUNE.revealMs,
@@ -2252,6 +2653,7 @@
     takeDrag();
     releaseSoft();
     clearHint();
+    tiltClear();
     const gen = ++choreoGen;
     if (deckMode) {
       // already a deck (first launch): nothing to collect
@@ -2566,6 +2968,7 @@
         peakScale: 0.04,
         overshoot: L.cardW * 0.2,
         flip: 180, // lands face-down; the top card of a column is turned by the flipTo below
+        foil: false, // ten cards in the air at once: no live foil
         onStart: function (sp) {
           sfx('deal', { pan: panOf(sp.tx), pitch: 0.92 + (k % 7) * 0.025 });
         },
@@ -2582,6 +2985,7 @@
           delay: ms * 0.7,
           mode: lite ? SPIN : PROP,
           hop: L.cardH * 0.1,
+          foil: !!TUNE.foilDeal,
           onStart: function (sp) {
             sfx('flip', { pan: panOf(sp.tx), volume: 0.6 });
             haptic('tap');
@@ -2610,6 +3014,7 @@
           peakLift: 0,
           peakScale: 0,
           overshoot: 0,
+          foil: false,
           z: TUNE.flyZ + 1400 + i,
           onStart:
             i === 0
@@ -2999,11 +3404,13 @@
     const lead = spr[0];
     const px = cx - L.left;
     const py = cy - L.top;
+    const lit = spr.length - foilRunKeep(); // (of a run only the cards whose faces show get live foil)
     for (let i = 0; i < spr.length; i++) {
       const s = spr[i];
       s.stop();
       s._fold();
       s.held = 'drag';
+      s.quiet = i < lit;
       s.z = TUNE.dragZ + i;
       s.el.classList.add('is-dragging');
       // out of the press dip and up, quickly, with a little overshoot: the card is in the hand
@@ -3397,11 +3804,14 @@
         }
         if (run.length === 0) run = [action.card];
         // ---- the real cards lift
+        const lit = run.length - foilRunKeep(); // (of a run only the cards whose faces show get live foil)
+        hintSweep = 0;
         for (let i = 0; i < run.length; i++) {
           const c = sprites[run[i]];
           if (c.held || c.busy()) continue;
           c.held = 'hint';
           c.soft = true;
+          c.quiet = i < lit;
           h.lifted.push(c);
           c.poseTo({ lift: lite ? 0 : 0.7, scale: 1.06 }, { duration: 220, delay: i * 22, ease: 'outBack' });
         }
@@ -3443,6 +3853,14 @@
               'translate3d(' + r2(x0 + (to.x - x0) * p) + 'px,' + r2(y0 + (to.y - y0) * p - bowY * bowT) + 'px,0) rotate(' +
               r2(lean * bowT) + 'deg) scale(' + Math.round(grow * 1000) / 1000 + ')';
             ghost.style.opacity = String(Math.round(0.62 * fade * 100) / 100);
+            // the lifted cards hang still: the light sweeps across them once per pass, so their foil lives
+            if (foilHolo && !lite) {
+              hintSweep = Math.sin(t * PI * 4);
+              for (let i = 0; i < h.lifted.length; i++) {
+                const c = h.lifted[i];
+                if (c._foil && c.held === 'hint') touch(c);
+              }
+            }
           },
           done: function () {
             if (hintState === h) clearHint();
@@ -3564,7 +3982,8 @@
       s.held = null;
       s.soft = false;
       if (deckMode || !state) continue;
-      const opts = Object.assign({ delay: i * stagger }, o);
+      // (cards that come home from a show come as a crowd: no live foil, unless the caller asks for it)
+      const opts = Object.assign({ delay: i * stagger, foil: false }, o);
       delete opts.how;
       delete opts.stagger;
       const h = place(s, how, opts);
@@ -3582,7 +4001,10 @@
    * no shadows, trails and most particles are skipped. SOL.Celebrate reads it too.
    */
   function setLite(on) {
-    lite = !!on;
+    on = !!on;
+    if (on === lite) return;
+    lite = on;
+    if (inited) foilRefresh(); // (lit cards go back to the static look; the device-tilt foil stops listening)
   }
 
   // ------------------------------------------------------------------ settings hooks
@@ -3642,7 +4064,7 @@
 
   function isSettled() {
     if (!inited) return false;
-    if (drag || choreoBusy > 0 || deckMode) return false;
+    if (drag || choreoBusy > 0 || deckMode || veiled) return false;
     for (let i = 0; i < 52; i++) {
       const s = sprites[i];
       if (s.held || s.busy()) return false;

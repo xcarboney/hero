@@ -26,7 +26,9 @@
  * --flip, no --lift, no shadows) and stay flat, single-layer elements throughout (see "FLAT card" in
  * board.css): a card that turns its back to the player swaps faces at the edge-on moment instead of rotating
  * past it. z-order is re-sorted a few times a second instead of every frame, and cards buried in the stacks
- * stay unrendered until they launch and are covered again as the stacks rebuild.
+ * stay unrendered until they launch and are covered again as the stacks rebuild. Hologram cards keep their
+ * resting look for the whole show: the board gives no live foil to cards a show holds (LIVE FOIL in board.js),
+ * nor to the crowd that flies home afterwards — a foil update repaints its card, and here 52 move at once.
  *
  * Public API
  *   Celebrate.play(result?) -> Promise<boolean>   starts the show (while it runs the same promise is returned).

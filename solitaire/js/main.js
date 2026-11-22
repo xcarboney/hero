@@ -88,8 +88,14 @@
  *     Game.save() does nothing meanwhile). Whenever the app is closed, the abandoned game does not come back:
  *     the next start restores the new deal, or deals one if there was none yet.
  *   - Stats: recordStart on the first action of a game, recordWin on a win (best score uses score + time bonus).
- *   - Settings apply live: theme, card back, animation speed, reduced motion, sound / volume, effects quality,
- *     handedness, haptics. drawCount applies to the next deal.
+ *   - Settings apply live: theme, card back, card style (SOL.Cards switches the cards itself), animation
+ *     speed, reduced motion, sound / volume, effects quality, handedness, haptics. drawCount applies to the
+ *     next deal.
+ *   - Card pictures: the hologram faces and the two picture backs are image files that SOL.Cards.preload()
+ *     fetches and decodes. No card is dealt before they are in: the first deal keeps shuffling, and so does a
+ *     deal right after a change of card style — for ART_LIMIT_MS (1.5 s) at most; then it is dealt anyway.
+ *     (At start-up SOL.Board also keeps its cards out of sight until then: a restored table.) The first paint
+ *     of the page never waits.
  *   - Adaptive quality: real frame intervals are sampled during every deal and every full celebration. When
  *     the average is well above 20 ms (> 24 ms, and more than half of the frames late) the session goes into
  *     LITE mode: SOL.FX quality 'low', <html data-effects="low">, SOL.Board.setLite(true) (transform-only
@@ -99,8 +105,9 @@
  *     own choice wins: picking an effects level — a changed 'effects' setting, or Game.chooseEffects() with
  *     any value — ends lite mode and the adaptive behaviour for the session.
  *
- * The bootstrap at the bottom starts the modules in order (settings -> Anim / FX / Audio -> Board -> Input ->
- * Inspector -> UI -> Game.init()); a missing or throwing module is logged and skipped, never fatal.
+ * The bootstrap at the bottom starts the modules in order (settings -> card pictures (only the wait for them
+ * is set up) -> Anim / FX / Audio -> Board -> Input -> Inspector -> UI -> Game.init()); a missing or throwing
+ * module is logged and skipped, never fatal.
  */
 (function (root) {
   'use strict';
@@ -122,6 +129,7 @@
   const PERF_LITE_SHARE = 0.5;
   const ENCORE_DELAY_MS = 320;
   const LANDING_LIMIT_MS = 1200;
+  const ART_LIMIT_MS = 1500; // longest a deal waits for the card pictures (SOL.Cards.preload)
 
   let state = null;
   let version = 0; // bumped on every state change: cache key for hints / stuck
@@ -185,6 +193,37 @@
   }
   function log(what, err) {
     if (root.console && root.console.error) root.console.error('[SOL.Game] ' + what, err);
+  }
+
+  // ------------------------------------------------------------------ card pictures
+  /*
+   * The hologram faces and the two picture backs are image files. SOL.Cards starts fetching and decoding them
+   * the moment its script runs, and no card is dealt before they are in: a deal keeps riffling until then
+   * (newGame). (SOL.Board, for its part, keeps the cards out of sight at start-up until the same pictures are
+   * there, which is what a restored table waits for.) Local files, the Android app's assets and the service
+   * worker's cache answer within a few frames; a slow network gets ART_LIMIT_MS and then the cards are dealt
+   * anyway (the pictures fill in as they arrive). Nothing here delays the first paint of the page.
+   */
+  let artOk = false; // the pictures of the current card style are in (or were given up on)
+  let artGen = 0;
+
+  function awaitArt() {
+    const gen = ++artGen;
+    artOk = false;
+    const done = function () {
+      if (gen === artGen) artOk = true;
+    };
+    try {
+      const C = SOL.Cards;
+      if (!C || typeof C.preload !== 'function') {
+        done();
+        return;
+      }
+      Promise.resolve(C.preload()).then(done, done);
+      root.setTimeout(done, ART_LIMIT_MS);
+    } catch (err) {
+      done();
+    }
   }
 
   // ------------------------------------------------------------------ clock
@@ -820,14 +859,15 @@
       if (token !== dealToken) return null;
       return Promise.resolve(b ? b.shuffle() : null).then(function () {
         if (token !== dealToken) return null;
-        if (seedReady) return null;
+        if (seedReady && (artOk || !b)) return null;
         if (!b) {
           // no board to animate: just wait for the seed
           return new Promise(function (resolve) {
             root.setTimeout(resolve, 30);
           }).then(shuffleUntilSeed);
         }
-        return shuffleUntilSeed(); // the solver is still thinking: keep riffling
+        // the solver is still thinking, or the card pictures are not in yet (see awaitArt): keep riffling
+        return shuffleUntilSeed();
       });
     };
 
@@ -901,7 +941,7 @@
       state = restored;
       resetForNewState();
       const b = board();
-      if (b) b.restore(state);
+      if (b) b.restore(state); // (the board keeps its cards out of sight until the card pictures are in)
       emit('game:new', { state: state, restored: true });
       checkStuck();
       emitStatus();
@@ -1011,6 +1051,9 @@
         if (key === 'cardBack' || key === '*') b.setBack(S.get('cardBack'));
         if (key === 'leftHanded' || key === '*') b.setLeftHanded(!!S.get('leftHanded'));
       }
+      // cardStyle: SOL.Cards switches every card by itself and starts loading the pictures the style needs;
+      // a deal that is asked for meanwhile waits for them like the first one.
+      if (key === 'cardStyle' || key === '*') awaitArt();
       // drawCount: next deal. tapToMove / haptics / showTimer are read where they are used.
     } catch (err) {
       log('applying setting "' + key + '" failed', err);
@@ -1120,6 +1163,7 @@
     step('settings', function () {
       if (SOL.Settings) SOL.Settings.applyToDocument();
     });
+    step('art', awaitArt);
     step('anim', function () {
       if (!SOL.Anim) return missing('SOL.Anim');
       if (SOL.Settings) {

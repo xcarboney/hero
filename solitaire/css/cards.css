@@ -23,6 +23,12 @@
  * Also honoured: <html data-effects="low"> removes the glare planes of table cards (thick cards keep a simpler one).
  * A front narrower than 60px shows the compact layout instead of the classic one (container query, no JS);
  * data-layout="compact" | "classic" on .card pins one of them.
+ *
+ * Two card styles share all of the above: data-style="classic" (the drawn cards) and data-style="holo" (the
+ * hologram cards). Everything specific to the hologram style — the boxes inside its faces, the pearl paper and
+ * the window, the live foil (class .is-holo and the .card__sheet boxes, both managed by SOL.Cards.foil()), the
+ * depth of a thick card (its floating planes, which foil() also sinks as the card turns away) and the two
+ * picture backs — is in the last part of this file, "Hologram style", which starts with its own overview.
  */
 
 /*
@@ -589,4 +595,612 @@
 @keyframes sol-card-target {
   from { opacity: 0.6; }
   to { opacity: 1; }
+}
+
+/* ================================================================== Hologram style (.card[data-style="holo"]) */
+/*
+ * Everything from here on only matches a card that SOL.Cards built (or switched to) in the hologram style; a
+ * Classic card has none of these boxes and is painted by the rules above alone.
+ *
+ * Boxes inside .card__front, in paint order (cards.js builds them; courts and aces = "window cards"):
+ *   .card__win    floor of the hologram window: dark scene, projector cone, stars          window cards
+ *   .card__fig    the figure or gem: > .card__figim (the image)                            window cards
+ *   .card__art    paper-level SVG: the pearl paper with the window cut out + its gold rim   window cards
+ *   .card__foil   pearl paper and, inside it, .card__art with the foil-ink pips             number cards
+ *   .card__ink    SVG with the indices and the fan / tight marks, above every foil; on a
+ *                 number card also the paper around the panel and the foil line            all
+ * Three more boxes exist only while a card's foil is live (SOL.Cards.foil() adds and removes them):
+ * .card__figfx inside .card__fig, .card__spark just under .card__ink, and .card__bfoil inside a face that
+ * shows one of the two picture backs.
+ *
+ * AT REST a hologram card is static paint: no box is blended into another, there is no extra layer and none
+ * of the foil boxes paints anything of its own. Whatever flattens a Classic card to one compositor layer
+ * flattens this one too.
+ *
+ * LIVE FOIL is the business of SOL.Cards.foil(el, x, y, o, edge) (js/view/cards.js): while an owner calls it
+ * for a card, the card has the class .is-holo and its foil boxes hold SHEETS (.card__sheet): rainbow broken up
+ * by foil-ice.webp that slides with the light, sparkles from foil-sparkle.webp that twinkle as it moves. This
+ * file styles the sheets; foil() writes their `transform` and `opacity` inline and nothing else. No custom
+ * property on .card is involved: a property set there is inherited through the whole card, and re-inheriting
+ * it on every frame cost fourteen times the style work of writing two properties on three boxes.
+ * Where a sheet is blended (screen, color-dodge, color-burn) it is blended into the box it lies in: one flat,
+ * isolated box, never across 3D planes. No sheet is masked, clipped by a path or filtered while compositing.
+ * A card laid out 130px wide or wider gets a finer foil — facets that stay in place, the rainbow blended into
+ * them: "live foil of a large card", after the sheets.
+ *
+ * DEPTH: on a .card--thick window card the boxes are real planes at different distances (see "depth"). As the
+ * card turns away from the viewer its floating planes sink back onto it, so they never stand in front of it as
+ * flat cut-outs. SOL.Cards.foil() does that (its `edge` argument) by writing `transform` inline on the three
+ * floating planes — the expressions of the "depth" rules below with a factor put in — and NOT by setting a
+ * custom property for those rules to read: a custom property that changes on an ancestor makes the browser
+ * repaint every box below it that paints a picture (the window floor and the figure, on every frame of a turn),
+ * where a changed transform repaints nothing.
+ *   --holo-edge   0 .. 1 on .card__front: what the "depth" rules read while no inline transform is in the way,
+ *                 i.e. for a card nobody is driving with foil(): how far the card is turned away (the planes
+ *                 sink between 0.2 and 0.8). Unset = 0 = full depth. Set it once, not per frame.
+ */
+
+/* --holo-edge is read by the planes of the front (its direct children) and stops there (see "Routing of the
+   animated properties" at the top). */
+.card__art,
+.card__win,
+.card__ink > *,
+.card__fig > *,
+.card__spark > * {
+  --holo-edge: initial;
+}
+
+/* ------------------------------------------------------------------ hologram: paper and ink */
+/*
+ * Pearl paper: almost white, with a breath of lilac, aqua and peach across the diagonal. A number card paints
+ * it as the background of .card__foil, the box its foil is blended into (and once more, as SVG, around the
+ * panel: the frame in .card__ink); a window card paints the same gradient in its SVG, where the paper has a
+ * hole, so its face has no background of its own. Against it the indices have a contrast of at least 14:1
+ * (black) and 5:1 (red), and no foil ever reaches the paper they stand on.
+ */
+.card[data-style="holo"] .card__foil {
+  background-color: #fbfaff;
+  background-image: linear-gradient(152deg, #ffffff 0%, #fcfbff 26%, #f6f3fc 52%, #f1f7f8 76%, #faf4ef 100%);
+}
+.card[data-style="holo"][data-face="court"] .card__front,
+.card[data-style="holo"][data-face="ace"] .card__front {
+  background: none;
+  box-shadow: 0 calc(var(--card-w) * 0.006) calc(var(--card-w) * 0.016) rgba(3, 8, 6, 0.42);
+}
+.card--thick[data-style="holo"][data-face="court"] .card__front,
+.card--thick[data-style="holo"][data-face="ace"] .card__front {
+  box-shadow: none;
+}
+
+.card__ink {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  fill: currentColor;
+  pointer-events: none;
+}
+
+/*
+ * The hairline round the card, the same line .card__face draws as an inset shadow — which the paper of a
+ * hologram front covers, so here it is an outline, drawn inwards, on the box that carries that paper: the
+ * frame in .card__ink on a number card, .card__art on a window card (that one stays in the plane of the paper
+ * when the indices of a thick card float).
+ */
+.card[data-style="holo"][data-face="pips"] .card__ink,
+.card[data-style="holo"][data-face="court"] .card__art,
+.card[data-style="holo"][data-face="ace"] .card__art {
+  border-radius: var(--card-radius);
+  outline: max(1px, calc(var(--card-w) * 0.006)) solid var(--card-border, rgba(20, 24, 36, 0.18));
+  outline-offset: calc(-1 * max(1px, calc(var(--card-w) * 0.006)));
+}
+
+/* ------------------------------------------------------------------ hologram: the window */
+/*
+ * The floor. Its box is larger than the hole in the paper (it reaches to 1.6% from the card's edge), so on a
+ * thick card, where it lies deeper than the paper, no viewing angle finds its end. The window colour is a
+ * second colour cue: deep indigo for spades and clubs, deep wine for hearts and diamonds.
+ */
+.card__win {
+  --_wt: 1.143%;
+  --_w0: #04051a;
+  --_w1: #0d1048;
+  --_w2: #2b36a8;
+  --_w3: #7c8aff;
+  --_cone: 168, 184, 255;
+  --_stars: url("../art/holo/foil-sparkle.webp");  /* (none in the compact layout: too small to see there) */
+  position: absolute;
+  inset: var(--_wt) 1.6% 1.143%;
+  border-radius: calc(var(--card-w) * 0.062);
+  pointer-events: none;
+  background-color: var(--_w0);
+  background-image:
+    linear-gradient(180deg, rgba(0, 0, 0, 0.62) 2.5%, rgba(0, 0, 0, 0) 13%),
+    var(--_stars),
+    conic-gradient(
+      from -27deg at 50% 104%,
+      rgba(var(--_cone), 0) 0deg,
+      rgba(var(--_cone), 0.2) 13deg,
+      rgba(var(--_cone), 0.4) 23deg,
+      rgba(255, 255, 255, 0.36) 27deg,
+      rgba(var(--_cone), 0.4) 31deg,
+      rgba(var(--_cone), 0.2) 41deg,
+      rgba(var(--_cone), 0) 54deg,
+      rgba(var(--_cone), 0) 360deg
+    ),
+    linear-gradient(0deg, rgba(0, 0, 0, 0) 34%, var(--_w0) 100%),
+    radial-gradient(95% 62% at 50% 104%, var(--_w3) 0%, var(--_w2) 30%, var(--_w1) 64%, var(--_w0) 100%);
+  background-size: 100% 100%, calc(var(--card-w) * 1.05) auto, 100% 100%, 100% 100%, 100% 100%;
+  background-position: 0 0, 22% 34%, 0 0, 0 0, 0 0;
+  background-blend-mode: normal, screen, normal, normal, normal;
+}
+.card[data-color="red"] .card__win {
+  --_w0: #16030d;
+  --_w1: #3f0a26;
+  --_w2: #96204f;
+  --_w3: #ff86ac;
+  --_cone: 255, 170, 198;
+}
+
+/*
+ * The figure. Classic layout: the whole image, top on the window's top edge, the beam ending on its bottom
+ * edge (a gem a little smaller, standing on the bottom edge). Compact layout: its upper part, cropped by its
+ * own box, which is the window. --fig (the image) comes from a rule cards.js injects per card.
+ */
+.card__fig {
+  --_fx: 5.4%;
+  --_fy: 5.4286%;
+  --_fw: 89.2%;
+  --_fh: 89.143%;
+  --_fs: 100% 100%;
+  --_fp: 50% 50%;
+  position: absolute;
+  left: var(--_fx);
+  top: var(--_fy);
+  width: var(--_fw);
+  height: var(--_fh);
+  pointer-events: none;
+}
+.card[data-face="ace"] .card__fig {
+  --_fx: 14.32%;
+  --_fy: 23.257%;
+  --_fw: 71.36%;
+  --_fh: 71.314%;
+}
+.card__figim,
+.card__figfx {
+  position: absolute;
+  inset: 0;
+}
+.card__figim {
+  background: var(--fig) var(--_fp) / var(--_fs) no-repeat;
+}
+.card__fig[data-mirror] > i {
+  transform: scaleX(-1);                           /* an inner box, so the plane itself keeps facing the viewer */
+}
+
+/* compact layout: the window is the area under rank and suit, the figure its upper part */
+@container sol-card (max-width: 59.9px) {
+  .card__win {
+    --_wt: 28%;
+    --_stars: none;
+  }
+  .card[data-face] .card__fig {
+    --_fx: 5.2%;
+    --_fy: 29.714%;
+    --_fw: 89.6%;
+    --_fh: 66.571%;
+    --_fs: 138% auto;
+    --_fp: 50% calc(var(--card-w) * 0.014);
+  }
+  .card[data-face="ace"] .card__fig {
+    --_fs: 96% auto;
+    --_fp: 50% calc(var(--card-w) * 0.02);
+  }
+  .card__spark {
+    --_st: 32%;
+  }
+}
+.card[data-layout="compact"] .card__win {
+  --_wt: 28%;
+  --_stars: none;
+}
+.card[data-layout="compact"] .card__spark {
+  --_st: 32%;
+}
+.card[data-layout="compact"][data-face] .card__fig {
+  --_fx: 5.2%;
+  --_fy: 29.714%;
+  --_fw: 89.6%;
+  --_fh: 66.571%;
+  --_fs: 138% auto;
+  --_fp: 50% calc(var(--card-w) * 0.014);
+}
+.card[data-layout="compact"][data-face="ace"] .card__fig {
+  --_fs: 96% auto;
+  --_fp: 50% calc(var(--card-w) * 0.02);
+}
+.card[data-layout="classic"] .card__win {
+  --_wt: 1.143%;
+  --_stars: url("../art/holo/foil-sparkle.webp");
+}
+.card[data-layout="classic"] .card__spark {
+  --_st: 7%;
+}
+.card[data-layout="classic"][data-face] .card__fig {
+  --_fx: 5.4%;
+  --_fy: 5.4286%;
+  --_fw: 89.2%;
+  --_fh: 89.143%;
+  --_fs: 100% 100%;
+  --_fp: 50% 50%;
+}
+.card[data-layout="classic"][data-face="ace"] .card__fig {
+  --_fx: 14.32%;
+  --_fy: 23.257%;
+  --_fw: 71.36%;
+  --_fh: 71.314%;
+}
+
+/* ------------------------------------------------------------------ hologram: live foil (.is-holo) */
+/*
+ * The boxes the sheets go into. .card__foil (the paper of a number card) and .card__win (the window floor) are
+ * part of every hologram front; .card__spark, .card__figfx and .card__bfoil only exist while foil() keeps
+ * sheets in them. Clipping and isolation — what makes a box the one flat group its sheets are blended into —
+ * are switched on by .is-holo, so a resting card has neither.
+ */
+.card__foil,
+.card__bfoil {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--card-radius);
+  pointer-events: none;
+}
+/*
+ * The sparkles keep to the column between the two indices (and, in the compact layout, to the window): on a
+ * thick card their plane lies in front of the indices, and a plain rectangle is the one clip that costs the
+ * compositor nothing — no sparkle ever lies on an index or leaves the card when the plane shifts.
+ */
+.card__spark {
+  --_st: 7%;
+  position: absolute;
+  inset: var(--_st) 24% 7%;
+  pointer-events: none;
+}
+.card.is-holo .card__foil,
+.card.is-holo .card__win,
+.card.is-holo .card__spark,
+.card.is-holo .card__bfoil {
+  overflow: hidden;
+}
+.card.is-holo .card__foil,
+.card.is-holo .card__win,
+.card.is-holo .card__back,
+.card--back-only.is-holo .card__front {
+  isolation: isolate;
+}
+
+/*
+ * A sheet: an <i class="card__sheet card__sheet--…"> that SOL.Cards.foil() puts into a foil box and takes out
+ * again; `transform` (where the light is) and `opacity` (how alive) are written inline by foil() and by
+ * nothing else. The big sheets are laid out at half size (80% of their box) and shown scaled up by 2, i.e.
+ * at 160% of the box: enough to slide by up to 29% of it in any direction without uncovering it.
+ *
+ * On a table-size card a sheet is plain paint inside the card's one layer: moving the light repaints that small
+ * layer and adds none. On a thick card, and on any card laid out wider than 130px, every sheet is a compositor
+ * layer of its own (a big card must not be repainted per frame); there the half-size layout also quarters the
+ * texture a sheet needs (will-change keeps the raster at layout scale; foil is soft enough for that).
+ */
+.card__sheet {
+  position: absolute;
+  inset: 10%;
+  opacity: 0;
+  pointer-events: none;
+}
+/* low effects: foil() makes no sheets; this hides the ones a card still has at the moment of the switch */
+:root[data-effects="low"] .card__sheet {
+  display: none;
+}
+.card--thick .card__sheet {
+  will-change: transform, opacity;
+}
+@container sol-card (min-width: 130px) {
+  .card__sheet {
+    will-change: transform, opacity;
+  }
+}
+@container sol-card-box (min-width: 130px) {
+  .card__sheet {
+    will-change: transform, opacity;
+  }
+}
+
+/*
+ * The window floor: bands of rainbow with dark between them, burnt into the ice shards, so each shard takes
+ * its own hard-edged colour and goes dark again as the bands slide on. Screened onto the floor.
+ */
+.card__sheet--rainbow {
+  background-image:
+    repeating-linear-gradient(118deg, #000 0%, #ff4f9a 8%, #ffc95e 14%, #62f5bd 20%, #5fb2ff 26%, #a866ff 32%, #000 40%, #000 50%),
+    url("../art/holo/foil-ice.webp");
+  background-size: 100% 100%, calc(var(--card-w) * 0.27) auto;
+  background-blend-mode: color-burn, normal;
+  mix-blend-mode: screen;
+}
+
+/* stars in the window and on the image backs: they drift against the rainbow, and foil() makes them twinkle */
+.card__sheet--stars {
+  background-image: url("../art/holo/foil-sparkle.webp");
+  background-size: calc(var(--card-w) * 0.36) auto;
+  mix-blend-mode: screen;
+}
+
+/*
+ * White light through the shards, dodged into the pips of a number card: ink brightens in its OWN colour (a
+ * red pip stays red, a black one goes steel blue), paper is as bright as it gets already. The pips are where
+ * the foil catches most.
+ */
+.card__sheet--light {
+  background-image:
+    url("../art/holo/foil-ice.webp"),
+    repeating-linear-gradient(118deg, #000 0%, #666677 12%, #fff 20%, #666677 28%, #000 40%, #000 50%);
+  background-size: calc(var(--card-w) * 0.25) auto, 100% 100%;
+  background-blend-mode: multiply, normal;
+  mix-blend-mode: color-dodge;
+}
+
+/*
+ * The paper of a number card: bands of pastel rainbow, cut by the shards (hard-light of the ice on itself
+ * gives them crisp, bright facets), white between the bands. It lies UNDER the pips (foil() puts it first in
+ * .card__foil), so it never touches their colour; the frame in .card__ink keeps it inside the panel and away
+ * from the indices. Not blended: over paper, pastel on white is the picture a multiply would give.
+ */
+.card__sheet--paper {
+  background-image:
+    repeating-linear-gradient(118deg, #fff 0%, #ff6fba 9%, #ffcf5a 15%, #5febb0 21%, #66b6ff 27%, #ad86ff 33%, #fff 42%, #fff 50%),
+    url("../art/holo/foil-ice.webp"),
+    url("../art/holo/foil-ice.webp");
+  background-size: 100% 100%, calc(var(--card-w) * 0.25) auto, calc(var(--card-w) * 0.25) auto;
+  background-blend-mode: screen, hard-light, normal;
+}
+
+/* the two image backs: rainbow in the shards, dodged into the picture; lighter than on a front (they are
+   colourful already) */
+.card__sheet--back {
+  background-image:
+    url("../art/holo/foil-ice.webp"),
+    repeating-linear-gradient(118deg, #000 0%, #ff4f9a 8%, #ffc95e 14%, #62f5bd 20%, #5fb2ff 26%, #a866ff 32%, #000 40%, #000 50%);
+  background-size: calc(var(--card-w) * 0.27) auto, 100% 100%;
+  background-blend-mode: multiply, normal;
+  mix-blend-mode: color-dodge;
+}
+
+/*
+ * The figure's own light (thick cards; at table size the figure is too small for it to show): two copies of
+ * the figure, brightened, each showing one diagonal band of it. foil() fades one in while the light is on the
+ * left of the card and the other while it is on the right, so a gleam seems to cross the figure. The copy is
+ * an inner box of its sheet: filter and mask are baked into the sheet's texture once, and the compositor only
+ * ever fades a plain layer. They do not slide.
+ */
+.card__sheet--glow,
+.card__sheet--glow-b {
+  inset: 0;
+}
+.card__sheet--glow > b,
+.card__sheet--glow-b > b {
+  position: absolute;
+  inset: 0;
+  background: var(--fig) var(--_fp) / var(--_fs) no-repeat;
+  filter: brightness(1.5) saturate(1.25);
+  -webkit-mask-image: linear-gradient(118deg, transparent 8%, #000 30%, #000 40%, transparent 62%);
+  mask-image: linear-gradient(118deg, transparent 8%, #000 30%, #000 40%, transparent 62%);
+}
+.card__sheet--glow-b > b {
+  -webkit-mask-image: linear-gradient(118deg, transparent 38%, #000 60%, #000 70%, transparent 92%);
+  mask-image: linear-gradient(118deg, transparent 38%, #000 60%, #000 70%, transparent 92%);
+}
+
+/*
+ * Sparkles in front of a window card: tiles of small stars with real transparency (cards.js injects the two
+ * images), not blended and at full size: they must stay crisp. They only drift a little; their life is the
+ * twinkle foil() gives them. One tile on a table card, a second one on a thick card.
+ */
+.card__sheet--glint,
+.card__sheet--glint-b {
+  inset: -12%;
+  background-size: calc(var(--card-w) * 0.86) auto;
+}
+.card__sheet--glint-b {
+  background-size: calc(var(--card-w) * 0.62) auto;
+}
+
+/* ------------------------------------------------------------------ hologram: live foil of a large card */
+/*
+ * A card laid out 130px wide or wider — the card in the 3D preview, the cards of the gallery, a desktop's
+ * table cards — is seen closely enough for the foil to be what real cut foil is: FACETS THAT STAY WHERE THEY
+ * ARE on the card, each answering the light in its own colour and at its own moment. Two sheets that do not
+ * move carry the facets (foil-ice.webp, a fifth of the card wide, tinted across the direction the rainbow
+ * travels in, so neighbours along a band of light differ):
+ *   .card__sheet--ice    on the window floor: dim, so the window stays a deep space with stars in it
+ *   .card__sheet--facet  in the paper of a number card, under the pips: pale, a pearly silver
+ * and the sheets that slide with the light lose their own shards and are blended INTO the facets instead:
+ *   .card__sheet--rainbow  a smooth rainbow, dodged into the floor: bright facets flash in its colour, dark
+ *                          ones stay dark, and the stars painted on the floor flash with them (so the star
+ *                          sheet of the window is not shown: one blended layer less)
+ *   .card__sheet--paper    a smooth rainbow, burnt into the paper: the facets take its colour, white stays
+ *                          white
+ *   .card__sheet--light    a narrow band of light in the gap behind that rainbow, dodged into what lies under
+ *                          it: the facets go white and the pips it crosses gleam in their own colour
+ *   .card__sheet--back     a smooth rainbow, dodged into a picture back: the crystals of the picture are the
+ *                          facets
+ * At table size none of this would read (a facet would be two pixels): there the two facet sheets are not
+ * displayed and the sliding sheets keep the larger shards they bring along (the rules above).
+ *
+ * The cost: a number card has one compositor layer more while it is live (its facets); a window card has as
+ * many as with the table recipe (facets in, star sheet out). Every sheet is still only moved and faded.
+ */
+.card__sheet--ice,
+.card__sheet--facet {
+  display: none;
+  /* covers its box; like the big sheets it is laid out at half size and shown scaled up by 2 (a quarter of
+     the texture: facets this soft do not need more) */
+  inset: 0 50% 50% 0;
+  transform: scale(2);
+  transform-origin: 0 0;
+  background-size: 100% 100%, calc(var(--card-w) * 0.1) auto;
+  background-blend-mode: multiply, normal;
+}
+.card__sheet--ice {
+  background-image:
+    repeating-linear-gradient(28deg, #7f8cff 0%, #ff8fc8 9%, #ffd890 18%, #8fffd0 27%, #8fb8ff 36%, #7f8cff 45%),
+    url("../art/holo/foil-ice.webp");
+}
+.card__sheet--facet {
+  background-image:
+    repeating-linear-gradient(28deg, #b9c0ff 0%, #ffc4e2 9%, #ffe9c0 18%, #c2ffe6 27%, #c4dcff 36%, #b9c0ff 45%),
+    url("../art/holo/foil-ice.webp");
+}
+@container sol-card (min-width: 130px) {
+  .card__sheet--ice,
+  .card__sheet--facet {
+    display: block;
+  }
+  .card__win > .card__sheet--stars {
+    display: none;
+  }
+  .card__sheet--rainbow {
+    background-image: repeating-linear-gradient(118deg, #000 0%, #d6417f 8%, #d6a64c 14%, #50d09c 20%, #4e94d8 26%, #9058d8 32%, #000 40%, #000 50%);
+    background-size: 100% 100%;
+    background-blend-mode: normal;
+    mix-blend-mode: color-dodge;
+  }
+  .card__sheet--paper {
+    background-image: repeating-linear-gradient(118deg, #fff 0%, #ff5fae 9%, #ffc04a 15%, #4fe0a4 21%, #56a8ff 27%, #a078ff 33%, #fff 41%, #fff 50%);
+    background-size: 100% 100%;
+    background-blend-mode: normal;
+    mix-blend-mode: color-burn;
+  }
+  .card__sheet--light {
+    background-image: repeating-linear-gradient(118deg, #000 0%, #000 39%, #5f6ea6 43%, #b4b4ba 45.5%, #a67090 48%, #000 50%);
+    background-size: 100% 100%;
+    background-blend-mode: normal;
+  }
+  .card__sheet--back {
+    background-image: repeating-linear-gradient(118deg, #000 0%, #b83a70 8%, #b88f42 14%, #45b386 20%, #4380ba 26%, #7c4cba 32%, #000 40%, #000 50%);
+    background-size: 100% 100%;
+    background-blend-mode: normal;
+  }
+}
+/* (the back of a thick card is not inside its front: it asks the box round both faces) */
+@container sol-card-box (min-width: 130px) {
+  .card__sheet--back {
+    background-image: repeating-linear-gradient(118deg, #000 0%, #b83a70 8%, #b88f42 14%, #45b386 20%, #4380ba 26%, #7c4cba 32%, #000 40%, #000 50%);
+    background-size: 100% 100%;
+    background-blend-mode: normal;
+  }
+}
+
+/* ------------------------------------------------------------------ hologram: depth (thick window cards) */
+/*
+ * Real planes, back to front (z from the front face of the card; the card is --card-t thick):
+ *   .card__win    1px above the BACK face: the window is a recess as deep as the card
+ *   .card__art    0: the paper, with the hole the floor is seen through
+ *   .card__ink    0.01 of the card's width: the indices stand a little proud
+ *   .card__fig    0.06: the figure floats in front of the card
+ *   .card__spark  0.075: sparkles in front of the figure
+ * The three floating planes sink onto the card as it turns away: by the factor 1 .. 0 that the clamp() below
+ * makes of --holo-edge (0.2 .. 0.8; SOL.Cards.HOLO publishes the numbers) — and for a card driven by
+ * SOL.Cards.foil() by the same factor written straight into inline transforms on these three boxes, which
+ * then stand in for the rules below (see the overview for why). Sunk, the figure lies just INSIDE the window,
+ * cut by the hole in the paper — which is exactly the picture of a flat card, so a thick card that foil() has
+ * told it is edge-on can stand in for a table card without a visible change. Each plane is culled from behind
+ * (backface-visibility is not inherited), so nothing of the front shows through the back. Blending and masks
+ * stay inside single planes (.card__win, .card__fig are flat boxes). A number card stays flat: its paper, pips
+ * and foil are one blended box.
+ *
+ * (The small offsets keep the order unambiguous for every depth sorter, also on a card that is only 1px thick:
+ * back slab at 0.35px above the back face < floor < figure when sunk (-0.2px) < paper (0) < the overlay
+ * planes of "flip shading + glare" (0.3px, 0.4px) < indices (1px and up).)
+ */
+.card--thick[data-style="holo"][data-face="court"] .card__front,
+.card--thick[data-style="holo"][data-face="ace"] .card__front {
+  transform-style: preserve-3d;
+}
+.card--thick[data-style="holo"][data-face="court"] .card__front > *,
+.card--thick[data-style="holo"][data-face="ace"] .card__front > * {
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+.card--thick[data-style="holo"] .card__front > .card__win {
+  transform: translateZ(calc(-1 * max(0.45px, var(--card-t) - 1px)));
+}
+.card--thick[data-style="holo"] .card__front > .card__ink {
+  transform: translateZ(calc(1px + var(--card-w) * 0.01 * clamp(0, (0.8 - var(--holo-edge, 0)) / 0.6, 1)));
+}
+.card--thick[data-style="holo"] .card__front > .card__fig {
+  transform: translateZ(calc(-0.2px + (var(--card-w) * 0.06 + 0.2px) * clamp(0, (0.8 - var(--holo-edge, 0)) / 0.6, 1)));
+}
+/* compact layout (a thick card standing in for a phone's table card): the figure is a crop that fills the
+   window, so it stays inside it whatever --holo-edge or foil() says (!important: above an inline transform) */
+@container sol-card (max-width: 59.9px) {
+  .card--thick[data-style="holo"]:not([data-layout="classic"]) .card__front > .card__fig {
+    transform: translateZ(-0.2px) !important;
+  }
+}
+.card--thick[data-style="holo"][data-layout="compact"] .card__front > .card__fig {
+  transform: translateZ(-0.2px) !important;
+}
+.card--thick[data-style="holo"] .card__front > .card__spark {
+  transform: translateZ(calc(1.5px + var(--card-w) * 0.075 * clamp(0, (0.8 - var(--holo-edge, 0)) / 0.6, 1)));
+}
+/* the paper slab under the front face (see "thickness") would hide the recess: it gets the same hole */
+.card--thick[data-style="holo"][data-face="court"] .card__edges::before,
+.card--thick[data-style="holo"][data-face="ace"] .card__edges::before {
+  background:
+    linear-gradient(#e4ddcb, #e4ddcb) 0 0 / 100% 1.143% no-repeat,
+    linear-gradient(#e4ddcb, #e4ddcb) 0 100% / 100% 1.143% no-repeat,
+    linear-gradient(#e4ddcb, #e4ddcb) 0 0 / 1.6% 100% no-repeat,
+    linear-gradient(#e4ddcb, #e4ddcb) 100% 0 / 1.6% 100% no-repeat;
+}
+
+/* ------------------------------------------------------------------ hologram: the two image backs */
+/*
+ * 'prism' and 'pearl' are pictures (art/holo/back-a / back-b). On the cards that are ever shown large — thick
+ * cards and back-only cards — the box around the two faces is a size container, so such a card can ask for the
+ * large file when it is big enough (cards.js injects that rule once Cards.preload({ large: true }) has the
+ * files) and its sheets can become layers (see .card__sheet). Table cards are left alone.
+ */
+.card--thick[data-back="prism"] .card__tilt,
+.card--thick[data-back="pearl"] .card__tilt,
+.card--back-only[data-back="prism"] .card__tilt,
+.card--back-only[data-back="pearl"] .card__tilt {
+  container: sol-card-box / inline-size;
+}
+
+/*
+ * A foil-stamped rim. The six drawn backs end in a pale border; a picture runs to the very edge of the card,
+ * and face-down cards lying on each other — the strips at the top of a column, the stock — would melt into
+ * one band of pattern, on a dark table into the table as well. A fine line of pale gold just inside the edge
+ * (in place of the dark hairline of .card__face, which cannot be seen on a picture) gives every card its own
+ * outline again. Static paint, in either card style.
+ */
+.card[data-back="prism"] .card__back,
+.card--back-only[data-back="prism"] .card__front,
+.card[data-back="pearl"] .card__back,
+.card--back-only[data-back="pearl"] .card__front {
+  --_rim: rgba(255, 236, 190, 0.86);
+  box-shadow:
+    inset 0 0 0 max(1px, calc(var(--card-w) * 0.014)) var(--_rim),
+    0 calc(var(--card-w) * 0.006) calc(var(--card-w) * 0.016) rgba(3, 8, 6, 0.42);
+}
+.card[data-back="pearl"] .card__back,
+.card--back-only[data-back="pearl"] .card__front {
+  --_rim: rgba(214, 176, 98, 0.9);
+}
+.card--thick[data-back="prism"] .card__back,
+.card--thick.card--back-only[data-back="prism"] .card__front,
+.card--thick[data-back="pearl"] .card__back,
+.card--thick.card--back-only[data-back="pearl"] .card__front {
+  box-shadow: inset 0 0 0 max(1px, calc(var(--card-w) * 0.014)) var(--_rim);
 }

@@ -23,7 +23,9 @@
  *   A cached file also refreshes by itself (see fetch). That catches a release that forgot to
  *   raise VERSION; it is no reason to skip it.
  *   Add every new runtime file to PRECACHE: tests/pwa.test.js fails when index.html or the
- *   manifest references a file that is not listed, or when a listed file does not exist.
+ *   manifest references a file that is not listed, when a picture in art/ is not listed (the
+ *   cards ask for those from CSS and script, not from index.html), or when a listed file does
+ *   not exist.
  *   Any change to this file makes the browser install it as a new worker. That worker waits until
  *   the game is launched again (js/pwa.js sends SKIP_WAITING at launch, never during a game) and
  *   no page is ever reloaded for it.
@@ -31,9 +33,9 @@
 'use strict';
 
 /* The release of the cached files; part of the cache name. Raise it when one of them changes. */
-const VERSION = 'v2';
+const VERSION = 'v4';
 
-/* The app shell: same-origin URLs relative to this file. One entry per line, load order. */
+/* The app shell and the card art: same-origin URLs relative to this file. One entry per line, load order. */
 const PRECACHE = [
   'index.html',
   'manifest.webmanifest',
@@ -64,6 +66,46 @@ const PRECACHE = [
   'icons/icon-512.png',
   'icons/icon-maskable-192.png',
   'icons/icon-maskable-512.png',
+  // The hologram card art (js/view/cards.js asks for these): the table-size pictures and the two foil
+  // tiles, which every deal needs, then the large pictures of the 3D preview and the gallery.
+  'art/holo/ace-clubs-s.webp',
+  'art/holo/ace-diamonds-s.webp',
+  'art/holo/ace-hearts-s.webp',
+  'art/holo/ace-spades-s.webp',
+  'art/holo/back-a-s.webp',
+  'art/holo/back-b-s.webp',
+  'art/holo/court-clubs-11-s.webp',
+  'art/holo/court-clubs-12-s.webp',
+  'art/holo/court-clubs-13-s.webp',
+  'art/holo/court-diamonds-11-s.webp',
+  'art/holo/court-diamonds-12-s.webp',
+  'art/holo/court-diamonds-13-s.webp',
+  'art/holo/court-hearts-11-s.webp',
+  'art/holo/court-hearts-12-s.webp',
+  'art/holo/court-hearts-13-s.webp',
+  'art/holo/court-spades-11-s.webp',
+  'art/holo/court-spades-12-s.webp',
+  'art/holo/court-spades-13-s.webp',
+  'art/holo/foil-ice.webp',
+  'art/holo/foil-sparkle.webp',
+  'art/holo/ace-clubs-l.webp',
+  'art/holo/ace-diamonds-l.webp',
+  'art/holo/ace-hearts-l.webp',
+  'art/holo/ace-spades-l.webp',
+  'art/holo/back-a-l.webp',
+  'art/holo/back-b-l.webp',
+  'art/holo/court-clubs-11-l.webp',
+  'art/holo/court-clubs-12-l.webp',
+  'art/holo/court-clubs-13-l.webp',
+  'art/holo/court-diamonds-11-l.webp',
+  'art/holo/court-diamonds-12-l.webp',
+  'art/holo/court-diamonds-13-l.webp',
+  'art/holo/court-hearts-11-l.webp',
+  'art/holo/court-hearts-12-l.webp',
+  'art/holo/court-hearts-13-l.webp',
+  'art/holo/court-spades-11-l.webp',
+  'art/holo/court-spades-12-l.webp',
+  'art/holo/court-spades-13-l.webp',
 ];
 
 /* The folder this file is served from, e.g. https://user.github.io/hero/solitaire/ */

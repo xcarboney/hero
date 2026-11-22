@@ -23,8 +23,8 @@
  *
  * SOL.Settings also applies the settings that CSS and the browser need to the document, when this
  * file loads and after every change (Settings.applyToDocument): data-theme, data-reduced-motion,
- * data-left-handed and data-effects on <html>, and the table theme's dark tone in the page's
- * <meta name="theme-color">, so a browser's own bars follow the theme.
+ * data-left-handed, data-effects and data-card-style on <html>, and the table theme's dark tone in
+ * the page's <meta name="theme-color">, so a browser's own bars follow the theme.
  *
  * Events (SOL.Bus):
  *   'settings:change'  { key, value, previous, all }
@@ -203,7 +203,11 @@
   const SCHEMA = {
     drawCount: { def: 1, ok: (v) => v === 1 || v === 3 },
     theme: { def: 'emerald', ok: (v) => ['emerald', 'midnight', 'crimson', 'slate'].indexOf(v) !== -1 },
-    cardBack: { def: 'royal', ok: (v) => typeof v === 'string' && v.length > 0 && v.length < 40 },
+    // 'prism' since the hologram cards; a player who had picked a back keeps it (their saved settings name it).
+    cardBack: { def: 'prism', ok: (v) => typeof v === 'string' && v.length > 0 && v.length < 40 },
+    // The look of the cards: 'holo' (hologram: foil, figures in a window, depth in the 3D preview) or
+    // 'classic' (the drawn cards). SOL.Cards follows it without a reload.
+    cardStyle: { def: 'holo', ok: (v) => v === 'holo' || v === 'classic' },
     sound: { def: true, ok: (v) => typeof v === 'boolean' },
     volume: { def: 0.6, ok: (v) => typeof v === 'number' && v >= 0 && v <= 1 },
     animSpeed: { def: 'normal', ok: (v) => ['slow', 'normal', 'fast'].indexOf(v) !== -1 },
@@ -310,8 +314,8 @@
     },
 
     /**
-     * Mirrors theme / reduced motion / handedness / effects onto <html> so CSS can react, and the
-     * theme's dark tone into the page's <meta name="theme-color"> (when the page has one) so the
+     * Mirrors theme / reduced motion / handedness / effects / card style onto <html> so CSS can react, and
+     * the theme's dark tone into the page's <meta name="theme-color"> (when the page has one) so the
      * browser's own bars match the table. Runs when this file loads and after every change.
      */
     applyToDocument() {
@@ -323,6 +327,7 @@
       el.setAttribute('data-reduced-motion', Settings.reducedMotion() ? 'true' : 'false');
       el.setAttribute('data-left-handed', Settings.get('leftHanded') ? 'true' : 'false');
       el.setAttribute('data-effects', Settings.get('effects'));
+      el.setAttribute('data-card-style', Settings.get('cardStyle'));
       const color = THEME_COLORS[theme];
       const meta = typeof doc.querySelector === 'function' ? doc.querySelector('meta[name="theme-color"]') : null;
       if (meta && color && meta.getAttribute('content') !== color) meta.setAttribute('content', color);

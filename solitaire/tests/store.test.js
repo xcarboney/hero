@@ -715,6 +715,76 @@ test('theme-color: a page without that meta, or without a document, is left alon
   assert.doesNotThrow(() => none.Settings.applyToDocument());
 });
 
+// ------------------------------------------------------------------ Settings: 'cardStyle' and the default back
+test("settings: 'cardStyle' is 'holo' by default and takes 'holo' or 'classic' only", () => {
+  const { Settings } = load({ localStorage: fakeLocalStorage() });
+  assert.strictEqual(Settings.get('cardStyle'), 'holo');
+  assert.strictEqual(Settings.defaults().cardStyle, 'holo');
+  for (const bad of ['Holo', 'hologram', '', 'royal', true, 1, null, undefined, {}]) {
+    assert.strictEqual(Settings.set('cardStyle', bad), false, JSON.stringify(bad));
+    assert.strictEqual(Settings.get('cardStyle'), 'holo');
+  }
+  assert.strictEqual(Settings.set('cardStyle', 'classic'), true);
+  assert.strictEqual(Settings.get('cardStyle'), 'classic');
+  assert.strictEqual(Settings.set('cardStyle', 'holo'), true);
+  assert.strictEqual(Settings.get('cardStyle'), 'holo');
+});
+
+test("settings: 'cardStyle' is stored, read back, announced and mirrored onto <html>", () => {
+  const ls = fakeLocalStorage();
+  const doc = fakeDocument();
+  const { Settings, Bus } = load({ localStorage: ls, document: doc });
+  assert.strictEqual(doc.html.attrs.get('data-card-style'), 'holo', 'on the page as soon as the file has loaded');
+  const events = [];
+  Bus.on('settings:change', (e) => events.push([e.key, e.value, e.previous]));
+  Settings.set('cardStyle', 'classic');
+  Settings.set('cardStyle', 'classic'); // no change, no event
+  assert.deepStrictEqual(events, [['cardStyle', 'classic', 'holo']]);
+  assert.strictEqual(doc.html.attrs.get('data-card-style'), 'classic');
+  assert.strictEqual(JSON.parse(ls.map.get('sol.settings.v1')).cardStyle, 'classic');
+
+  const next = fakeDocument();
+  const again = load({ localStorage: ls, document: next });
+  assert.strictEqual(again.Settings.get('cardStyle'), 'classic');
+  assert.strictEqual(next.html.attrs.get('data-card-style'), 'classic');
+  again.Settings.reset();
+  assert.strictEqual(again.Settings.get('cardStyle'), 'holo');
+  assert.strictEqual(next.html.attrs.get('data-card-style'), 'holo');
+});
+
+test("settings: a stored 'cardStyle' that is not one of the two falls back to 'holo'", () => {
+  for (const stored of ['"neon"', '1', 'null', 'true']) {
+    const ls = fakeLocalStorage({ 'sol.settings.v1': '{"cardStyle":' + stored + ',"theme":"slate"}' });
+    const { Settings } = load({ localStorage: ls });
+    assert.strictEqual(Settings.get('cardStyle'), 'holo', stored);
+    assert.strictEqual(Settings.get('theme'), 'slate', 'valid neighbours are kept');
+  }
+});
+
+test("settings: the default back is 'prism', and a player who had chosen a back keeps it", () => {
+  // a new installation
+  const fresh = load({ localStorage: fakeLocalStorage() }).Settings;
+  assert.strictEqual(fresh.get('cardBack'), 'prism');
+  assert.strictEqual(fresh.get('cardStyle'), 'holo');
+
+  // settings saved by the version before the hologram cards: every key was written, the back among them
+  const before = '{"drawCount":3,"theme":"midnight","cardBack":"ember","sound":true,"volume":0.6,"animSpeed":"normal",' +
+    '"reducedMotion":"auto","tapToMove":true,"winnableOnly":false,"leftHanded":false,"showTimer":true,"effects":"high",' +
+    '"haptics":true,"fullscreen":true}';
+  const kept = load({ localStorage: fakeLocalStorage({ 'sol.settings.v1': before }) }).Settings;
+  assert.strictEqual(kept.get('cardBack'), 'ember');
+  assert.strictEqual(kept.get('drawCount'), 3);
+  assert.strictEqual(kept.get('cardStyle'), 'holo', 'the new look is on for them too');
+
+  // the old default counts as chosen as well: it is what their saved settings say
+  const royal = load({ localStorage: fakeLocalStorage({ 'sol.settings.v1': before.replace('ember', 'royal') }) }).Settings;
+  assert.strictEqual(royal.get('cardBack'), 'royal');
+
+  // saved settings without a back (hand-edited, or written by something older): the new default
+  const none = load({ localStorage: fakeLocalStorage({ 'sol.settings.v1': '{"theme":"slate"}' }) }).Settings;
+  assert.strictEqual(none.get('cardBack'), 'prism');
+});
+
 // ------------------------------------------------------------------ the public API did not change
 test('the public API of Store, Settings, Stats and Save is what it was', () => {
   const { Store, Settings, Stats, Save } = load({ localStorage: fakeLocalStorage() });
@@ -725,11 +795,13 @@ test('the public API of Store, Settings, Stats and Save is what it was', () => {
   );
   assert.deepStrictEqual(Object.keys(Stats).sort(), ['get', 'recordStart', 'recordWin', 'reset', 'summary']);
   assert.deepStrictEqual(Object.keys(Save).sort(), ['clear', 'load', 'write']);
-  // Every setting that existed before is still there with its default.
+  // Every setting that existed before is still there with its default (the back's default became 'prism'
+  // with the hologram cards, and 'cardStyle' came with them).
   assert.deepStrictEqual(Settings.defaults(), {
     drawCount: 1,
     theme: 'emerald',
-    cardBack: 'royal',
+    cardBack: 'prism',
+    cardStyle: 'holo',
     sound: true,
     volume: 0.6,
     animSpeed: 'normal',

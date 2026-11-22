@@ -9,7 +9,9 @@ ships it as an APK.
 | Path | What it is |
 | --- | --- |
 | `solitaire/` | The game: static HTML, CSS and JavaScript. No build step, no dependencies, no network requests. |
+| `solitaire/art/` | Pictures the cards are painted with: the figures, gems, the two picture backs and the foil textures of the hologram card style (`art/holo/`, WebP). They ship with the game and go into the APK. |
 | `solitaire/tests/` | Unit tests for the game (Node's built-in test runner). |
+| `tools/holo-art/` | How the hologram card art was made and the scripts that cut it to size ([`tools/holo-art/README.md`](tools/holo-art/README.md)). Not needed to run or build the game. |
 | `android/` | The Android app (Kotlin, Gradle). It bundles `solitaire/` into the APK at build time. See [`android/README.md`](android/README.md). |
 | `.github/workflows/android.yml` | CI: runs the tests, lints the app and builds a debug APK for every pull request. |
 | `index.html`, `script.js`, `style.css` | An older, unrelated game. Not part of Solitaire 3D. |
@@ -81,6 +83,11 @@ Things to know before changing code:
 - **Styles.** `css/base.css` holds the design tokens, the four table themes and the page shell;
   the other stylesheets build on it.
 - **Adding a file the game loads.** Add it to `index.html` and to the `PRECACHE` list in
-  `sw.js`, and raise `VERSION` there; `tests/pwa.test.js` checks the list.
+  `sw.js`, and raise `VERSION` there; `tests/pwa.test.js` checks the list. A picture under
+  `solitaire/art/` is not named in `index.html` (the cards request it), but it goes into
+  `PRECACHE` all the same, and the test checks that too.
+- **Card styles.** The cards have two looks, chosen in Settings: Hologram (the default: pictures
+  from `solitaire/art/holo/` and a foil that comes alive when a card moves) and Classic (drawn
+  entirely in code). `js/view/cards.js` owns both; its header is the reference.
 - **No network.** The game makes no requests and uses system fonts only. The Android app has no
   internet permission, so anything fetched at runtime would fail there.

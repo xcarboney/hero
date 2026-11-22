@@ -3,35 +3,122 @@
  *
  * Public API
  * ----------
- *   Cards.BACKS            -> [{ id, name }]  ('royal', 'aurora', 'ember', 'lattice', 'petal', 'mono' — in this order)
- *   Cards.DEFAULT_BACK     -> 'royal'
+ *   Cards.BACKS            -> [{ id, name }]  ('royal', 'aurora', 'ember', 'lattice', 'petal', 'mono', 'prism', 'pearl'
+ *                             — in this order; the last two are pictures from art/holo/)
+ *   Cards.DEFAULT_BACK     -> 'prism'
+ *   Cards.STYLES           -> ['holo', 'classic']     Cards.DEFAULT_STYLE -> 'holo'
  *   Cards.SUITS            -> ['spades', 'hearts', 'clubs', 'diamonds']
  *   Cards.COMPACT_BELOW    -> 60   card widths (CSS px) below this show the compact front layout (see "Art notes")
- *   Cards.create(cardId, { back, thick } = {})      -> HTMLElement  full card, face-up (--flip unset = 0deg)
- *   Cards.createBackOnly(backId, { thick } = {})    -> HTMLElement  the same back on both sides (gallery previews)
+ *   Cards.HOLO             -> layout numbers of the hologram style (see "Hologram style")
+ *   Cards.create(cardId, { back, thick, style } = {})    -> HTMLElement  full card, face-up (--flip unset = 0deg)
+ *   Cards.createBackOnly(backId, { thick, style } = {})  -> HTMLElement  the same back on both sides (gallery previews)
  *   Cards.setBack(el, backId)                       -> el           unknown ids fall back to DEFAULT_BACK
+ *   Cards.setStyle(el, style)                       -> el           'holo' | 'classic': rebuilds the inside of the front;
+ *                                                                   setStyle(el) hands the card back to the setting
+ *   Cards.styleOf(el)                               -> 'holo' | 'classic'   the style a card has now
+ *   Cards.currentStyle()                            -> 'holo' | 'classic'   the 'cardStyle' setting ('holo' without SOL.Settings)
+ *   Cards.foil(el, x, y, o, edge?)                  -> el           live foil of a hologram card: light at x, y (0..1 across
+ *                                                                   the visible face), o 0..1 how alive, edge 0..1 how far a
+ *                                                                   thick card is turned away. foil(el, null) = back to rest
+ *   Cards.preload({ large, cards, backs } = {})     -> Promise      fetches and decodes the art files (never rejects);
+ *                                                                   with cards / backs: the pictures of those alone
+ *   Cards.preloaded()                               -> boolean      the table-size pictures of the style in use have
+ *                                                                   arrived: what the promise of preload() tells, asked
+ *                                                                   without waiting (see preloaded() for why both exist)
  *   Cards.setFaceUp(el, bool)                       -> el           instant: --flip 0deg / 180deg + .is-face-down
  *   Cards.isFaceUp(el)                              -> boolean      (reads the .is-face-down class)
  *   Cards.suitSvg(suit, { size, className } = {})   -> string       standalone <svg> markup, fill: currentColor;
  *                                                                   suit is 0..3 or 'spades' | 'hearts' | 'clubs' | 'diamonds'
  *   Cards.label(cardId)                             -> 'Queen of Hearts' | '7 of Clubs'
  *   Cards.info(cardId)                              -> { id, suit, rank, suitName, color: 'red' | 'black', label }
- *   Cards.backUrl(backId)                           -> string       CSS `url("data:image/svg+xml,…")` of a back design
- *                                                                   (for swatches that are not card elements)
- *   Cards.ensureAssets()                            -> void         injects the <svg> sprite + back styles (idempotent;
- *                                                                   create() calls it, so calling it is optional)
+ *   Cards.backUrl(backId)                           -> string       CSS `url("…")` of a back design, for swatches that are
+ *                                                                   not card elements: a data: URI for the six drawn backs,
+ *                                                                   the table-size picture for 'prism' and 'pearl'
+ *   Cards.ensureAssets()                            -> void         injects the back styles and the art <svg>s of the
+ *                                                                   style in use (idempotent; create() calls it, and
+ *                                                                   brings what a card of the other style needs, so
+ *                                                                   calling it is optional)
+ *
+ * Hologram style (the default; HOLO.md is the design)
+ * ---------------------------------------------------
+ * Every card has a style, written on it as data-style="holo" | "classic". create() and createBackOnly() take it
+ * from { style } or, without one, from the 'cardStyle' setting — and a card made without one keeps following
+ * the setting: on 'settings:change' this module switches every such card itself, in the document or not, so no
+ * owner has to. A Classic card is built and painted exactly as before the hologram style existed (same DOM,
+ * no image is requested for its face).
+ *
+ * A hologram front (data-face="court" | "ace" | "pips" on .card) has these boxes inside .card__front:
+ *   window cards (courts, aces):  .card__win (window floor)  .card__fig > .card__figim (the figure or gem, a
+ *                                 picture from art/holo/)  svg.card__art (pearl paper with the window cut out,
+ *                                 gold rim)  svg.card__ink (indices, fan mark, tight mark)
+ *   number cards:                 .card__foil > svg.card__art (pearl paper, foil-ink pips)  svg.card__ink (the
+ *                                 paper around the panel, the foil line, indices, fan mark, tight mark)
+ * The back of a hologram card is the same box as a classic one's. The classes .card__classic / .card__compact
+ * / .card__fan / .card__tight, data-layout, .is-fanned and .is-tight work as on a classic card. A hologram card
+ * is 16 DOM nodes (number card) or 18 (window card), 49 / 51 with { thick: true }.
+ *
+ * At rest all of it is static paint: a resting hologram card has no more compositor layers than a classic one.
+ *
+ * Live foil: the owner of a card calls Cards.foil(el, x, y, o) whenever the light on the card changes, and
+ * Cards.foil(el, null) when the card comes to rest (see foil() for the details). foil() keeps small "sheets"
+ * (<i class="card__sheet">) in the card — in .card__win and .card__foil, and in three boxes it adds for them:
+ * .card__spark (in front of the figure), .card__figfx (on the figure, thick cards) and .card__bfoil (on a
+ * picture back) — and writes their transform and opacity; the card has the class .is-holo while they exist
+ * (3 to 14 nodes more). On a table-size card the sheets are painted into the card's own layer; on a thick
+ * card, or one laid out wider than 130px, each is a compositor layer — and such a large card shows the foil
+ * as it is seen from close by: facets that stay where they are on the card (two sheets that never move, and
+ * are not displayed on a smaller card) with the sliding rainbow blended into them, so every facet answers the
+ * light in its own colour (cards.css: "live foil of a large card"). Nothing happens for a Classic card or
+ * with <html data-effects="low">. Custom properties on .card do NOT drive the foil.
+ *
+ * The two picture backs carry a fine rim of pale gold just inside the edge (cards.css), in either style, so
+ * face-down cards that lie on each other keep their outlines.
+ *
+ * Depth: on a thick window card the boxes are real planes — the window floor is a recess, the indices stand
+ * proud, the figure floats in front of the card and sparkles in front of the figure (Cards.HOLO.depth, as
+ * fractions of the card's width). The fifth argument of foil(), edge, lets the floating planes sink back as the
+ * card turns away (fully floating up to HOLO.edgeFadeFrom, sunk from HOLO.edgeFadeTo); with edge 1 a thick card
+ * looks exactly like the flat card. foil() moves the planes with inline transforms on the three boxes, not
+ * with a custom property (see applyDepth() for why). A thick number card is flat.
+ *
+ * What must not be done to a hologram card: no opacity < 1, filter, overflow, clip-path, mask or mix-blend-mode
+ * on .card, .card__tilt, .card__flip or (thick cards) .card__front — each flattens the planes; no transform
+ * with a negative scale on a thick card's ancestors (the planes are culled from behind); no innerHTML / child
+ * surgery inside .card__front or .card__back (setStyle() and foil() own those); never rotate a FLAT card past
+ * edge-on (as for classic cards).
+ *
+ * Cards.HOLO -> { panel: { x0, y0, x1, y1, notchW, notchH }, panelCompact: { x0, y0, x1, y1 },
+ *                 depth: { ink, figure, sparkle }, edgeFadeFrom, edgeFadeTo }
+ *   panel         the window of a court / ace (the foil panel of a number card) in the classic layout, as
+ *                 fractions of the card (x of its width, y of its height, from the top-left corner): a rounded
+ *                 rectangle x0..x1, y0..y1 with the top-left and the bottom-right corner stepped in by notchW x
+ *                 notchH, where the two indices stand on pearl paper
+ *   panelCompact  the same in the compact layout: the rectangle under rank and suit
+ *
+ * Images: Cards.preload() fetches and decodes what the table paints with (16 figures and gems, the two picture
+ * backs, the two foil tiles; only the backs while the style is Classic); it runs by itself when this file
+ * loads. The 720 px files are loaded on demand, picture by picture: Cards.preload({ large: true, cards: [ids],
+ * backs: [ids] }) fetches and decodes the large pictures of those cards and backs (and decodes them again when
+ * asked again), and a card that is big enough paints with the large file of a picture from the moment it is
+ * in — until then with the small one, never with nothing. A thick card asks for its own when it is made;
+ * SOL.Inspector asks for the neighbours of the card in view and for the cards on its carousel a step ahead.
+ * Cards.preload({ large: true }) without a list loads all 18, two at a time (SOL.Inspector does that when it
+ * closes, where the table's own cards are big enough to use them). Nothing in here listens for the
+ * inspector's events.
+ * All files are in art/holo/, addressed relative to this script, so nothing depends on where the page lives.
  *
  * Card model (contract section 4): id 0..51, suit = floor(id / 13) (0 spades, 1 hearts, 2 clubs, 3 diamonds),
  * rank = id % 13 + 1 (1 ace … 13 king), red when suit is odd. Derived here on purpose: no dependency on SOL.Engine.
  *
  * DOM (css/cards.css documents the custom properties each part reads, and why they are routed the way they are)
  * ---------------------------------------------------------------------------------------------------------------
- *   <div class="card [card--thick] [card--back-only] [is-face-down]" data-id data-suit data-rank data-color data-back
- *        role="img" aria-label="Queen of Hearts">
+ *   <div class="card [card--thick] [card--back-only] [is-face-down] [is-holo]" data-id data-suit data-rank data-color
+ *        data-back data-style [data-face] [data-style-fixed] role="img" aria-label="Queen of Hearts">
  *     <div class="card__shadow"></div>                         (two cross-faded lift shadows; rotates with the faces)
  *     <div class="card__tilt">
  *       <div class="card__flip">
- *         <div class="card__face card__front"><svg class="card__art">…four <use> into the sprite…</svg></div>
+ *         <div class="card__face card__front"><svg class="card__art">…four <use> into the faces…</svg></div>
+ *                                                              (a classic front; a hologram front: "Hologram style")
  *         <div class="card__face card__back"></div>            (the design is a CSS background chosen by data-back)
  *         <div class="card__edges">…</div>                     (only with { thick: true }: 4 walls + 7 strips per rounded
  *                                                                corner, each an <i class="card__edge">, lit from the top-left)
@@ -45,13 +132,20 @@
  * --sheen-o / --shadow-o (0..1). Nothing in here listens for resize: every measure derives from --card-w in CSS,
  * and the art is SVG.
  *
- * Art notes: all shapes live once in an injected <svg> sprite (#sol-card-sprite) and each front is four <use>
+ * Art notes: all shapes live once in injected <svg> elements at the top of <body> and each front is four <use>
  * elements — a classic layout (corner indices, pips, ornamental ace, double-ended courts), a compact one for
  * cards narrower than 60px (big rank + suit, one large suit or a single bust), the fan mark and the tight mark
- * (both below); a container query in cards.css shows one of the two layouts. The six backs are procedurally
- * generated SVG documents handed to CSS as data: URIs, so a face-down card costs no extra DOM. Everything is
- * original: suits, numerals, court figures and backs are drawn from scratch below. A card is 12 DOM nodes (45
- * with { thick: true }).
+ * (both below); a container query in cards.css shows one of the two layouts. The <svg>s are of two kinds (see
+ * "sprite" in the code): sprites, rendered at zero size, for what must be rendered to work — #sol-card-sprite
+ * (suit and numeral symbols, clip paths, the diaper pattern of the classic courts; always there) and
+ * #sol-card-sprite-holo (the gradients of the hologram style) — and faces, display:none, with one <g> per card
+ * and layout: #sol-card-faces (classic) and #sol-card-faces-holo. A style's part is injected with the first
+ * card of that style (when this file loads: the part of the style in use), so a page that only shows one
+ * style never builds the other's, and the faces cost neither style nor layout. The six drawn backs are
+ * procedurally generated SVG documents handed to CSS as data: URIs, so a face-down card costs no extra DOM.
+ * Suits, numerals, the classic court figures and the six drawn backs are drawn from scratch below; the
+ * hologram figures, gems, the two picture backs and the foil tiles are generated pictures in art/holo/
+ * (tools/holo-art/README.md). A classic card is 12 DOM nodes (45 with { thick: true }).
  *
  * Optional attribute: data-layout="compact" | "classic" on the .card element pins the front layout whatever the
  * card's size (unset = automatic). Nothing in here sets it.
@@ -95,8 +189,12 @@
     { id: 'lattice', name: 'Lattice' },
     { id: 'petal', name: 'Petal' },
     { id: 'mono', name: 'Mono' },
+    { id: 'prism', name: 'Prism' },
+    { id: 'pearl', name: 'Pearl' },
   ];
-  const DEFAULT_BACK = 'royal';
+  const DEFAULT_BACK = 'prism';
+  const STYLES = ['holo', 'classic'];
+  const DEFAULT_STYLE = 'holo';
   const COMPACT_BELOW = 60; // must match the container query in cards.css (max-width: 59.9px)
 
   function checkId(cardId) {
@@ -571,13 +669,31 @@
    * column squeezed below the height of the corner index (rank over suit, 0.26 of the card) cuts the suit off
    * its covered cards; the owner marks those cards .is-tight and cards.css then shows this mark (it is hidden
    * everywhere else). The corner is free on every classic face: pips end at x = 188, the court frame at 193, and
-   * the ace's sunburst starts lower. Needs no sprite group of its own: it instances the suit symbol directly.
+   * the ace's sunburst starts lower. Needs no group of its own in the faces: it instances the suit symbol directly.
    */
   function tightMarkup(suit) {
     return use('sol-suit-' + suit, 201, 13, 38, 38, ' class="card__tight"');
   }
 
   // ------------------------------------------------------------------ sprite
+  /*
+   * The art every front instances with <use> is kept in <svg> elements at the top of <body>, in two kinds
+   * (injectSvg() below adds them; ensureAssets() says which exist when):
+   *
+   *   SPRITES — what must be RENDERED to work: <symbol>, <clipPath>, <pattern> and gradients (a paint server
+   *   inside display:none paints nothing). #sol-card-sprite has the suits, the numerals and the diaper of the
+   *   classic courts, #sol-card-sprite-holo the gradients of the hologram style. Both are a few dozen elements,
+   *   shown at zero size.
+   *
+   *   FACES — the shapes: one <g> per card and layout (and the classic busts). #sol-card-faces has the classic
+   *   ones, #sol-card-faces-holo the hologram ones, and each is only made when the first card of its style is.
+   *   These are display:none. A <use> clones what it references wherever that lies, so nothing changes for
+   *   the cards; but what is not rendered is neither styled nor laid out, and that is the point: the faces of
+   *   the two styles are 3,000 elements, 7,000 with the instances of the <use>s inside them — three quarters
+   *   of everything in the document — and as rendered <defs> they were all styled and given layout objects in
+   *   the first frame of every start (measured at 4x CPU throttle: 110 of the 360 ms until the scripts had
+   *   loaded with the classic faces alone, 210 of 585 ms with the faces of both styles in the page).
+   */
   function spriteMarkup() {
     let s = '';
     for (let i = 0; i < 4; i++) {
@@ -596,6 +712,14 @@
         '<path d="M6 5.3L8.1 8.5L6 11.7L3.9 8.5Z" fill="' + COURT_PAL[suit].tint + '" opacity=".3"/>' +
         '<path d="M0 -3.2L2.1 0L0 3.2L-2.1 0ZM12 -3.2L14.1 0L12 3.2L9.9 0ZM0 13.8L2.1 17L0 20.2L-2.1 17Z' +
         'M12 13.8L14.1 17L12 20.2L9.9 17Z" fill="' + COURT_PAL[suit].tint + '" opacity=".3"/></pattern>';
+    }
+    return s;
+  }
+
+  /** The faces of the classic style: the busts, and per card its classic layout, its compact one and its fan mark. */
+  function classicFacesMarkup() {
+    let s = '';
+    for (let suit = 0; suit < 4; suit++) {
       for (let r = 11; r <= 13; r++) s += '<g id="sol-bust-' + suit + '-' + r + '">' + bustMarkup(r, suit) + '</g>';
     }
     for (let id = 0; id < 52; id++) {
@@ -604,6 +728,33 @@
       s += '<g id="sol-fan-' + id + '">' + fanMarkup(id) + '</g>';
     }
     return s;
+  }
+
+  const svgQueued = {};
+
+  /**
+   * Adds one of the art <svg> elements to the top of <body>, once: a rendered sprite (zero size) or, with
+   * `hidden`, faces that are only ever cloned by <use>. `markup` is called when the element is really made.
+   * Safe before <body> exists (it is then added on DOM ready).
+   */
+  function injectSvg(id, hidden, markup) {
+    if (doc.getElementById(id)) return;
+    const add = function () {
+      svgQueued[id] = false;
+      if (doc.getElementById(id)) return;
+      const holder = doc.createElement('div');
+      // A sprite is not display:none: its gradients, patterns and clip paths would stop working.
+      holder.innerHTML =
+        '<svg id="' + id + '" xmlns="http://www.w3.org/2000/svg" width="0" height="0" aria-hidden="true" focusable="false" style="' +
+        (hidden ? 'display:none' : 'position:absolute;width:0;height:0;overflow:hidden;pointer-events:none') + '"><defs>' +
+        markup() + '</defs></svg>';
+      doc.body.insertBefore(holder.firstChild, doc.body.firstChild);
+    };
+    if (doc.body) add();
+    else if (!svgQueued[id]) {
+      svgQueued[id] = true;
+      doc.addEventListener('DOMContentLoaded', add, { once: true });
+    }
   }
 
   // ------------------------------------------------------------------ backs (procedural SVG documents)
@@ -859,22 +1010,502 @@
   };
   const backUrlCache = {};
 
-  /** CSS url() of a back design (data: URI, so no request is ever made). */
+  /**
+   * CSS url() of a back design. The six drawn backs are data: URIs, so no request is ever made for them; the
+   * two image backs ('prism', 'pearl') are the table-size files in art/holo/, as an absolute URL.
+   */
   function backUrl(id) {
     const key = backId(id);
     if (!backUrlCache[key]) {
-      backUrlCache[key] = 'url("data:image/svg+xml,' + encodeURIComponent(BACK_BUILDERS[key]()) + '")';
+      backUrlCache[key] = IMAGE_BACKS[key]
+        ? 'url("' + artUrl(IMAGE_BACKS[key], false) + '")'
+        : 'url("data:image/svg+xml,' + encodeURIComponent(BACK_BUILDERS[key]()) + '")';
     }
     return backUrlCache[key];
   }
 
-  // ------------------------------------------------------------------ asset injection
-  let spriteQueued = false;
+  // ------------------------------------------------------------------ hologram style: art files
+  /*
+   * The generated art lives in art/holo/ next to index.html (tools/holo-art/README.md says how it was made).
+   * Every URL handed to CSS is absolute and derived from the address of this script, so the same card works
+   * from index.html, from a page in dev/, from file:// and inside the Android app.
+   */
+  const ART_BASE = (function () {
+    if (!doc) return 'art/holo/';
+    try {
+      let src = doc.currentScript && doc.currentScript.src;
+      if (!src) {
+        const tag = doc.querySelector('script[src*="js/view/cards.js"]');
+        src = tag && tag.src;
+      }
+      if (src) return new root.URL('../../art/holo/', src).href;
+      return new root.URL('art/holo/', doc.baseURI).href;
+    } catch (err) {
+      return 'art/holo/';
+    }
+  })();
+
+  /** Which cards carry a hologram window: aces and courts. */
+  function hasWindow(rank) {
+    return rank === 1 || rank > 10;
+  }
+
+  /** File name (without size suffix and extension) of the figure or gem of a window card. */
+  function figureFile(c) {
+    return c.rank === 1 ? 'ace-' + c.suitName : 'court-' + c.suitName + '-' + c.rank;
+  }
+
+  /*
+   * Two figures hold their weapon over the top-left corner, where the index sits: the King of Diamonds (axe)
+   * and the Jack of Spades (halberd). They are shown mirrored, which moves the weapon to the free corner.
+   */
+  const MIRRORED = { 51: true, 10: true };
+
+  const IMAGE_BACKS = { prism: 'back-a', pearl: 'back-b' };
+
+  function artUrl(name, large) {
+    return ART_BASE + name + (large ? '-l' : '-s') + '.webp';
+  }
+
+  // ------------------------------------------------------------------ hologram style: fronts (250 x 350)
+  /*
+   * A hologram front is built from the same suits and numerals as the classic one, in a few boxes inside
+   * .card__front (frontMarkup() writes them; cards.css says what each does and how they are stacked in depth
+   * on a thick card):
+   *   .card__win    the floor of the hologram window (courts and aces)
+   *   .card__fig    the figure or gem (courts and aces)
+   *   .card__art    paper-level art: the pearl paper around the window and its gold rim (courts and aces), or
+   *                 the foil-ink pips of a number card, inside its .card__foil
+   *   .card__foil   pearl paper and foil of a number card
+   *   .card__ink    the indices and the fan / tight marks: always above the foil, so it never tints them; on a
+   *                 number card also the paper around the panel and the foil line
+   * (Three more boxes only exist while the foil of a card is live; foil() makes them: see SHEETS.)
+   *
+   * The panel is the shape everything is built around. Classic layout: a rounded rectangle 16..234 x 16..334
+   * with the two index corners stepped out of it (41 wide, 80 high), so the indices keep their classic size and
+   * place on pearl paper. Compact layout: the area under rank and suit, 13..237 x 104..337. On a court or an ace
+   * the panel is the window; on a number card it is traced by the foil line and holds the foil.
+   */
+  const PANEL = { x0: 16, y0: 16, x1: 234, y1: 334, nx: 41, ny: 80, r: 10, rn: 8 };
+  const PANEL_COMPACT = { x0: 13, y0: 104, x1: 237, y1: 337, r: 11 };
+  const CARD_R = 18.75; // 0.075 of the width, like --card-radius
+  const PEARL = '#fbfaff';
+
+  /*
+   * The same numbers for other modules (Cards.HOLO), as fractions of the card: x of its width, y of its height,
+   * both from the top-left corner; depths are fractions of the card's WIDTH, positive towards the viewer, and
+   * must match the "depth" rules in cards.css.
+   */
+  const HOLO_LAYOUT = {
+    panel: { x0: PANEL.x0 / 250, y0: PANEL.y0 / 350, x1: PANEL.x1 / 250, y1: PANEL.y1 / 350, notchW: PANEL.nx / 250, notchH: PANEL.ny / 350 },
+    panelCompact: { x0: PANEL_COMPACT.x0 / 250, y0: PANEL_COMPACT.y0 / 350, x1: PANEL_COMPACT.x1 / 250, y1: PANEL_COMPACT.y1 / 350 },
+    depth: { ink: 0.01, figure: 0.06, sparkle: 0.075 },
+    edgeFadeFrom: 0.2,
+    edgeFadeTo: 0.8,
+  };
+
+  /** Closed path through axis-aligned corners [x, y, radius] given clockwise; every corner is rounded. */
+  function roundedPoly(pts) {
+    let d = '';
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i];
+      const a = pts[(i + pts.length - 1) % pts.length];
+      const b = pts[(i + 1) % pts.length];
+      const ux = Math.sign(a[0] - p[0]);
+      const uy = Math.sign(a[1] - p[1]);
+      const vx = Math.sign(b[0] - p[0]);
+      const vy = Math.sign(b[1] - p[1]);
+      const clockwise = -ux * vy + uy * vx > 0;
+      d += (i ? 'L' : 'M') + n(p[0] + ux * p[2]) + ' ' + n(p[1] + uy * p[2]) + 'A' + p[2] + ' ' + p[2] + ' 0 0 ' +
+        (clockwise ? 1 : 0) + ' ' + n(p[0] + vx * p[2]) + ' ' + n(p[1] + vy * p[2]);
+    }
+    return d + 'Z';
+  }
+
+  function panelPath(compact) {
+    if (compact) {
+      const q = PANEL_COMPACT;
+      return roundedPoly([[q.x0, q.y0, q.r], [q.x1, q.y0, q.r], [q.x1, q.y1, q.r], [q.x0, q.y1, q.r]]);
+    }
+    const p = PANEL;
+    return roundedPoly([
+      [p.x0 + p.nx, p.y0, p.rn], [p.x1, p.y0, p.r], [p.x1, p.y1 - p.ny, p.rn], [p.x1 - p.nx, p.y1 - p.ny, p.rn],
+      [p.x1 - p.nx, p.y1, p.rn], [p.x0, p.y1, p.r], [p.x0, p.y0 + p.ny, p.rn], [p.x0 + p.nx, p.y0 + p.ny, p.rn],
+    ]);
+  }
+
+  const CARD_PATH = roundedPoly([[0, 0, CARD_R], [250, 0, CARD_R], [250, 350, CARD_R], [0, 350, CARD_R]]);
 
   /**
-   * Injects, once: the hidden <svg> sprite every front references, and a <style> with one rule per back design
-   * (data-back on .card selects the background image of .card__back). Safe to call before <body> exists (the sprite is added on DOM ready)
-   * and self-healing: if something wiped the document, the next call puts the assets back.
+   * Paper-level art of a hologram front. A window card: the pearl paper with the panel cut out of it (the
+   * window floor lies under the hole) and the gold rim of the window. A number card: the pips in foil ink (the
+   * paper under them is the background of .card__foil). The hairline round the card is CSS (an outline).
+   */
+  function holoArtMarkup(cardId, compact) {
+    const c = info(cardId);
+    const panel = panelPath(compact);
+    if (hasWindow(c.rank)) {
+      return (
+        '<path d="' + CARD_PATH + panel + '" fill-rule="evenodd" fill="url(#sol-holo-paper)"/>' +
+        '<path d="' + panel + '" fill="none" stroke="#2a1c08" stroke-opacity=".5" stroke-width="' + (compact ? 6 : 3.6) + '"/>' +
+        '<path d="' + panel + '" fill="none" stroke="url(#sol-holo-rim)" stroke-width="' + (compact ? 4 : 2.2) + '"/>'
+      );
+    }
+    const ink = ' fill="url(#sol-holo-ink-' + (c.color === 'red' ? 'r' : 'b') + ')"';
+    return '<g' + ink + '>' + (compact ? pip(c.suit, 125, 224, 160, 0) : pipsMarkup(c.rank, c.suit)) + '</g>';
+  }
+
+  /**
+   * The top SVG of a hologram front: the indices in plain ink, above every foil. On a number card it also
+   * carries the pearl paper AROUND the panel and the foil line along it: the live foil of a number card covers
+   * its whole face, and this frame is what keeps it inside the panel and away from the indices.
+   */
+  function holoInkMarkup(cardId, compact) {
+    const c = info(cardId);
+    let s = '';
+    if (!hasWindow(c.rank)) {
+      const panel = panelPath(compact);
+      s += '<path d="' + CARD_PATH + panel + '" fill-rule="evenodd" fill="url(#sol-holo-paper)"/>' +
+        '<path d="' + panel + '" fill="none" stroke="url(#sol-holo-line)" stroke-width="' + (compact ? 3 : 1.5) + '"/>';
+    }
+    if (compact) {
+      const g = GLYPHS[c.rank];
+      return s + use('sol-rank-' + c.rank, 14, 14, (g.w * 80) / 100, 80) + use('sol-suit-' + c.suit, 168, 19, 68, 68);
+    }
+    const idx = indexMarkup(c.rank, c.suit);
+    return s + idx + '<g transform="rotate(180 125 175)">' + idx + '</g>';
+  }
+
+  /** The fan mark of a hologram front: as fanMarkup(), on a pearl chip wherever it lies over a window. */
+  function holoFanMarkup(cardId) {
+    const c = info(cardId);
+    const chip = hasWindow(c.rank);
+    const size = chip ? 46 : 54;
+    const cx = 14 + GLYPHS[c.rank].w * 0.4;
+    const y = 99;
+    let s = '';
+    if (chip) {
+      s += '<rect x="' + n(cx - size / 2 - 5) + '" y="' + (y - 3) + '" width="' + (size + 10) + '" height="' + (size + 8) +
+        '" rx="9" fill="' + PEARL + '" stroke="#2a1c08" stroke-opacity=".45" stroke-width="2.5"/>';
+    }
+    return s + use('sol-suit-' + c.suit, cx - size / 2, y, size, size);
+  }
+
+  /**
+   * The tight mark of a hologram front: as tightMarkup(); over the corner of a window the suit stands on a
+   * pearl chip (one group per suit in the faces, #sol-htight-<suit>).
+   */
+  function holoTightMarkup(c) {
+    if (!hasWindow(c.rank)) return tightMarkup(c.suit);
+    return '<use class="card__tight" href="#sol-htight-' + c.suit + '"/>';
+  }
+
+  /** The sprite of the hologram style: its gradients (see "sprite" above for the two kinds of art <svg>). */
+  function holoSpriteMarkup() {
+    const stops = function (list) {
+      return list.map((q) => '<stop offset="' + q[0] + '" stop-color="' + q[1] + '"' +
+        (q[2] === undefined ? '' : ' stop-opacity="' + q[2] + '"') + '/>').join('');
+    };
+    return (
+      // the same pearl as the CSS background of a number card (cards.css, 152deg): one paper for all 52
+      '<linearGradient id="sol-holo-paper" gradientUnits="userSpaceOnUse" x1="24.9" y1="-13.2" x2="225.1" y2="363.2">' +
+      stops([[0, '#ffffff'], [0.26, '#fcfbff'], [0.52, '#f6f3fc'], [0.76, '#f1f7f8'], [1, '#faf4ef']]) + '</linearGradient>' +
+      // foil ink: one gradient per pip, inside the black and inside the red family
+      '<linearGradient id="sol-holo-ink-b" x1=".12" y1="0" x2=".88" y2="1">' +
+      stops([[0, '#3a3f8c'], [0.34, '#1d2230'], [0.7, '#0c0e18'], [1, '#272a5e']]) + '</linearGradient>' +
+      '<linearGradient id="sol-holo-ink-r" x1=".12" y1="0" x2=".88" y2="1">' +
+      stops([[0, '#f2506e'], [0.36, '#c8283c'], [0.72, '#9a0f2c'], [1, '#d5305e']]) + '</linearGradient>' +
+      '<linearGradient id="sol-holo-rim" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="250" y2="350">' +
+      stops([[0, '#fff3c4'], [0.2, '#e2b24c'], [0.42, '#fbe7a6'], [0.6, '#c78d2c'], [0.8, '#f6dc94'], [1, '#d9a441']]) +
+      '</linearGradient>' +
+      '<linearGradient id="sol-holo-line" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="250" y2="350">' +
+      stops([[0, '#e6bf62'], [0.25, '#ef9fc3'], [0.5, '#8fcdee'], [0.75, '#9fe0bf'], [1, '#e6bf62']]) + '</linearGradient>'
+    );
+  }
+
+  /** The faces of the hologram style: per card its art and its ink in both layouts and its fan mark; the tight chips. */
+  function holoFacesMarkup() {
+    let s = '';
+    for (let suit = 0; suit < 4; suit++) {
+      s += '<g id="sol-htight-' + suit + '"><rect x="195" y="7" width="50" height="50" rx="10" fill="' + PEARL +
+        '" stroke="#2a1c08" stroke-opacity=".45" stroke-width="1.6"/>' + use('sol-suit-' + suit, 201, 13, 38, 38) + '</g>';
+    }
+    for (let id = 0; id < 52; id++) {
+      s += '<g id="sol-hface-' + id + '">' + holoArtMarkup(id, false) + '</g>';
+      s += '<g id="sol-hmini-' + id + '">' + holoArtMarkup(id, true) + '</g>';
+      s += '<g id="sol-hidx-' + id + '">' + holoInkMarkup(id, false) + '</g>';
+      s += '<g id="sol-hmidx-' + id + '">' + holoInkMarkup(id, true) + '</g>';
+      s += '<g id="sol-hfan-' + id + '">' + holoFanMarkup(id) + '</g>';
+    }
+    return s;
+  }
+
+  /**
+   * A seamless tile of small four-point stars and dots with real transparency, as a CSS url(): the sparkles
+   * that float in front of a window card. (foil-sparkle.webp has a black ground: it serves the layers that are
+   * blended, this one serves the layer that is not.)
+   */
+  function sparkleUrl(seed) {
+    const rnd = prng(seed);
+    const size = 240;
+    const tints = ['#ffffff', '#fff6d8', '#e4f4ff', '#ffe6f4', '#e9ffef'];
+    let s = '';
+    for (let i = 0; i < 26; i++) {
+      const x = rnd() * size;
+      const y = rnd() * size;
+      const r = 1.4 + rnd() * rnd() * 5.6;
+      const tint = tints[Math.floor(rnd() * tints.length)];
+      const o = n(0.55 + rnd() * 0.45);
+      // drawn again across the tile edges, so a star that crosses an edge is whole when the tile repeats
+      [[0, 0], [size, 0], [-size, 0], [0, size], [0, -size]].forEach((sh) => {
+        const cx = x + sh[0];
+        const cy = y + sh[1];
+        if (cx < -r || cx > size + r || cy < -r || cy > size + r) return;
+        if (r < 3.2) {
+          s += '<circle cx="' + n(cx) + '" cy="' + n(cy) + '" r="' + n(r * 0.42) + '" fill="' + tint + '" opacity="' + o + '"/>';
+          return;
+        }
+        const k = r * 0.14;
+        s += '<path d="M' + n(cx) + ' ' + n(cy - r) + 'Q' + n(cx + k) + ' ' + n(cy - k) + ' ' + n(cx + r) + ' ' + n(cy) +
+          'Q' + n(cx + k) + ' ' + n(cy + k) + ' ' + n(cx) + ' ' + n(cy + r) + 'Q' + n(cx - k) + ' ' + n(cy + k) + ' ' +
+          n(cx - r) + ' ' + n(cy) + 'Q' + n(cx - k) + ' ' + n(cy - k) + ' ' + n(cx) + ' ' + n(cy - r) + 'Z" fill="' + tint +
+          '" opacity="' + o + '"/>' +
+          '<circle cx="' + n(cx) + '" cy="' + n(cy) + '" r="' + n(r * 0.55) + '" fill="' + tint + '" opacity=".28"/>';
+      });
+    }
+    return 'url("data:image/svg+xml,' + encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + size + ' ' + size + '" width="' + size + '" height="' + size + '">' +
+      s + '</svg>') + '")';
+  }
+
+  /** The rules that give every window card its figure, as text for a <style>: table size or large. */
+  function figureRules(large, only) {
+    let css = '';
+    for (let id = 0; id < 52; id++) {
+      const c = info(id);
+      if (!hasWindow(c.rank) || (only && !only[figureFile(c)])) continue;
+      css += '.card[data-id="' + id + '"] .card__fig{--fig:url("' + artUrl(figureFile(c), large) + '")}';
+    }
+    return css;
+  }
+
+  /** The same for the two picture backs. `only` (both functions): just the files named in that { name: true }. */
+  function imageBackRules(large, only) {
+    return Object.keys(IMAGE_BACKS).filter((id) => !only || only[IMAGE_BACKS[id]]).map((id) =>
+      '.card[data-back="' + id + '"] .card__back,.card--back-only[data-back="' + id + '"] .card__front{background-image:url("' +
+      artUrl(IMAGE_BACKS[id], large) + '")}').join('');
+  }
+
+  /**
+   * Injects, once, what only hologram cards need: their sprite and their faces (#sol-card-sprite-holo,
+   * #sol-card-faces-holo: see "sprite") and a <style> (#sol-card-holo) with the figure of every window card
+   * and the sparkle tiles. A page that only ever shows Classic cards never gets any of them, and never
+   * requests a figure.
+   */
+  function ensureHoloAssets() {
+    if (!doc) return;
+    if (!doc.getElementById('sol-card-holo')) {
+      const style = doc.createElement('style');
+      style.id = 'sol-card-holo';
+      style.textContent = figureRules(false) +
+        '\n.card__sheet--glint{background-image:' + sparkleUrl(90210) + '}' +
+        '\n.card__sheet--glint-b{background-image:' + sparkleUrl(31337) + '}';
+      (doc.head || doc.documentElement).appendChild(style);
+    }
+    injectSvg('sol-card-sprite-holo', false, holoSpriteMarkup);
+    injectSvg('sol-card-faces-holo', true, holoFacesMarkup);
+  }
+
+  /**
+   * Injects, once, what only Classic cards need: their faces (#sol-card-faces: see "sprite"). A page that only
+   * ever shows hologram cards never gets them.
+   */
+  function ensureClassicAssets() {
+    if (doc) injectSvg('sol-card-faces', true, classicFacesMarkup);
+  }
+
+  // ------------------------------------------------------------------ hologram style: loading the images
+  // small / large: the two sets as a whole ({ key, done }); jobs: url -> the promise of loadImage(); done: url ->
+  // true once it is decoded; byUrl: url -> its Image; ready: file name -> true once big cards use its large file
+  const loaded = { small: null, large: null, keep: [], byUrl: {}, jobs: {}, done: {}, ready: {} };
+
+  /** Fetches and decodes one picture; asked for the same one again, it returns the same work. */
+  function loadImage(url) {
+    if (loaded.jobs[url]) return loaded.jobs[url];
+    const job = new Promise(function (resolve) {
+      let img;
+      try {
+        img = new root.Image();
+      } catch (err) {
+        resolve(false);
+        return;
+      }
+      loaded.keep.push(img); // held on purpose: the browser keeps what a live Image points at
+      loaded.byUrl[url] = img;
+      img.decoding = 'async';
+      img.src = url;
+      const ok = function () {
+        loaded.done[url] = true;
+        resolve(true);
+      };
+      const fail = function () { resolve(false); };
+      if (typeof img.decode === 'function') img.decode().then(ok, fail);
+      else {
+        img.onload = ok;
+        img.onerror = fail;
+      }
+    });
+    loaded.jobs[url] = job;
+    return job;
+  }
+
+  /**
+   * Loads pictures a few at a time, in the order given: for the large set as a whole. Its 18 decodes started
+   * at once keep every core busy for as long as they take (measured at 4x CPU throttle while a card flew up
+   * into the 3D preview: 18 frames in the first 0.8 s instead of 27, one of them over 200 ms); two at a time
+   * leave room for whatever is animating just then.
+   */
+  function loadInTurn(urls, atOnce) {
+    let next = 0;
+    const lane = function () {
+      return next < urls.length ? loadImage(urls[next++]).then(lane) : Promise.resolve();
+    };
+    const lanes = [];
+    for (let i = 0; i < atOnce; i++) lanes.push(lane());
+    return Promise.all(lanes);
+  }
+
+  /**
+   * From now on, cards that are big enough paint with the large file of each picture named here (file names
+   * without size and extension): any card laid out at 200 CSS px or wider, at 160 px or wider on a screen with
+   * 1.5 or more device pixels per px, at 125 px or wider with 2.5 or more — more device pixels across than the
+   * table-size files have (300), which is more than a phone's or a tablet's table ever gives a card (a large
+   * tablet's or a desktop's may). sol-card is the front of a card, sol-card-box the box around both faces of a
+   * thick or back-only card. A picture is only ever named here once it is decoded: a rule that named a file
+   * still on its way would leave the window empty until it arrived; until then the card shows the small one.
+   */
+  function showLarge(names) {
+    let fresh = false;
+    for (let i = 0; i < names.length; i++) {
+      if (!loaded.ready[names[i]]) loaded.ready[names[i]] = fresh = true;
+    }
+    if (!fresh) return;
+    let style = doc.getElementById('sol-card-holo-large');
+    if (!style) {
+      style = doc.createElement('style');
+      style.id = 'sol-card-holo-large';
+      (doc.head || doc.documentElement).appendChild(style);
+    }
+    const sized = function (container, rules) {
+      return '@container ' + container + ' (min-width: 200px){' + rules + '}' +
+        '\n@media (min-resolution: 1.5dppx){@container ' + container + ' (min-width: 160px){' + rules + '}}' +
+        '\n@media (min-resolution: 2.5dppx){@container ' + container + ' (min-width: 125px){' + rules + '}}';
+    };
+    style.textContent = sized('sol-card', figureRules(true, loaded.ready)) + '\n' + sized('sol-card-box', imageBackRules(true, loaded.ready));
+  }
+
+  /**
+   * Fetches and decodes the images the cards paint with, so the first deal does not show empty windows or a
+   * blank back: the table-size figures and gems, the two image backs and the two foil tiles. With
+   * { large: true } also all the large figures and backs, two at a time; cards that are big enough then paint
+   * with them (see showLarge()). Classic cards need none of the figures: while the style is Classic only the
+   * backs are fetched. { style } overrides the setting for one call. Returns a promise that never rejects;
+   * calling it again returns the same work.
+   *
+   * With { cards: [card ids] } and / or { backs: [back ids] } the call is about those pictures alone, in the
+   * size { large } says (cards and backs without a picture are skipped, and so are the figures while the style
+   * is Classic): it fetches the ones that are not here yet and has all of them decoded now. This is how the
+   * large pictures are meant to be asked for — on demand, the few a card needs: a thick card asks for its own
+   * when it is made, and the 3D preview for the neighbours of the card in view and the cards coming onto its
+   * carousel, a moment before they show. (A browser may also drop a decoded picture it has not painted for a
+   * while; asking again brings it back, at next to no cost while it is still there.) A large picture asked
+   * for like this is used by big cards as soon as it is in. Resolves when they are decoded.
+   */
+  function preload(opts) {
+    const o = opts || {};
+    if (!doc || typeof root.Image !== 'function') return Promise.resolve();
+    const holo = (STYLES.indexOf(o.style) !== -1 ? o.style : currentStyle()) === 'holo';
+    if (Array.isArray(o.cards) || Array.isArray(o.backs)) {
+      const wanted = [];
+      (holo && o.cards ? o.cards : []).forEach(function (id) {
+        if (Number.isInteger(id) && id >= 0 && id <= 51 && hasWindow(info(id).rank)) wanted.push(figureFile(info(id)));
+      });
+      (o.backs || []).forEach(function (id) {
+        if (Object.prototype.hasOwnProperty.call(IMAGE_BACKS, id)) wanted.push(IMAGE_BACKS[id]);
+      });
+      return Promise.all(wanted.map(function (name) {
+        const url = artUrl(name, !!o.large);
+        const img = loaded.byUrl[url];
+        if (!loaded.done[url] || typeof img.decode !== 'function') return loadImage(url); // (not here yet, or on its way)
+        return img.decode().then(function () { return true; }, function () { return false; });
+      })).then(function (ok) {
+        if (o.large) showLarge(wanted.filter((name, i) => ok[i]));
+      });
+    }
+    const names = function (withFaces) {
+      const list = Object.keys(IMAGE_BACKS).map((id) => IMAGE_BACKS[id]);
+      if (withFaces) for (let id = 0; id < 52; id++) if (hasWindow(info(id).rank)) list.push(figureFile(info(id)));
+      return list;
+    };
+    const key = holo ? 'holo' : 'classic';
+    if (!loaded.small || (holo && loaded.small.key !== 'holo')) {
+      const urls = names(holo).map((name) => artUrl(name, false));
+      if (holo) urls.push(ART_BASE + 'foil-ice.webp', ART_BASE + 'foil-sparkle.webp');
+      loaded.small = { key: key, urls: urls, done: Promise.all(urls.map(loadImage)) };
+    }
+    if (!o.large) return loaded.small.done.then(function () {});
+    if (!loaded.large || (holo && loaded.large.key !== 'holo')) {
+      const all = names(holo);
+      const work = loadInTurn(all.map((name) => artUrl(name, true)), 2).then(function () {
+        showLarge(all.filter((name) => loaded.done[artUrl(name, true)]));
+      });
+      loaded.large = { key: key, done: work };
+    }
+    return Promise.all([loaded.small.done, loaded.large.done]).then(function () {});
+  }
+
+  /**
+   * Are the pictures of preload() in — the table-size set of the card style in use? The same question the
+   * promise of preload() answers, asked without waiting: true once every file of the set has arrived (or
+   * failed for good). An owner that holds its cards back until the pictures are there asks this as well as
+   * waiting for the promise, because the promise can be late by a whole frame: it resolves in a task of its
+   * own, and after a busy start-up the browser renders a frame before it gets round to that task — although
+   * the files were in all along (measured over reloads at 4x CPU throttle: the cards 60 to 220 ms late in six
+   * starts out of sixteen). A file that has arrived is painted with the frame it is first used in: the browser
+   * decodes it for that frame if preload()'s own decode has not finished.
+   * False before preload() was ever called for this style.
+   */
+  function preloaded() {
+    if (!doc || typeof root.Image !== 'function') return true;
+    const set = loaded.small;
+    if (!set || (set.key !== 'holo' && currentStyle() === 'holo')) return false;
+    for (let i = 0; i < set.urls.length; i++) {
+      const img = loaded.byUrl[set.urls[i]];
+      if (img && !loaded.done[set.urls[i]] && !img.complete) return false;
+    }
+    return true;
+  }
+
+  // ------------------------------------------------------------------ style
+  /** The card style new cards get: the 'cardStyle' setting where SOL.Settings has one, else 'holo'. */
+  function currentStyle() {
+    try {
+      const s = SOL.Settings && SOL.Settings.get && SOL.Settings.get('cardStyle');
+      if (STYLES.indexOf(s) !== -1) return s;
+    } catch (err) {
+      /* a Settings without the key (an older store.js): fall through */
+    }
+    return DEFAULT_STYLE;
+  }
+
+  // ------------------------------------------------------------------ asset injection
+  /**
+   * Injects, once: a <style> with one rule per back design (data-back on .card selects the background image of
+   * .card__back), the sprite both styles draw from (#sol-card-sprite: suits, numerals) and everything else
+   * the card style in use needs — ensureHoloAssets() or ensureClassicAssets(). The other style's part is not
+   * built here: it comes with the first card of that style (markStyle()), so a start-up pays for one style.
+   * Safe to call before <body> exists (the <svg> elements are added on DOM ready) and self-healing: if
+   * something wiped the document, the next call puts the assets back.
    */
   function ensureAssets() {
     if (!doc) return;
@@ -887,24 +1518,9 @@
         backUrl(b.id) + '}').join('\n');
       (doc.head || doc.documentElement).appendChild(style);
     }
-
-    if (doc.getElementById('sol-card-sprite')) return;
-    const addSprite = function () {
-      spriteQueued = false;
-      if (doc.getElementById('sol-card-sprite')) return;
-      const holder = doc.createElement('div');
-      // Not display:none — gradients/uses inside a display:none <svg> fail to render in some browsers.
-      holder.innerHTML =
-        '<svg id="sol-card-sprite" xmlns="http://www.w3.org/2000/svg" width="0" height="0" aria-hidden="true" focusable="false"' +
-        ' style="position:absolute;width:0;height:0;overflow:hidden;pointer-events:none"><defs>' + spriteMarkup() +
-        '</defs></svg>';
-      doc.body.insertBefore(holder.firstChild, doc.body.firstChild);
-    };
-    if (doc.body) addSprite();
-    else if (!spriteQueued) {
-      spriteQueued = true;
-      doc.addEventListener('DOMContentLoaded', addSprite, { once: true });
-    }
+    injectSvg('sol-card-sprite', false, spriteMarkup);
+    if (currentStyle() === 'holo') ensureHoloAssets();
+    else ensureClassicAssets();
   }
 
   // ------------------------------------------------------------------ thickness (edge walls)
@@ -971,6 +1587,37 @@
   }
 
   // ------------------------------------------------------------------ element builders
+  const SVG_OPEN = ' viewBox="0 0 250 350" aria-hidden="true" focusable="false">';
+
+  /** What goes inside .card__front: the classic art, or the boxes of a hologram front (see holoArtMarkup). */
+  function frontMarkup(c, style) {
+    if (style !== 'holo') {
+      return (
+        '<svg class="card__art"' + SVG_OPEN +
+        '<use class="card__classic" href="#sol-face-' + c.id + '"/>' +
+        '<use class="card__compact" href="#sol-mini-' + c.id + '"/>' +
+        '<use class="card__fan" href="#sol-fan-' + c.id + '"/>' +
+        tightMarkup(c.suit) + '</svg>'
+      );
+    }
+    const win = hasWindow(c.rank);
+    const art =
+      '<svg class="card__art"' + SVG_OPEN +
+      '<use class="card__classic" href="#sol-hface-' + c.id + '"/>' +
+      '<use class="card__compact" href="#sol-hmini-' + c.id + '"/></svg>';
+    return (
+      (win
+        ? '<div class="card__win"></div>' +
+          '<div class="card__fig"' + (MIRRORED[c.id] ? ' data-mirror' : '') + '><i class="card__figim"></i></div>' + art
+        : '<div class="card__foil">' + art + '</div>') +
+      '<svg class="card__ink"' + SVG_OPEN +
+      '<use class="card__classic" href="#sol-hidx-' + c.id + '"/>' +
+      '<use class="card__compact" href="#sol-hmidx-' + c.id + '"/>' +
+      '<use class="card__fan" href="#sol-hfan-' + c.id + '"/>' +
+      holoTightMarkup(c) + '</svg>'
+    );
+  }
+
   function shell(front, thick) {
     return (
       '<div class="card__shadow"></div>' +
@@ -983,13 +1630,36 @@
     );
   }
 
+  function resolveStyle(value) {
+    return STYLES.indexOf(value) !== -1 ? value : currentStyle();
+  }
+
+  /** Writes the attributes a style needs on .card and makes sure its assets are in the document. */
+  function markStyle(el, style, fixed, c) {
+    el.setAttribute('data-style', style);
+    if (fixed) el.setAttribute('data-style-fixed', '');
+    else el.removeAttribute('data-style-fixed');
+    if (c && style === 'holo') el.setAttribute('data-face', c.rank === 1 ? 'ace' : c.rank > 10 ? 'court' : 'pips');
+    else el.removeAttribute('data-face');
+    if (style === 'holo') {
+      ensureHoloAssets();
+      preload({ style: 'holo' });
+      // a thick card is shown large: it asks for its own large pictures (and for no others)
+      if (el.classList.contains('card--thick')) {
+        preload({ style: 'holo', large: true, cards: c ? [c.id] : [], backs: [el.getAttribute('data-back')] });
+      }
+    } else if (c) ensureClassicAssets(); // (a back-only card has no art)
+  }
+
   /**
    * Full card, face-up. `back` is one of Cards.BACKS ids (default DEFAULT_BACK); `thick: true` adds visible
-   * thickness for big 3D presentations (about 33 extra elements — use it for a few cards, not the whole table).
+   * thickness for big 3D presentations (about 33 extra elements — use it for a few cards, not the whole table);
+   * `style` is 'holo' or 'classic' (default: the 'cardStyle' setting, which the card then keeps following).
    */
   function create(cardId, opts) {
     const c = info(cardId);
     const o = opts || {};
+    const style = resolveStyle(o.style);
     ensureAssets();
     const el = doc.createElement('div');
     el.className = 'card' + (o.thick ? ' card--thick' : '');
@@ -1000,28 +1670,343 @@
     el.setAttribute('data-back', backId(o.back));
     el.setAttribute('role', 'img');
     el.setAttribute('aria-label', c.label);
-    el.innerHTML = shell(
-      '<svg class="card__art" viewBox="0 0 250 350" aria-hidden="true" focusable="false">' +
-        '<use class="card__classic" href="#sol-face-' + c.id + '"/>' +
-        '<use class="card__compact" href="#sol-mini-' + c.id + '"/>' +
-        '<use class="card__fan" href="#sol-fan-' + c.id + '"/>' +
-        tightMarkup(c.suit) + '</svg>',
-      !!o.thick
-    );
+    markStyle(el, style, STYLES.indexOf(o.style) !== -1, c);
+    el.innerHTML = shell(frontMarkup(c, style), !!o.thick);
+    if (STYLES.indexOf(o.style) === -1) follow(el);
     return el;
   }
 
-  /** A card showing the same back design on both sides (for back pickers and gallery previews). */
+  /**
+   * A card showing the same back design on both sides (for back pickers and gallery previews). `style` as in
+   * create(): a hologram card can show live foil on the two image backs, a classic one never does.
+   */
   function createBackOnly(id, opts) {
     const o = opts || {};
     const key = backId(id);
+    const style = resolveStyle(o.style);
     ensureAssets();
     const el = doc.createElement('div');
     el.className = 'card card--back-only' + (o.thick ? ' card--thick' : '');
     el.setAttribute('data-back', key);
     el.setAttribute('role', 'img');
     el.setAttribute('aria-label', 'Card back: ' + backName(key));
+    markStyle(el, style, STYLES.indexOf(o.style) !== -1, null);
     el.innerHTML = shell('', !!o.thick);
+    if (STYLES.indexOf(o.style) === -1) follow(el);
+    return el;
+  }
+
+  /**
+   * Switches an existing card (from create() or createBackOnly()) to 'holo' or 'classic': the inside of its
+   * front is rebuilt, everything the owner set on the .card element (transform, classes, custom properties,
+   * the back) stays. A style given here is kept; setStyle(el) without one hands the card back to the
+   * 'cardStyle' setting.
+   */
+  function setStyle(el, value) {
+    if (!el || !el.classList || !el.classList.contains('card')) return el;
+    const fixed = STYLES.indexOf(value) !== -1;
+    const style = resolveStyle(value);
+    const backOnly = el.classList.contains('card--back-only');
+    const id = el.getAttribute('data-id');
+    const c = backOnly || id === null ? null : info(Number(id));
+    const same = el.getAttribute('data-style') === style;
+    if (!same) foil(el, null); // its sheets live in boxes that are about to be replaced
+    markStyle(el, style, fixed, c);
+    if (same || !c) return el; // (a back-only card has nothing inside its faces in either style)
+    const front = el.querySelector('.card__front');
+    if (front) front.innerHTML = frontMarkup(c, style);
+    return el;
+  }
+
+  /*
+   * Cards that follow the setting. Weak references, so a card nobody holds any more is simply forgotten; a
+   * browser without WeakRef still switches every card that is in the document (see followSetting).
+   */
+  const followers = typeof root.WeakRef === 'function' ? [] : null;
+
+  function follow(el) {
+    if (!followers) return;
+    if (followers.length >= 512) pruneFollowers();
+    followers.push(new root.WeakRef(el));
+  }
+
+  function pruneFollowers() {
+    let k = 0;
+    for (let i = 0; i < followers.length; i++) {
+      const el = followers[i].deref();
+      if (el && !el.hasAttribute('data-style-fixed')) followers[k++] = followers[i];
+    }
+    followers.length = k;
+  }
+
+  /**
+   * Every card that follows the setting takes the style it has now: cards in the document, and cards their
+   * owner keeps outside it (a cache, a pool). Runs on 'settings:change' for 'cardStyle'.
+   */
+  function followSetting() {
+    if (!doc) return;
+    const style = currentStyle();
+    const switchIt = function (el) {
+      if (el.getAttribute('data-style') !== style && !el.hasAttribute('data-style-fixed')) setStyle(el);
+    };
+    const cards = doc.querySelectorAll('.card[data-style]:not([data-style-fixed])');
+    for (let i = 0; i < cards.length; i++) switchIt(cards[i]);
+    if (!followers) return;
+    pruneFollowers();
+    for (let i = 0; i < followers.length; i++) {
+      const el = followers[i].deref();
+      if (el) switchIt(el);
+    }
+  }
+
+  // ------------------------------------------------------------------ live foil
+  /*
+   * A resting hologram card is static paint. While its owner calls foil() for it, the card carries SHEETS:
+   * small boxes (cards.css says what each one shows), created on the first call and removed by
+   * foil(el, null). Every call only writes `transform` and `opacity` on those sheets — nothing is inherited
+   * through the card, so the card art is never restyled (measured: 14 times less style work per frame than the
+   * same effect driven by custom properties on .card).
+   *
+   * One entry per sheet: cls -> class card__sheet--<cls>; host -> the box it goes into; first -> under the
+   * host's other content instead of over it; m -> how far it slides, in percent of its own size per unit of
+   * light position (none: it stays put); k -> its opacity at o = 1; big -> laid out at half size and scaled
+   * up by 2 (see cards.css); tw -> it twinkles (a phase in degrees); peak -> it only shows while the light is
+   * near this x (0..1), fading out over 0.45 to either side; inner -> it has an inner <b> that carries its
+   * picture (see cards.css); thick -> only on a thick card.
+   *
+   * Hosts: 'win' and 'foil' are the window floor and the paper of the card as built. The other three exist
+   * for the foil alone and only while the card is live, so foil() makes and removes them with the sheets:
+   *   'figfx'  .card__figfx inside .card__fig      the figure's own light
+   *   'spark'  .card__spark, just under .card__ink the sparkles in front of the figure
+   *   'bfoil'  .card__bfoil inside a face that shows a picture back
+   *
+   * Two kinds are for LARGE cards only (cards.css shows them from a width of 130px and gives the moving sheets
+   * of such a card another picture): 'ice' in the window and 'facet' in the paper of a number card are the
+   * facets of the foil itself. They have no `m`: they stay where they are on the card, as the facets of real
+   * cut foil do, and the rainbow that slides over them is blended INTO them, so every facet answers the light
+   * in its own colour and at its own moment. At table size the facets would be noise two pixels wide: there the
+   * two sheets are not displayed, and the rainbow brings its own, larger shards along.
+   *
+   * Everything a sheet does is `transform`, `opacity` and, for most kinds, a blend into the flat box it lies
+   * in (screen, color-dodge or color-burn). No mask, clip-path or filter is ever applied while compositing: a
+   * masked sheet on the figure and a clip-path round the sparkles cost a thick card a third of its frame rate
+   * when they were tried (16.7 -> 22.9 ms per frame at 4x CPU throttle; without them the live foil measures
+   * the same as no foil).
+   */
+  const SHEETS = {
+    window: [
+      { cls: 'ice', host: 'win', k: 0.26 },
+      { cls: 'rainbow', host: 'win', m: 72, k: 0.75, big: true },
+      { cls: 'stars', host: 'win', m: -50, k: 1, big: true, tw: 255 },
+      { cls: 'glow', host: 'figfx', k: 0.8, peak: 0.26, inner: true, thick: true },
+      { cls: 'glow-b', host: 'figfx', k: 0.8, peak: 0.74, inner: true, thick: true },
+      { cls: 'glint', host: 'spark', m: 16, k: 0.9, tw: 0 },
+      { cls: 'glint-b', host: 'spark', m: -12, k: 0.9, tw: 150, thick: true },
+    ],
+    pips: [
+      { cls: 'paper', host: 'foil', first: true, m: 72, k: 0.9, big: true },
+      { cls: 'facet', host: 'foil', first: true, k: 0.22 }, // (after 'paper', so it lands under it)
+      { cls: 'light', host: 'foil', m: 72, k: 0.6, big: true },
+    ],
+    back: [
+      { cls: 'back', host: 'bfoil', m: 72, k: 0.5, big: true },
+      { cls: 'stars', host: 'bfoil', m: -50, k: 1, big: true, tw: 255 },
+    ],
+  };
+  // .card -> { sig, lit, built, sheets: [{ el, def, t, o }], hosts: [el], front, deep, depth, ink, fig, spark }
+  const liveCards = new WeakMap();
+
+  function clamp01(v) {
+    return v > 0 ? (v < 1 ? v : 1) : 0;
+  }
+
+  /** What decides which sheets a card needs; when it changes, they are rebuilt. */
+  function foilSignature(el) {
+    return (el.classList.contains('is-face-down') ? 'd' : 'u') + (el.classList.contains('card--thick') ? 't' : 'f') +
+      el.getAttribute('data-back');
+  }
+
+  function removeSheets(st) {
+    const gone = st.sheets.map((s) => s.el).concat(st.hosts);
+    for (let i = 0; i < gone.length; i++) if (gone[i].parentNode) gone[i].parentNode.removeChild(gone[i]);
+    st.sheets = [];
+    st.hosts = [];
+    st.spark = null;
+  }
+
+  /*
+   * Depth of a thick window card (the `edge` argument of foil()): how far its three floating planes — indices,
+   * figure, sparkles — stand off the face, as a factor from 1 (fully: the resting card) to 0 (sunk): 1 up to
+   * HOLO.edgeFadeFrom, 0 from HOLO.edgeFadeTo. The planes are moved with inline transforms — the expressions
+   * cards.css has for the resting card ("depth"), with the factor put in — and not with a custom property for
+   * those rules to read. A custom property that changes on an ancestor makes the browser repaint every box
+   * below it that paints a picture, which here are the window floor and the figure, both large, once per frame
+   * of a turning card; a transform that changes repaints nothing. (Measured in the 3D preview, a 40-frame
+   * turn: 35 repaints of each of the two layers with the property, none with the transforms; at 4x CPU
+   * throttle the frame interval of a turn went from 17.7 to 17.1 ms, and from 53 to 29 ms for a card zoomed
+   * in to 2.4.) In the compact layout the figure stays in the window whatever is written here: cards.css
+   * says so with !important.
+   */
+  function r5(v) {
+    return Math.round(v * 100000) / 100000;
+  }
+
+  function applyDepth(st) {
+    const f = st.depth;
+    if (f < 0 || !st.deep) return;
+    const D = HOLO_LAYOUT.depth;
+    if (st.ink) st.ink.style.transform = 'translateZ(calc(1px + var(--card-w) * ' + r5(D.ink * f) + '))';
+    if (st.fig) st.fig.style.transform = 'translateZ(calc(-0.2px + (var(--card-w) * ' + D.figure + ' + 0.2px) * ' + f + '))';
+    if (st.spark) st.spark.style.transform = 'translateZ(calc(1.5px + var(--card-w) * ' + r5(D.sparkle * f) + '))';
+  }
+
+  function setDepth(st, edge) {
+    if (!st.deep) return;
+    const from = HOLO_LAYOUT.edgeFadeFrom;
+    const to = HOLO_LAYOUT.edgeFadeTo;
+    const f = Math.round(clamp01((to - edge) / (to - from)) * 250) / 250; // steps far below a tenth of a pixel
+    if (f === st.depth) return;
+    st.depth = f;
+    applyDepth(st);
+  }
+
+  function clearDepth(st) {
+    if (st.depth < 0) return;
+    st.depth = -1;
+    if (st.ink) st.ink.style.removeProperty('transform');
+    if (st.fig) st.fig.style.removeProperty('transform');
+  }
+
+  /** The box of a face that sheets of kind `name` go into; the foil-only ones are made here (see SHEETS). */
+  function sheetHost(face, name, st) {
+    let host = face.querySelector('.card__' + name);
+    if (host || name === 'win' || name === 'foil') return host;
+    const parent = name === 'figfx' ? face.querySelector('.card__fig') : face;
+    if (!parent) return null;
+    host = doc.createElement('i');
+    host.className = 'card__' + name;
+    parent.insertBefore(host, name === 'spark' ? face.querySelector('.card__ink') : null);
+    st.hosts.push(host);
+    if (name === 'spark') st.spark = host;
+    return host;
+  }
+
+  function buildSheets(el, st) {
+    const thick = el.classList.contains('card--thick');
+    const down = el.classList.contains('is-face-down');
+    const imageBack = !!IMAGE_BACKS[el.getAttribute('data-back')];
+    const add = function (face, defs) {
+      for (let i = 0; i < defs.length; i++) {
+        const def = defs[i];
+        if (def.thick && !thick) continue;
+        const host = sheetHost(face, def.host, st);
+        if (!host) continue;
+        const s = doc.createElement('i');
+        s.className = 'card__sheet card__sheet--' + def.cls;
+        if (def.inner) s.appendChild(doc.createElement('b'));
+        if (def.first) host.insertBefore(s, host.firstChild);
+        else host.appendChild(s);
+        st.sheets.push({ el: s, def: def, t: '', o: '' });
+      }
+    };
+    // A table card shows one face: only that one gets sheets. A thick card is seen from every side, and so is
+    // a back-only card (pickers turn those over to show that both sides are the same).
+    const backOnly = el.classList.contains('card--back-only');
+    const front = el.querySelector('.card__front');
+    const back = el.querySelector('.card__back');
+    if (front && (thick || backOnly || !down)) {
+      if (backOnly) {
+        if (imageBack) add(front, SHEETS.back);
+      } else add(front, el.getAttribute('data-face') === 'pips' ? SHEETS.pips : SHEETS.window);
+    }
+    if (back && imageBack && (thick || backOnly || down)) add(back, SHEETS.back);
+  }
+
+  /**
+   * Live foil. Call it for a hologram card whenever the light on it changes — every frame while the card
+   * moves is fine — and once with null when the card comes to rest.
+   *
+   *   foil(el, x, y, o, edge?) -> el
+   *     x, y   where the light is on the face the viewer sees, 0..1 from its left / top edge (0.5, 0.5 =
+   *            straight on; values outside are clamped). The rainbow slides with it, the sparkles twinkle as
+   *            it moves and, on a thick card, a gleam crosses the figure as x goes from 0 to 1. What matters is
+   *            that x and y CHANGE as the card moves or tilts: a light that stands still is a still picture.
+   *     o      0..1, how alive the foil is (0 = the resting look, 1 = vivid). Fade it in and out over a few
+   *            frames; around 0.6 is plenty for a card that is merely lifted.
+   *     edge   optional, 0..1: how far the card is turned away from the viewer (0 = facing, 1 = edge-on; for
+   *            example 1 - |cos(yaw) * cos(pitch)|). Only a thick window card uses it: its floating planes sink
+   *            back onto the card as it goes from 0.2 to 0.8. Leave it out for cards on the table.
+   *   foil(el, null) -> el    back to rest: the sheets are removed, the planes of a thick card float again.
+   *
+   * The first call with o > 0 builds the card's sheets and sets the class .is-holo on it; they follow the card
+   * when it is turned over, changes its back or its style, and they stay (invisible at o = 0) until
+   * foil(el, null). Nothing happens for a Classic card, and with <html data-effects="low"> no sheets are made
+   * (edge still works): the owner need not check either. Reduced motion is the owner's call: foil() does
+   * what it is told.
+   */
+  function foil(el, x, y, o, edge) {
+    if (!el || !el.classList || !doc) return el;
+    let st = liveCards.get(el);
+    if (x === null || x === undefined || el.getAttribute('data-style') !== 'holo') {
+      if (st) {
+        removeSheets(st);
+        clearDepth(st);
+        liveCards.delete(el);
+        el.classList.remove('is-holo');
+      }
+      return el;
+    }
+    const sig = foilSignature(el);
+    if (!st) {
+      const front = el.querySelector('.card__front');
+      // (only a thick court or ace has planes at different depths: see applyDepth)
+      const deep = !!front && el.classList.contains('card--thick') && !el.classList.contains('card--back-only') &&
+        el.getAttribute('data-face') !== 'pips';
+      st = {
+        sig: '', lit: false, built: false, sheets: [], hosts: [], front: front, deep: deep, depth: -1,
+        ink: deep ? front.querySelector('.card__ink') : null, fig: deep ? front.querySelector('.card__fig') : null, spark: null,
+      };
+      liveCards.set(el, st);
+    }
+    const lit = doc.documentElement.getAttribute('data-effects') !== 'low';
+    if (st.sig !== sig || st.lit !== lit) {
+      removeSheets(st);
+      st.sig = sig;
+      st.lit = lit;
+      st.built = false;
+      el.classList.remove('is-holo');
+    }
+    if (edge !== undefined && edge !== null) setDepth(st, clamp01(Number(edge) || 0));
+    const lx = clamp01(Number(x) || 0);
+    const ly = clamp01(Number(y) || 0);
+    const lo = clamp01(Number(o) || 0);
+    // The sheets come with the first light: a card that is only told its edge (o = 0) stays as it is.
+    if (lit && !st.built && lo > 0) {
+      buildSheets(el, st);
+      st.built = true;
+      el.classList.add('is-holo');
+      applyDepth(st); // (the sparkles' plane has only just been made)
+    }
+    for (let i = 0; i < st.sheets.length; i++) {
+      const s = st.sheets[i];
+      const d = s.def;
+      let a = lo * d.k;
+      if (d.tw !== undefined) a *= 0.5 + 0.5 * Math.sin(((lx * 900 + ly * 630 + d.tw) * Math.PI) / 180);
+      if (d.peak !== undefined) a *= Math.max(0, 1 - Math.abs(lx - d.peak) / 0.45);
+      const op = String(Math.round(a * 100) / 100);
+      if (d.m !== undefined) {
+        const t = 'translate(' + Math.round((lx - 0.5) * d.m * 10) / 10 + '%,' + Math.round((ly - 0.5) * d.m * 10) / 10 + '%)' +
+          (d.big ? ' scale(2)' : '');
+        if (t !== s.t) {
+          s.el.style.transform = t;
+          s.t = t;
+        }
+      }
+      if (op !== s.o) {
+        s.el.style.opacity = op;
+        s.o = op;
+      }
+    }
     return el;
   }
 
@@ -1057,18 +2042,38 @@
     DEFAULT_BACK: DEFAULT_BACK,
     SUITS: SUITS.slice(),
     COMPACT_BELOW: COMPACT_BELOW,
+    STYLES: STYLES.slice(),
+    DEFAULT_STYLE: DEFAULT_STYLE,
+    HOLO: HOLO_LAYOUT,
     create: create,
     createBackOnly: createBackOnly,
     setBack: setBack,
+    setStyle: setStyle,
+    styleOf: function (el) {
+      return el && el.getAttribute && el.getAttribute('data-style') === 'holo' ? 'holo' : 'classic';
+    },
+    currentStyle: currentStyle,
+    foil: foil,
     setFaceUp: setFaceUp,
     isFaceUp: isFaceUp,
     suitSvg: suitSvg,
     label: label,
     info: info,
     backUrl: backUrl,
+    preload: preload,
+    preloaded: preloaded,
     ensureAssets: ensureAssets,
   };
 
-  // Inject the art as soon as the script runs so the first card paints complete.
-  if (doc) ensureAssets();
+  if (SOL.Bus && typeof SOL.Bus.on === 'function') {
+    SOL.Bus.on('settings:change', function (p) {
+      if (!p || p.key === 'cardStyle') followSetting();
+    });
+  }
+
+  // Inject the art as soon as the script runs so the first card paints complete, and start fetching the images.
+  if (doc) {
+    ensureAssets();
+    preload();
+  }
 })(typeof window !== 'undefined' ? window : globalThis);
