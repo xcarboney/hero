@@ -139,7 +139,9 @@
 /*
  * While cards rest on the stock its slot is the visible edge of the pile: the top cards sit a few px up and
  * to the left (the pile's thickness), the slot shows as a sliver of stacked paper below and to the right.
- * (The cards deep inside the pile are not rendered at all — see Sprite.cover in board.js.)
+ * (The cards deep inside the pile are not rendered at all — see Sprite.cover in board.js. And the class is
+ * not set while the cards cannot be seen at start-up — .cards.is-waiting, and the fade of .cards.is-entering,
+ * both above: the slot is a plain slot then, not a bare block of paper.)
  */
 .pile--stock.is-stacked {
   background:

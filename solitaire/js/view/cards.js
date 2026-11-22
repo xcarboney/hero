@@ -70,6 +70,11 @@
  * are not displayed on a smaller card) with the sliding rainbow blended into them, so every facet answers the
  * light in its own colour (cards.css: "live foil of a large card"). Nothing happens for a Classic card or
  * with <html data-effects="low">. Custom properties on .card do NOT drive the foil.
+ * No filter runs on anything that moves (HOLO.md 5) — with one exception that is meant: the two gleam copies
+ * of the figure on a thick card (.card__sheet--glow / --glow-b, the <b> inside each) are brightened with a CSS
+ * filter. It is on an inner box without a layer of its own, so it is baked into the sheet's texture when the
+ * sheet is rastered and costs nothing per frame (measured; the reasoning and the numbers are at that rule in
+ * cards.css, "The figure's own light"). Do not take it for an oversight, and do not add another.
  *
  * The two picture backs carry a fine rim of pale gold just inside the edge (cards.css), in either style, so
  * face-down cards that lie on each other keep their outlines.
@@ -1296,6 +1301,9 @@
       artUrl(IMAGE_BACKS[id], large) + '")}').join('');
   }
 
+  // style -> true once this page has asked for that style's part of the art: ensureAssets() looks after it from then on
+  const artInUse = {};
+
   /**
    * Injects, once, what only hologram cards need: their sprite and their faces (#sol-card-sprite-holo,
    * #sol-card-faces-holo: see "sprite") and a <style> (#sol-card-holo) with the figure of every window card
@@ -1304,6 +1312,7 @@
    */
   function ensureHoloAssets() {
     if (!doc) return;
+    artInUse.holo = true;
     if (!doc.getElementById('sol-card-holo')) {
       const style = doc.createElement('style');
       style.id = 'sol-card-holo';
@@ -1321,7 +1330,9 @@
    * ever shows hologram cards never gets them.
    */
   function ensureClassicAssets() {
-    if (doc) injectSvg('sol-card-faces', true, classicFacesMarkup);
+    if (!doc) return;
+    artInUse.classic = true;
+    injectSvg('sol-card-faces', true, classicFacesMarkup);
   }
 
   // ------------------------------------------------------------------ hologram style: loading the images
@@ -1471,9 +1482,12 @@
    * waiting for the promise, because the promise can be late by a whole frame: it resolves in a task of its
    * own, and after a busy start-up the browser renders a frame before it gets round to that task — although
    * the files were in all along (measured over reloads at 4x CPU throttle: the cards 60 to 220 ms late in six
-   * starts out of sixteen). A file that has arrived is painted with the frame it is first used in: the browser
-   * decodes it for that frame if preload()'s own decode has not finished.
-   * False before preload() was ever called for this style.
+   * starts out of sixteen). A file that has arrived is painted with the frame it is first used in: Chromium —
+   * the WebView of the Android app, Chrome — decodes a picture of this size for the frame that needs it if
+   * preload()'s own decode has not finished (checked frame by frame, with the files delayed; other engines
+   * were not checked and may fill a picture in a frame late).
+   * Like preload() it speaks of the set that was asked for last: after preload({ style: 'holo' }) that is the
+   * hologram set, whatever the setting. False before preload() was ever called for the style in use.
    */
   function preloaded() {
     if (!doc || typeof root.Image !== 'function') return true;
@@ -1505,7 +1519,8 @@
    * the card style in use needs — ensureHoloAssets() or ensureClassicAssets(). The other style's part is not
    * built here: it comes with the first card of that style (markStyle()), so a start-up pays for one style.
    * Safe to call before <body> exists (the <svg> elements are added on DOM ready) and self-healing: if
-   * something wiped the document, the next call puts the assets back.
+   * something wiped the document, the next call puts the assets back — those of the style in use and those
+   * of the other style if this page has used it (artInUse), so cards of both styles get their faces back.
    */
   function ensureAssets() {
     if (!doc) return;
@@ -1519,8 +1534,9 @@
       (doc.head || doc.documentElement).appendChild(style);
     }
     injectSvg('sol-card-sprite', false, spriteMarkup);
-    if (currentStyle() === 'holo') ensureHoloAssets();
-    else ensureClassicAssets();
+    const holo = currentStyle() === 'holo';
+    if (holo || artInUse.holo) ensureHoloAssets();
+    if (!holo || artInUse.classic) ensureClassicAssets();
   }
 
   // ------------------------------------------------------------------ thickness (edge walls)
@@ -1791,7 +1807,8 @@
    * in (screen, color-dodge or color-burn). No mask, clip-path or filter is ever applied while compositing: a
    * masked sheet on the figure and a clip-path round the sparkles cost a thick card a third of its frame rate
    * when they were tried (16.7 -> 22.9 ms per frame at 4x CPU throttle; without them the live foil measures
-   * the same as no foil).
+   * the same as no foil). The filter and the mask of the two gleam copies ('glow', 'glow-b': `inner`) are on
+   * the inner <b>, which is rastered into its sheet once — the deliberate exception described in the header.
    */
   const SHEETS = {
     window: [

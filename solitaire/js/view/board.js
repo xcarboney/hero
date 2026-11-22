@@ -341,6 +341,7 @@
     dealAhead: 5, // cards kept rendered on top of the deck while dealing
     dealFlipMs: 270,
     veilMs: 1600, // the cards are shown after this long at the latest, pictures in or not (see veilUntilArt())
+    enterMs: 320, // the fade of a restored table (board-enter in board.css; see settleIn())
     // ---- glide (layout changes, neighbours)
     glideStiffness: 230,
     glideDamping: 27,
@@ -393,6 +394,7 @@
   let veiled = false; // the cards are out of sight until their pictures are in (see veilUntilArt())
   let stopVeilWatch = null; // …and this frame subscription looks for them meanwhile
   let settleGen = -1; // choreoGen of a restore() that waits for the veil to lift before it settles in
+  let entering = 0; // timer: a restored table is fading in (settleIn(), onEnterAnim()), its cards cannot be seen yet
   let zSeq = 0;
 
   const dirty = []; // sprites whose styles need writing
@@ -1324,8 +1326,12 @@
       resting++;
     }
     // The stock's slot doubles as the visible edge of the pile (css: .pile--stock.is-stacked): the top cards
-    // sit a few px up and to the left of it, the covered ones below are not drawn.
-    if (pileId === 'stock' && pileEls.stock) pileEls.stock.classList.toggle('is-stacked', resting > 0);
+    // sit a few px up and to the left of it, the covered ones below are not drawn. Not while the cards cannot
+    // be seen — out of sight at start-up (veilUntilArt) or still fading in (settleIn): the edge of a pile
+    // with no cards on it is a bare cream block.
+    if (pileId === 'stock' && pileEls.stock) {
+      pileEls.stock.classList.toggle('is-stacked', resting > 0 && !veiled && !entering);
+    }
   }
 
   function nextFlyZ() {
@@ -1914,6 +1920,9 @@
     deckSnap();
     flush();
     veilUntilArt();
+    cardsEl.addEventListener('animationstart', onEnterAnim);
+    cardsEl.addEventListener('animationend', onEnterAnim);
+    cardsEl.addEventListener('animationcancel', onEnterAnim);
 
     if (typeof root.ResizeObserver === 'function') {
       resizeObserver = new root.ResizeObserver(function () {
@@ -2151,6 +2160,7 @@
       stopVeilWatch = null;
     }
     cardsEl.classList.remove('is-waiting');
+    settlePile('stock'); // (with its cards in sight the stock's slot is the edge of the pile again)
     // a table that was restored meanwhile settles in now — unless something else has taken the cards since
     if (settleGen === choreoGen && state && !deckMode) settleIn();
     settleGen = -1;
@@ -2185,6 +2195,34 @@
       }
     }
     flush();
+    // The cards fade in from nothing: the stock's slot is the edge of its pile again (settlePile) when they
+    // are there, not a bare block before they can be seen. The fade begins with the first frame that shows
+    // the cards, and after a busy start-up that can be long after this call — so the fade's own events time
+    // the wait (onEnterAnim); this timer is for a browser that sends none.
+    enterWait(TUNE.enterMs);
+  }
+
+  function enterWait(ms) {
+    if (entering) root.clearTimeout(entering);
+    entering = root.setTimeout(enterDone, ms);
+    settlePile('stock');
+  }
+
+  function enterDone() {
+    if (!entering) return;
+    root.clearTimeout(entering);
+    entering = 0;
+    settlePile('stock');
+  }
+
+  /** animationstart / animationend / animationcancel of the cards layer's fade (board-enter in board.css). */
+  function onEnterAnim(e) {
+    if (e.target !== cardsEl || e.animationName !== 'board-enter') return;
+    // Its start counts the wait anew (and takes the mark back if the timer has run out meanwhile: no frame
+    // has been shown in between); its end, or its being dropped, ends the wait. The longer timer is the net
+    // for an end that never comes.
+    if (e.type === 'animationstart') enterWait(TUNE.enterMs * 3);
+    else enterDone();
   }
 
   // ------------------------------------------------------------------ effects

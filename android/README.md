@@ -22,8 +22,10 @@ merged into the APK as `assets/solitaire/`.
   web version uses (`sw.js`, the web manifest, `icons/`). Everything else under `../solitaire`
   ships; the list is in `app/build.gradle.kts`.
 - The card art ships too: `../solitaire/art/` (WebP pictures of the hologram card style, 4.7 MB)
-  becomes `assets/solitaire/art/`, which makes the debug APK about 7.9 MB. The asset loader
-  serves `.webp` as `image/webp`; `GameAssetTypesTest` checks that.
+  becomes `assets/solitaire/art/`. The pictures are stored as they are, so they add their full
+  4.7 MB to every APK and are most of it: a debug APK is a little under 8 MB, an unsigned release
+  APK a little over 5 MB. The asset loader serves `.webp` as `image/webp`; `GameAssetTypesTest`
+  checks that.
 - The task is incremental: change a file of the game, build again, and the APK has the change.
 - The build fails with "Web game not found" if `../solitaire/index.html` is missing, so check
   out the whole repository, not only `android/`.

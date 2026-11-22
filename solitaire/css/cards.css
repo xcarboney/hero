@@ -624,7 +624,9 @@
  * property on .card is involved: a property set there is inherited through the whole card, and re-inheriting
  * it on every frame cost fourteen times the style work of writing two properties on three boxes.
  * Where a sheet is blended (screen, color-dodge, color-burn) it is blended into the box it lies in: one flat,
- * isolated box, never across 3D planes. No sheet is masked, clipped by a path or filtered while compositing.
+ * isolated box, never across 3D planes. No sheet is masked, clipped by a path or filtered while compositing
+ * (the two gleam copies of a thick card carry a filter that is baked into their sheet when it is rastered: the
+ * one deliberate exception, reasoned at "The figure's own light" below).
  * A card laid out 130px wide or wider gets a finer foil — facets that stay in place, the rainbow blended into
  * them: "live foil of a large card", after the sheets.
  *
@@ -982,6 +984,19 @@
  * left of the card and the other while it is on the right, so a gleam seems to cross the figure. The copy is
  * an inner box of its sheet: filter and mask are baked into the sheet's texture once, and the compositor only
  * ever fades a plain layer. They do not slide.
+ *
+ * THE ONE EXCEPTION to "no filter on anything that moves" (HOLO.md 5, and "not filtered while compositing" in
+ * the overview above), kept on purpose: the inner <b> of these two sheets carries a filter (and a mask) on a
+ * card that turns. The rule exists because a filter on a box that is composited by itself is run again in
+ * every frame the box moves or fades in. This <b> is not such a box: it has no layer of its own (no transform,
+ * opacity, animation or will-change), so the browser applies filter and mask once, when it rasters the sheet
+ * around it, and what turns and fades afterwards is that finished texture. Measured in the 3D preview (a lit
+ * King of Hearts turned by a finger, 4x CPU throttle, five interleaved rounds, headless Chromium): 17.2 ms per
+ * frame with the filter against 16.9 ms without, p95 16.8 ms either way, the same 81 compositor layers. Taking
+ * the filter out is not free: it IS the gleam (without it the band is plainly duller), and the alternative —
+ * a second, pre-brightened set of the sixteen figure files — would add megabytes to every APK.
+ * To keep the exception harmless: never give the <b> a transform, an opacity, an animation or will-change,
+ * and never put a filter on the sheet itself or on any other box of a card.
  */
 .card__sheet--glow,
 .card__sheet--glow-b {

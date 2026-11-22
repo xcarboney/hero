@@ -80,7 +80,9 @@
  * - "Card style" (Table group: Hologram / Classic, the 'cardStyle' setting) applies without a reload: SOL.Cards
  *   switches every card itself, the menu's fan and the back picker included. Choosing Hologram first lets
  *   SOL.Cards.preload({ style: 'holo' }) fetch the pictures (STYLE_WAIT_MS at most) and stores the setting
- *   when they are in; the control shows the choice at once. "Card back" lists every back of SOL.Cards.BACKS.
+ *   when they are in; the control shows the choice at once, and the hint beside the label describes the
+ *   chosen style ("Foil and hologram figures" / "The drawn cards, no foil"). "Card back" lists every
+ *   back of SOL.Cards.BACKS.
  * - The one-time tip: "Tip: touch and hold a card to see it in 3D" ("press and hold" without touch) as a
  *   toast, once per installation (SOL.Store 'tips.v1' = { hold: true }), 1.2 s after the table has come to
  *   rest with nothing open on it: not during a deal, not over a panel, the "no more moves" card, the win or
@@ -2176,6 +2178,15 @@
     // control shows the choice right away.
     let styleWant = null; // 'holo' while that choice waits for its pictures
     const styleNow = () => styleWant || (sGet('cardStyle', 'holo') === 'classic' ? 'classic' : 'holo');
+    // The hint says what the chosen style is, in words that hold at every effects level (the foil of a
+    // hologram card only moves with full effects, so "shimmers" would not) and that fit on one line beside
+    // the label on a screen 320 px wide.
+    const styleHint = h('span.ui-field__hint', { id: layer.titleId + '-style', 'data-settings': 'style-hint' }, '');
+    const syncStyleHint = () => {
+      styleHint.textContent = styleNow() === 'classic' ? 'The drawn cards, no foil' : 'Foil and hologram figures';
+    };
+    syncs.push(syncStyleHint);
+    syncStyleHint();
     const styleSeg = hasSetting('cardStyle')
       ? segmented({
         label: 'Card style',
@@ -2186,9 +2197,11 @@
           if (v !== 'holo' || !C || typeof C.preload !== 'function') {
             styleWant = null;
             sSet('cardStyle', v);
+            syncStyleHint();
             return;
           }
           styleWant = 'holo';
+          syncStyleHint(); // (like the control, the hint shows the choice at once)
           let stored = false;
           const store = () => {
             if (stored || styleWant !== 'holo') return;
@@ -2206,11 +2219,12 @@
         },
       })
       : null;
+    if (styleSeg) styleSeg.el.setAttribute('aria-describedby', styleHint.id); // read out with the group
 
     c.appendChild(h('h3.ui-sec', null, 'Table'));
     c.appendChild(h('div.ui-group', null,
       field('Table theme', null, add(themeSwatches()), null, 'theme'),
-      styleSeg ? field('Card style', 'Shimmers as cards move', add(styleSeg), null, 'cardStyle') : null,
+      styleSeg ? field('Card style', styleHint, add(styleSeg), null, 'cardStyle') : null,
       field('Card back', null, add(backPicker()), null, 'cardBack')));
 
     // ---- motion
